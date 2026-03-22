@@ -1171,17 +1171,11 @@ LoadGame(void)
 	case GAME_LCS: FileLoader::LoadLevel("data/gta_lcs.dat"); break;
 	case GAME_VCS: FileLoader::LoadLevel("data/gta_vcs.dat"); break;
 	}
-
-	debug("LoadLevel done, starting post-load init\n");
 	InitLodLookup();
-	debug("InitLodLookup done\n");
 	InitObjectCategories();
-	debug("InitObjectCategories done\n");
 	LoadFavourites();
-	debug("LoadFavourites done\n");
 	// InitPreviewRenderer called lazily on first use
 	InitSectors();
-	debug("InitSectors done\n");
 
 	CPtrNode *p;
 	ObjectInst *inst;
@@ -1191,7 +1185,6 @@ LoadGame(void)
 		InsertInstIntoSectors(inst);
 		instCount++;
 	}
-	debug("InsertInstIntoSectors done (%d instances)\n", instCount);
 
 	// hide the islands
 	ObjectDef *obj;

@@ -670,7 +670,6 @@ LoadScene(const char *filename)
 	tmpInsts.clear();
 	iplInstCounter = 0;
 	LoadDataFile(filename, iplDesc);
-	debug("  parsed %d instances\n", (int)tmpInsts.size());
 
 	if(isSA()){
 		int i = -1;
@@ -680,11 +679,8 @@ LoadScene(const char *filename)
 			memcpy(ia, tmpInsts.data(), tmpInsts.size()*sizeof(ObjectInst*));
 		}
 
-		debug("  SetupRelatedIPLs...\n");
 		SetupRelatedIPLs(filename, i);
-		debug("  SetupBigBuildings...\n");
 		SetupBigBuildings();
-		debug("  done\n");
 	}
 }
 
@@ -832,9 +828,7 @@ LoadLevel(const char *filename)
 
 			strncpy(path, line+4, 256);
 			currentFile = NewGameFile(path);
-			debug("Loading scene %s\n", path);
 			LoadScene(path);
-			debug("Scene loaded OK\n");
 		}else if(strncmp(line, "MAPZONE", 7) == 0){
 //			debug("MAPZONE\n");
 			strncpy(path, line+8, 256);

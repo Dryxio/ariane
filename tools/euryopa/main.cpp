@@ -1,11 +1,5 @@
 #include "euryopa.h"
 
-#ifdef _WIN32
-#include <Windows.h>
-#include <exception>
-#include <signal.h>
-#endif
-
 //#define XINPUT
 #ifdef XINPUT
 #include <Xinput.h>
@@ -18,76 +12,6 @@ SceneGlobals Scene;
 rw::EngineOpenParams engineOpenParams;
 rw::Light *pAmbient, *pDirect;
 rw::Texture *whiteTex;
-
-#ifdef _WIN32
-static LONG WINAPI
-EuryopaUnhandledExceptionFilter(EXCEPTION_POINTERS *info)
-{
-	DWORD code = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionCode : 0;
-	void *addr = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionAddress : nil;
-	fprintf(stderr, "fatal: unhandled exception 0x%08lX at %p\n", code, addr);
-	fflush(stdout);
-	fflush(stderr);
-	return EXCEPTION_CONTINUE_SEARCH;
-}
-
-static void
-EuryopaTerminateHandler(void)
-{
-	fprintf(stderr, "fatal: std::terminate called\n");
-	fflush(stdout);
-	fflush(stderr);
-	abort();
-}
-
-static void
-EuryopaAbortHandler(int sig)
-{
-	fprintf(stderr, "fatal: signal %d\n", sig);
-	fflush(stdout);
-	fflush(stderr);
-	signal(sig, SIG_DFL);
-	raise(sig);
-}
-
-static void
-InitWindowsFileLogging(void)
-{
-	char exepath[MAX_PATH];
-	char cwd[MAX_PATH];
-	char logpath[MAX_PATH];
-	char *slash;
-	SYSTEMTIME st;
-
-	if(GetModuleFileNameA(nil, exepath, sizeof(exepath)) == 0)
-		return;
-
-	slash = strrchr(exepath, '\\');
-	if(slash)
-		slash[1] = '\0';
-
-	snprintf(logpath, sizeof(logpath), "%sariane_pe.log", exepath);
-	if(freopen(logpath, "w", stdout) == nil)
-		return;
-	freopen(logpath, "a", stderr);
-	setvbuf(stdout, nil, _IONBF, 0);
-	setvbuf(stderr, nil, _IONBF, 0);
-
-	GetLocalTime(&st);
-	fprintf(stdout, "==== ariane PE log %04d-%02d-%02d %02d:%02d:%02d ====\n",
-		st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
-	fprintf(stdout, "exe dir: %s\n", exepath);
-	if(GetCurrentDirectoryA(sizeof(cwd), cwd))
-		fprintf(stdout, "cwd: %s\n", cwd);
-	fflush(stdout);
-
-	SetUnhandledExceptionFilter(EuryopaUnhandledExceptionFilter);
-	std::set_terminate(EuryopaTerminateHandler);
-	signal(SIGABRT, EuryopaAbortHandler);
-	signal(SIGSEGV, EuryopaAbortHandler);
-	signal(SIGILL, EuryopaAbortHandler);
-}
-#endif
 
 // TODO: print to log as well
 void
@@ -394,9 +318,6 @@ AppEventHandler(sk::Event e, void *param)
 		freopen("CONOUT$", "w", stdout);
 		freopen("CONOUT$", "w", stderr);
 */
-#ifdef _WIN32
-		InitWindowsFileLogging();
-#endif
 		Init();
 		plAttachInput();
 		return EVENTPROCESSED;
