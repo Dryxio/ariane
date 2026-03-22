@@ -13,6 +13,125 @@ static bool showViewWindow;
 static bool showRenderingWindow;
 static bool showBrowserWindow;
 
+static bool
+getEditorRootDirectory(char *dir, size_t size)
+{
+	if(size == 0)
+		return false;
+
+#ifdef _WIN32
+	DWORD len = GetModuleFileNameA(nil, dir, (DWORD)size);
+	if(len > 0 && len < size){
+		for(int i = (int)len - 1; i >= 0; i--){
+			if(dir[i] == '\\' || dir[i] == '/'){
+				dir[i] = '\0';
+				return true;
+			}
+		}
+	}
+
+	len = GetCurrentDirectoryA((DWORD)size, dir);
+	return len > 0 && len < size;
+#else
+	strncpy(dir, ".", size);
+	dir[size - 1] = '\0';
+	return true;
+#endif
+}
+
+static bool
+buildPath(char *dst, size_t size, const char *dir, const char *name)
+{
+	if(size == 0)
+		return false;
+	if(dir == nil || dir[0] == '\0')
+		return snprintf(dst, size, "%s", name) < (int)size;
+
+	size_t len = strlen(dir);
+#ifdef _WIN32
+	const char *sep = (dir[len-1] == '\\' || dir[len-1] == '/') ? "" : "\\";
+#else
+	const char *sep = (dir[len-1] == '/') ? "" : "/";
+#endif
+	return snprintf(dst, size, "%s%s%s", dir, sep, name) < (int)size;
+}
+
+#ifdef _WIN32
+static bool
+findFileRecursive(const char *dir, const char *name)
+{
+	char searchPath[2048];
+	if(!buildPath(searchPath, sizeof(searchPath), dir, "*"))
+		return false;
+
+	WIN32_FIND_DATAA entry;
+	HANDLE handle = FindFirstFileA(searchPath, &entry);
+	if(handle == INVALID_HANDLE_VALUE)
+		return false;
+
+	bool found = false;
+	do{
+		if(strcmp(entry.cFileName, ".") == 0 || strcmp(entry.cFileName, "..") == 0)
+			continue;
+
+		if(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY){
+			if(entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+				continue;
+
+			char childDir[2048];
+			if(buildPath(childDir, sizeof(childDir), dir, entry.cFileName) &&
+			   findFileRecursive(childDir, name)){
+				found = true;
+				break;
+			}
+		}else if(_stricmp(entry.cFileName, name) == 0){
+			found = true;
+			break;
+		}
+	}while(FindNextFileA(handle, &entry));
+
+	FindClose(handle);
+	return found;
+}
+#endif
+
+static const char*
+getRequiredTeleportAsiName(void)
+{
+	if(isIII()) return "ariane_teleport.III.asi";
+	if(isVC()) return "ariane_teleport.VC.asi";
+	if(isSA()) return "ariane_teleport.SA.asi";
+	return nil;
+}
+
+static bool
+warnMissingTeleportAsi(const char *actionName)
+{
+	const char *asiName = getRequiredTeleportAsiName();
+	if(asiName == nil)
+		return true;
+
+	char rootDir[2048];
+	if(!getEditorRootDirectory(rootDir, sizeof(rootDir)))
+		return true;
+
+#ifdef _WIN32
+	if(findFileRecursive(rootDir, asiName))
+		return true;
+
+	char message[1024];
+	snprintf(message, sizeof(message),
+		"%s will not work because %s was not found under:\n%s\n\n"
+		"Install the Ariane plugin in the game folder (root or subfolder) and try again.",
+		actionName, asiName, rootDir);
+	MessageBoxA(nil, message, "Ariane", MB_OK | MB_ICONWARNING);
+	Toast(TOAST_SAVE, "%s will not work: missing %s", actionName, asiName);
+	return false;
+#else
+	return true;
+#endif
+}
+
 // Toast notification system
 #define TOAST_MAX 5
 #define TOAST_DURATION 2.0f
@@ -247,15 +366,17 @@ saveAllIpls(void)
 static void
 testInGame(void)
 {
-	// Save all IPLs first
-	saveAllIpls();
-	Toast(TOAST_SAVE, "Saved all IPL files");
-
 	// Only III/VC/SA supported
 	if(gameversion != GAME_III && gameversion != GAME_VC && gameversion != GAME_SA){
 		Toast(TOAST_SAVE, "Test in Game: unsupported game");
 		return;
 	}
+	if(!warnMissingTeleportAsi("Test in Game"))
+		return;
+
+	// Save all IPLs first
+	saveAllIpls();
+	Toast(TOAST_SAVE, "Saved all IPL files");
 
 	// Camera position -> snap to ground
 	rw::V3d pos = TheCamera.m_position;
@@ -267,8 +388,16 @@ testInGame(void)
 	// Camera heading
 	float heading = TheCamera.getHeading();
 
-	// Write teleport file in game root (CWD)
-	FILE *f = fopen("ariane_teleport.txt", "w");
+	char rootDir[2048];
+	char teleportPath[2048];
+	if(!getEditorRootDirectory(rootDir, sizeof(rootDir)) ||
+	   !buildPath(teleportPath, sizeof(teleportPath), rootDir, "ariane_teleport.txt")){
+		Toast(TOAST_SAVE, "Failed to resolve game folder");
+		return;
+	}
+
+	// Write the teleport file next to the editor executable.
+	FILE *f = fopen(teleportPath, "w");
 	if(f){
 		fprintf(f, "%f %f %f %f %d\n", pos.x, pos.y, pos.z, heading, currentArea);
 		fclose(f);
@@ -284,12 +413,18 @@ testInGame(void)
 	else if(isSA()) exeName = "gta_sa.exe";
 
 #ifdef _WIN32
+	char exePath[2048];
+	if(!buildPath(exePath, sizeof(exePath), rootDir, exeName)){
+		Toast(TOAST_SAVE, "Failed to resolve %s", exeName);
+		return;
+	}
+
 	STARTUPINFOA si;
 	PROCESS_INFORMATION pi;
 	memset(&si, 0, sizeof(si));
 	si.cb = sizeof(si);
 	memset(&pi, 0, sizeof(pi));
-	if(CreateProcessA(exeName, NULL, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)){
+	if(CreateProcessA(exePath, NULL, NULL, NULL, FALSE, 0, NULL, rootDir, &si, &pi)){
 		CloseHandle(pi.hProcess);
 		CloseHandle(pi.hThread);
 		Toast(TOAST_SAVE, "Launching %s...", exeName);
@@ -306,6 +441,18 @@ hotReloadIpls(void)
 {
 	if(!isSA()){
 		Toast(TOAST_SAVE, "Hot Reload: only supported for SA");
+		return;
+	}
+	if(!warnMissingTeleportAsi("Hot Reload"))
+		return;
+
+	char rootDir[2048];
+	char reloadPath[2048];
+	char entityReloadPath[2048];
+	if(!getEditorRootDirectory(rootDir, sizeof(rootDir)) ||
+	   !buildPath(reloadPath, sizeof(reloadPath), rootDir, "ariane_reload.txt") ||
+	   !buildPath(entityReloadPath, sizeof(entityReloadPath), rootDir, "ariane_reload_entities.txt")){
+		Toast(TOAST_SAVE, "Hot Reload: failed to resolve game folder");
 		return;
 	}
 
@@ -345,7 +492,7 @@ hotReloadIpls(void)
 	if(numNames > 0){
 		FileLoader::SaveBinaryIpls();
 
-		FILE *f = fopen("ariane_reload.txt", "w");
+		FILE *f = fopen(reloadPath, "w");
 		if(f){
 			for(int i = 0; i < numNames; i++)
 				fprintf(f, "%s\n", iplNames[i]);
@@ -358,7 +505,7 @@ hotReloadIpls(void)
 	// Streaming moves also go through this path as a runtime fallback:
 	// if binary IMG patching/reload fails for a given IPL, the live entity
 	// still gets moved in-game.
-	FILE *fe = fopen("ariane_reload_entities.txt", "w");
+	FILE *fe = fopen(entityReloadPath, "w");
 	if(fe){
 		for(p = instances.first; p; p = p->next){
 			ObjectInst *inst = (ObjectInst*)p->item;
@@ -430,7 +577,7 @@ hotReloadIpls(void)
 		fclose(fe);
 
 		if(numEntityCmds == 0)
-			remove("ariane_reload_entities.txt");
+			remove(entityReloadPath);
 	}
 
 	if(numStreamingIpls == 0 && numEntityCmds == 0){

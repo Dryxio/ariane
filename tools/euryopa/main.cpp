@@ -88,6 +88,111 @@ clampFloat(float f, float min, float max)
 	return f;
 }
 
+static void
+ClearEditorInputState(void)
+{
+	memset(CPad::oldKeystates, 0, sizeof(CPad::oldKeystates));
+	memset(CPad::newKeystates, 0, sizeof(CPad::newKeystates));
+	memset(CPad::tempKeystates, 0, sizeof(CPad::tempKeystates));
+	memset(&CPad::oldMouseState, 0, sizeof(CPad::oldMouseState));
+	memset(&CPad::newMouseState, 0, sizeof(CPad::newMouseState));
+	memset(&CPad::tempMouseState, 0, sizeof(CPad::tempMouseState));
+	CPad::clickState = 0;
+	CPad::clickx = 0;
+	CPad::clicky = 0;
+	CPad::clickbtn = 0;
+	for(int i = 0; i < 2; i++){
+		CPad::Pads[i].OldState.Clear();
+		CPad::Pads[i].NewState.Clear();
+	}
+
+	if(ImGui::GetCurrentContext()){
+		ImGuiIO &io = ImGui::GetIO();
+		io.MouseDown[0] = false;
+		io.MouseDown[1] = false;
+		io.MouseDown[2] = false;
+		if(ImGui::IsKeyDown(ImGuiKey_LeftShift)) io.AddKeyEvent(ImGuiKey_LeftShift, false);
+		if(ImGui::IsKeyDown(ImGuiKey_RightShift)) io.AddKeyEvent(ImGuiKey_RightShift, false);
+		if(ImGui::IsKeyDown(ImGuiKey_LeftCtrl)) io.AddKeyEvent(ImGuiKey_LeftCtrl, false);
+		if(ImGui::IsKeyDown(ImGuiKey_RightCtrl)) io.AddKeyEvent(ImGuiKey_RightCtrl, false);
+		if(ImGui::IsKeyDown(ImGuiKey_LeftAlt)) io.AddKeyEvent(ImGuiKey_LeftAlt, false);
+		if(ImGui::IsKeyDown(ImGuiKey_RightAlt)) io.AddKeyEvent(ImGuiKey_RightAlt, false);
+		io.KeyShift = false;
+		io.KeyCtrl = false;
+		io.KeyAlt = false;
+		io.KeySuper = false;
+	}
+}
+
+#ifdef _WIN32
+static bool
+isEditorWindowActive(void)
+{
+#ifdef RW_D3D9
+	HWND hwnd = (HWND)engineOpenParams.window;
+	return hwnd && GetForegroundWindow() == hwnd;
+#else
+	return true;
+#endif
+}
+
+static bool
+isVirtualKeyDown(int vk)
+{
+	return (GetAsyncKeyState(vk) & 0x8000) != 0;
+}
+
+static void
+SyncEditorInputState(void)
+{
+	static bool hadFocus = true;
+
+	if(!isEditorWindowActive()){
+		if(hadFocus)
+			ClearEditorInputState();
+		hadFocus = false;
+		return;
+	}
+	hadFocus = true;
+
+	CPad::tempKeystates[KEY_LSHIFT] = isVirtualKeyDown(VK_LSHIFT);
+	CPad::tempKeystates[KEY_RSHIFT] = isVirtualKeyDown(VK_RSHIFT);
+	CPad::tempKeystates[KEY_LCTRL] = isVirtualKeyDown(VK_LCONTROL);
+	CPad::tempKeystates[KEY_RCTRL] = isVirtualKeyDown(VK_RCONTROL);
+	CPad::tempKeystates[KEY_LALT] = isVirtualKeyDown(VK_LMENU);
+	CPad::tempKeystates[KEY_RALT] = isVirtualKeyDown(VK_RMENU);
+
+	CPad::tempMouseState.btns =
+		(isVirtualKeyDown(VK_LBUTTON) ? 1 : 0) |
+		(isVirtualKeyDown(VK_MBUTTON) ? 2 : 0) |
+		(isVirtualKeyDown(VK_RBUTTON) ? 4 : 0);
+
+	if(ImGui::GetCurrentContext()){
+		ImGuiIO &io = ImGui::GetIO();
+		io.MouseDown[0] = !!(CPad::tempMouseState.btns & 1);
+		io.MouseDown[1] = !!(CPad::tempMouseState.btns & 4);
+		io.MouseDown[2] = !!(CPad::tempMouseState.btns & 2);
+		if(ImGui::IsKeyDown(ImGuiKey_LeftShift) != (CPad::tempKeystates[KEY_LSHIFT] != 0))
+			io.AddKeyEvent(ImGuiKey_LeftShift, CPad::tempKeystates[KEY_LSHIFT] != 0);
+		if(ImGui::IsKeyDown(ImGuiKey_RightShift) != (CPad::tempKeystates[KEY_RSHIFT] != 0))
+			io.AddKeyEvent(ImGuiKey_RightShift, CPad::tempKeystates[KEY_RSHIFT] != 0);
+		if(ImGui::IsKeyDown(ImGuiKey_LeftCtrl) != (CPad::tempKeystates[KEY_LCTRL] != 0))
+			io.AddKeyEvent(ImGuiKey_LeftCtrl, CPad::tempKeystates[KEY_LCTRL] != 0);
+		if(ImGui::IsKeyDown(ImGuiKey_RightCtrl) != (CPad::tempKeystates[KEY_RCTRL] != 0))
+			io.AddKeyEvent(ImGuiKey_RightCtrl, CPad::tempKeystates[KEY_RCTRL] != 0);
+		if(ImGui::IsKeyDown(ImGuiKey_LeftAlt) != (CPad::tempKeystates[KEY_LALT] != 0))
+			io.AddKeyEvent(ImGuiKey_LeftAlt, CPad::tempKeystates[KEY_LALT] != 0);
+		if(ImGui::IsKeyDown(ImGuiKey_RightAlt) != (CPad::tempKeystates[KEY_RALT] != 0))
+			io.AddKeyEvent(ImGuiKey_RightAlt, CPad::tempKeystates[KEY_RALT] != 0);
+	}
+}
+#else
+static void
+SyncEditorInputState(void)
+{
+}
+#endif
+
 #ifdef XINPUT
 int pads[4];
 int numPads;
@@ -360,6 +465,7 @@ AppEventHandler(sk::Event e, void *param)
 		}
 		break;
 	case IDLE:
+		SyncEditorInputState();
 		timeStep = *(float*)param;
 		Idle();
 		return EVENTPROCESSED;

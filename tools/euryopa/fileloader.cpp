@@ -675,6 +675,8 @@ LoadScene(const char *filename)
 		int i = -1;
 		if(tmpInsts.size()){
 			i = AddInstArraySlot((int)tmpInsts.size());
+			if(i < 0)
+				return;
 			ObjectInst **ia = GetInstArray(i);
 			memcpy(ia, tmpInsts.data(), tmpInsts.size()*sizeof(ObjectInst*));
 		}
