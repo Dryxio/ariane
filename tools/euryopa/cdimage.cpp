@@ -215,9 +215,12 @@ InitCdImage(CdImage *cdimg)
 	ColDef *col;
 	IplDef *ipl;
 
+	log("InitCdImage: %s (%d entries)\n", cdimg->name, cdimg->directorySize);
 	for(i = 0; i < cdimg->directorySize; i++){
 		DirEntry *de = &cdimg->directory[i];
 		idx = i | cdimg->index<<24;
+		log("InitCdImage entry: %s [%d/%d] type=%d name=%s size=%u pos=%u\n",
+			cdimg->name, i+1, cdimg->directorySize, de->filetype, de->name, de->size, de->position);
 		switch(de->filetype){
 		case FILE_MODEL:
 			obj = GetObjectDef(de->name, nil);
