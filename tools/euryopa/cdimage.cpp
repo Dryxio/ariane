@@ -246,6 +246,8 @@ InitCdImage(CdImage *cdimg)
 		case FILE_COL:
 			slot = AddColSlot(de->name);
 			col = GetColDef(slot);
+			if(col == nil)
+				break;
 			if(col->imageIndex >= 0){
 				log("warning: col %s appears multiple times\n", col->name);
 				de->overridden = 1;

@@ -31,6 +31,10 @@ AddColSlot(const char *name)
 	i = FindColSlot(name);
 	if(i >= 0)
 		return i;
+	if(numCols >= NUMCOLS){
+		log("warning: too many col slots (max %d), skipping %s\n", NUMCOLS, name);
+		return -1;
+	}
 	i = numCols++;
 	strncpy(collist[i].name, name, MODELNAMELEN);
 	collist[i].imageIndex = -1;
