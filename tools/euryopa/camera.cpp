@@ -130,7 +130,10 @@ CCamera::update(void)
 
 		rw::Frame *f = m_rwcam->getFrame();
 		if(f){
-			m_at = normalize(sub(m_target, m_position));
+			rw::V3d dir = sub(m_target, m_position);
+			if(length(dir) < 0.0001f)
+				dir = m_at;
+			m_at = normalize(dir);
 			f->matrix.lookAt(m_at, m_up);
 			f->matrix.pos = m_position;
 			f->updateObjects();
