@@ -2,9 +2,9 @@ name: Build Euryopa
 
 on:
   push:
-    branches: [master]
+    branches: [master, PE]
   pull_request:
-    branches: [master]
+    branches: [master, PE]
   workflow_dispatch:
 
 env:
