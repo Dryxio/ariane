@@ -222,7 +222,9 @@ SetupVisibilitySA(ObjectInst *inst, float camdist)
 	if(lodinst == nil)
 		return ret;
 
-	lodinst->m_numChildrenRendered++;
+	// Only visible HD children should suppress the fallback LOD.
+	if(ret == VIS_VISIBLE)
+		lodinst->m_numChildrenRendered++;
 	if(lodinst->m_numChildren > 1){
 		AddToLodRenderList(inst, camdist);
 		return VIS_INVISIBLE;
