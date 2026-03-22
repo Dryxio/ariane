@@ -7,6 +7,9 @@ on:
     branches: [master, PE]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 env:
   LIBRW: ${{ github.workspace }}/librw
 
