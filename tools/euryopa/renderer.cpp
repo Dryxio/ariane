@@ -494,7 +494,7 @@ BuildRenderList(void)
 	sortedInsts.clear();
 	lodList.clear();
 
-	rw::BBox frustBox = TheCamera.m_rwcam->frustumBoundBox;
+	rw::BBox frustBox = Scene.camera->frustumBoundBox;
 //	printf("%f %f %f    %f %f %f\n",
 //		frustBox.inf.x, frustBox.inf.y, frustBox.inf.z, 
 //		frustBox.sup.x, frustBox.sup.y, frustBox.sup.z);
@@ -519,7 +519,7 @@ BuildRenderList(void)
 				ScanInstList(&s->buildings, ProcessBuilding);
 				ScanInstList(&s->buildings_overlap, ProcessBuilding);
 			}
-		ScanInstList(&outOfBoundsSector.buildings, ProcessBigBuilding);
+		ScanInstList(&outOfBoundsSector.buildings, ProcessBuilding);
 	}
 	if(!gRenderOnlyHD){
 		for(x = xstart; x <= xend; x++)

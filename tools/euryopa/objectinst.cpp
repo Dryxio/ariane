@@ -73,23 +73,15 @@ ObjectInst::GetBoundRect(void)
 		return rect;
 	CColModel *col = obj->m_colModel;
 
-	v = col->boundingBox.min;
-	rw::V3d::transformPoints(&v, &v, 1, &m_matrix);
-	rect.ContainPoint(v);
-
-	v = col->boundingBox.max;
-	rw::V3d::transformPoints(&v, &v, 1, &m_matrix);
-	rect.ContainPoint(v);
-
-	v = col->boundingBox.min;
-	v.x = col->boundingBox.max.x;
-	rw::V3d::transformPoints(&v, &v, 1, &m_matrix);
-	rect.ContainPoint(v);
-
-	v = col->boundingBox.max;
-	v.x = col->boundingBox.min.x;
-	rw::V3d::transformPoints(&v, &v, 1, &m_matrix);
-	rect.ContainPoint(v);
+	for(int ix = 0; ix < 2; ix++)
+	for(int iy = 0; iy < 2; iy++)
+	for(int iz = 0; iz < 2; iz++){
+		v.x = ix ? col->boundingBox.max.x : col->boundingBox.min.x;
+		v.y = iy ? col->boundingBox.max.y : col->boundingBox.min.y;
+		v.z = iz ? col->boundingBox.max.z : col->boundingBox.min.z;
+		rw::V3d::transformPoints(&v, &v, 1, &m_matrix);
+		rect.ContainPoint(v);
+	}
 
 	return rect;
 }
@@ -99,8 +91,10 @@ ObjectInst::IsOnScreen(void)
 {
 	rw::Sphere sph;
 	ObjectDef *obj = GetObjectDef(m_objectId);
-	if(obj == nil || obj->m_colModel == nil)
+	if(obj == nil)
 		return false;
+	if(obj->m_colModel == nil)
+		return true;
 	CColModel *col = obj->m_colModel;
 	sph.center = col->boundingSphere.center;
 	sph.radius = col->boundingSphere.radius;

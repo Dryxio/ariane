@@ -277,6 +277,7 @@ bool
 CCamera::IsSphereVisible(rw::Sphere *sph, rw::Matrix *xform)
 {
 	rw::Sphere sphere = *sph;
+	rw::Camera *cam = gUseViewerCam && m_rwcam_viewer ? m_rwcam_viewer : m_rwcam;
 	rw::V3d::transformPoints(&sphere.center, &sphere.center, 1, xform);
-	return m_rwcam->frustumTestSphere(&sphere) != rw::Camera::SPHEREOUTSIDE;
+	return cam->frustumTestSphere(&sphere) != rw::Camera::SPHEREOUTSIDE;
 }
