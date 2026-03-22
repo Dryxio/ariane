@@ -8,3 +8,6 @@
 #ifndef ARIANE_CHANNEL
 #define ARIANE_CHANNEL "master"
 #endif
+
+// Display name for the channel (shown in title bar / update popup)
+#define ARIANE_CHANNEL_DISPLAY (strcmp(ARIANE_CHANNEL, "PE") == 0 ? "FLA" : ARIANE_CHANNEL)

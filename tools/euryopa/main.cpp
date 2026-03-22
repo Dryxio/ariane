@@ -282,7 +282,7 @@ Init(void)
 	static char windowTitle[256];
 	snprintf(windowTitle, sizeof(windowTitle),
 		"Ariane %s [%s] - Map Editor (GTA III, VC, SA)",
-		ARIANE_VERSION, ARIANE_CHANNEL);
+		ARIANE_VERSION, ARIANE_CHANNEL_DISPLAY);
 	sk::globals.windowtitle = windowTitle;
 	sk::globals.width = 1280;
 	sk::globals.height = 800;

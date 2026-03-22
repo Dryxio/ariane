@@ -422,12 +422,12 @@ UpdaterDrawGui(void)
 		ImGuiWindowFlags_AlwaysAutoResize;
 
 	char title[128];
-	snprintf(title, sizeof(title), "Update Available (%s)###updater", ARIANE_CHANNEL);
+	snprintf(title, sizeof(title), "Update Available (%s)###updater", ARIANE_CHANNEL_DISPLAY);
 
 	if(ImGui::Begin(title, nil, flags)){
 		ImGui::Text("New version: %s", gNewVersion);
 		ImGui::Text("Current: %s", ARIANE_VERSION);
-		ImGui::Text("Channel: %s", ARIANE_CHANNEL);
+		ImGui::Text("Channel: %s", ARIANE_CHANNEL_DISPLAY);
 
 		if(gChangelog[0]){
 			ImGui::Separator();
