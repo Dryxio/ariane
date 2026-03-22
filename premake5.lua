@@ -32,6 +32,13 @@ newoption {
 	default     = "../SDL2-2.0.14",
 }
 
+newoption {
+	trigger     = "channel",
+	value       = "NAME",
+	description = "Update channel (master or PE)",
+	default     = "master",
+}
+
 Zlibdir = "C:/Users/aap/src/zlib-1.2.11"
 luadir = "/usr/include/lua5.4"
 
@@ -272,8 +279,10 @@ project "euryopa"
 	kind "WindowedApp"
 	targetname "ariane"
 	characterset ("MBCS")
+	defines { 'ARIANE_CHANNEL="' .. _OPTIONS["channel"] .. '"' }
 	filter { "system:windows" }
 		entrypoint("WinMainCRTStartup")
+		links { "winhttp" }
 	filter { "system:macosx" }
 		kind "ConsoleApp"
 	filter {}

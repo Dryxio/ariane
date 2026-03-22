@@ -1,6 +1,7 @@
 #include "euryopa.h"
 #include "imgui/imgui_internal.h"
 #include "object_categories.h"
+#include "updater.h"
 
 static bool showDemoWindow;
 static bool showEditorWindow;
@@ -2097,6 +2098,7 @@ gui(void)
 
 	Path::guiHoveredNode = nil;
 	uiMainmenu();
+	UpdaterDrawGui();
 
 	// Copy/Paste
 	if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('C')){

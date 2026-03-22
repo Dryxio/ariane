@@ -1,4 +1,6 @@
 #include "euryopa.h"
+#include "version.h"
+#include "updater.h"
 
 //#define XINPUT
 #ifdef XINPUT
@@ -277,7 +279,11 @@ plUpdatePad(CControllerState *state)
 void
 Init(void)
 {
-	sk::globals.windowtitle = "Ariane - Map Editor (GTA III, VC, SA)";
+	static char windowTitle[256];
+	snprintf(windowTitle, sizeof(windowTitle),
+		"Ariane %s [%s] - Map Editor (GTA III, VC, SA)",
+		ARIANE_VERSION, ARIANE_CHANNEL);
+	sk::globals.windowtitle = windowTitle;
 	sk::globals.width = 1280;
 	sk::globals.height = 800;
 	sk::globals.quit = 0;
@@ -397,6 +403,8 @@ InitRW(void)
 	ImGui::StyleColorsClassic();
 
 	RenderInit();
+
+	UpdaterCheckForUpdate();
 
 	return true;
 }

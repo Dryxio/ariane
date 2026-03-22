@@ -38,6 +38,23 @@ jobs:
           Expand-Archive premake5.zip -DestinationPath premake5
           echo "${{ github.workspace }}\premake5" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
+      - name: Read version from header
+        id: version
+        shell: pwsh
+        working-directory: ariane
+        run: |
+          $content = Get-Content "tools/euryopa/version.h" -Raw
+          if ($content -match '#define\s+ARIANE_VERSION\s+"([^"]+)"') {
+            $ver = $Matches[1]
+          } else {
+            $ver = "0.0.0"
+          }
+          $branch = "${{ github.ref_name }}"
+          $shortsha = "${{ github.sha }}".Substring(0, 7)
+          echo "version=$ver" >> $env:GITHUB_OUTPUT
+          echo "tag=v${ver}-${branch}-${shortsha}" >> $env:GITHUB_OUTPUT
+          echo "channel=$branch" >> $env:GITHUB_OUTPUT
+
       - name: Generate librw project files
         shell: cmd
         working-directory: librw
@@ -64,7 +81,7 @@ jobs:
       - name: Generate ariane project files
         shell: cmd
         working-directory: ariane
-        run: premake5 vs2019
+        run: premake5 vs2019 --channel=${{ steps.version.outputs.channel }}
 
       - name: Build euryopa
         shell: cmd
@@ -76,3 +93,20 @@ jobs:
         with:
           name: ariane-windows-d3d9
           path: ariane/bin/win-amd64-d3d9/Release/ariane.exe
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Ariane ${{ steps.version.outputs.version }} (${{ steps.version.outputs.channel }})
+          body: |
+            Ariane ${{ steps.version.outputs.version }} — channel: **${{ steps.version.outputs.channel }}**
+
+            Built from commit ${{ github.sha }}
+          files: ariane/bin/win-amd64-d3d9/Release/ariane.exe
+          draft: false
+          prerelease: ${{ steps.version.outputs.channel == 'PE' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
