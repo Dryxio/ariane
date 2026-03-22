@@ -9,6 +9,10 @@ static int numIpls;
 int
 AddInstArraySlot(int n)
 {
+	if(numInstArrays >= NUMSCENES){
+		log("warning: too many scenes (max %d)\n", NUMSCENES);
+		return -1;
+	}
 	ObjectInst **instArray = rwNewT(ObjectInst*, n, 0);
 	instArrays[numInstArrays++] = instArray;
 	return numInstArrays-1;
@@ -112,7 +116,7 @@ LoadIpl(int slot)
 					inst->m_lod = lodinst;
 					lodinst->m_numChildren++;
 					ObjectDef *lodobj = GetObjectDef(lodinst->m_objectId);
-					if(lodinst->m_numChildren == 1 && obj->m_colModel && lodobj->m_colModel != obj->m_colModel)
+					if(lodobj && lodinst->m_numChildren == 1 && obj->m_colModel && lodobj->m_colModel != obj->m_colModel)
 						lodobj->m_colModel = obj->m_colModel;
 				}
 			}

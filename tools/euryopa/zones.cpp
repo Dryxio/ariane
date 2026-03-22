@@ -175,7 +175,7 @@ CreateZone(const char *name, int type, CBox box, int level, const char *text)
 		break;
 	default:
 		log("warning: unknown zone type %d\n", type);
-		break;
+		return;
 	}
 
 	strncpy(z->name, name, 7);

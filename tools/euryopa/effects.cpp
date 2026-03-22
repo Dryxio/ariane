@@ -117,6 +117,8 @@ Render(void)
 	for(CPtrNode *p = instances.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
 		ObjectDef *obj = GetObjectDef(inst->m_objectId);
+		if(obj == nil)
+			continue;
 		for(int i = 0; i < obj->m_numEffects; i++)
 			RenderEffect(GetEffect(obj->m_effectIndex+i), inst);
 	}

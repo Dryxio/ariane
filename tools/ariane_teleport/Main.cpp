@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <cstdarg>
 
 #if defined(GTASA)
 #include <CGame.h>
@@ -14,12 +15,117 @@
 #include <CStreaming.h>
 #include <CIplStore.h>
 #include <CEntity.h>
+#include <CObject.h>
+#include <CTheScripts.h>
 #include <CMatrix.h>
+
+enum {
+	ARIANE_STREAMING_MISSION_REQUIRED = 0x4,
+	ARIANE_STREAMING_KEEP_IN_MEMORY = 0x8,
+	ARIANE_STREAMING_PRIORITY_REQUEST = 0x10
+};
 #endif
 
 using namespace plugin;
 
 #if defined(GTASA)
+static void
+LogHotReload(const char *fmt, ...)
+{
+	FILE *f = fopen("ariane_plugin_log.txt", "a");
+	if(!f)
+		return;
+	va_list args;
+	va_start(args, fmt);
+	vfprintf(f, fmt, args);
+	va_end(args);
+	fputc('\n', f);
+	fclose(f);
+}
+
+struct DebugTrackedEntity {
+	CEntity *entity;
+	int framesLeft;
+	int modelId;
+	CVector pos;
+};
+
+static DebugTrackedEntity gTrackedAdds[16];
+
+static CEntity* FindEntityByModelNearPos(int modelId, float x, float y, float z, float radius);
+
+static void
+TrackAddedEntity(CEntity *entity, int modelId, const CVector& pos)
+{
+	if(!entity)
+		return;
+	for(int i = 0; i < 16; i++){
+		if(gTrackedAdds[i].framesLeft <= 0){
+			gTrackedAdds[i].entity = entity;
+			gTrackedAdds[i].framesLeft = 120;
+			gTrackedAdds[i].modelId = modelId;
+			gTrackedAdds[i].pos = pos;
+			return;
+		}
+	}
+}
+
+static void
+LogTrackedAdds(void)
+{
+	for(int i = 0; i < 16; i++){
+		if(gTrackedAdds[i].framesLeft <= 0 || gTrackedAdds[i].entity == NULL)
+			continue;
+		CEntity *e = gTrackedAdds[i].entity;
+		bool entityValid = IsEntityPointerValid(e);
+		bool objectInPool = false;
+		bool objectInWorld = false;
+		void *collisionList = NULL;
+		int doNotRender = -1;
+		if(e->m_nType == ENTITY_TYPE_OBJECT){
+			CObject *obj = static_cast<CObject*>(e);
+			objectInPool = IsObjectPointerValid_NotInWorld(obj);
+			objectInWorld = IsObjectPointerValid(obj);
+			collisionList = obj->m_pCollisionList;
+			doNotRender = obj->m_nObjectFlags.bDoNotRender;
+		}
+		CEntity *found = FindEntityByModelNearPos(
+			gTrackedAdds[i].modelId,
+			gTrackedAdds[i].pos.x,
+			gTrackedAdds[i].pos.y,
+			gTrackedAdds[i].pos.z,
+			50.0f
+		);
+		if(gTrackedAdds[i].framesLeft == 120 || gTrackedAdds[i].framesLeft == 90 ||
+		   gTrackedAdds[i].framesLeft == 60 || gTrackedAdds[i].framesLeft == 30 ||
+		   gTrackedAdds[i].framesLeft == 1)
+		{
+			CBaseModelInfo *mi = CModelInfo::GetModelInfo(gTrackedAdds[i].modelId);
+			void *baseRw = mi ? mi->m_pRwObject : NULL;
+			int alpha = mi ? mi->m_nAlpha : -1;
+			if(entityValid){
+				CVector pos = e->GetPosition();
+				LogHotReload("A track model=%d entity=%p framesLeft=%d entityValid=1 objectInPool=%d objectInWorld=%d rw=%p baseRw=%p alpha=%d visible=%d onScreen=%d area=%d doNotRender=%d collisionList=%p found=%p pos=(%.3f,%.3f,%.3f)",
+					gTrackedAdds[i].modelId, e, gTrackedAdds[i].framesLeft,
+					objectInPool, objectInWorld, e->m_pRwObject, baseRw, alpha,
+					e->bIsVisible, e->GetIsOnScreen(), e->m_nAreaCode, doNotRender, collisionList, found,
+					pos.x, pos.y, pos.z);
+			}else{
+				LogHotReload("A track model=%d entity=%p framesLeft=%d entityValid=0 objectInPool=%d objectInWorld=%d baseRw=%p alpha=%d doNotRender=%d collisionList=%p found=%p",
+					gTrackedAdds[i].modelId, e, gTrackedAdds[i].framesLeft,
+					objectInPool, objectInWorld, baseRw, alpha, doNotRender, collisionList, found);
+			}
+		}
+		if(!entityValid && !objectInPool && found == NULL){
+			gTrackedAdds[i].framesLeft = 0;
+			gTrackedAdds[i].entity = NULL;
+		}
+		gTrackedAdds[i].framesLeft--;
+		if(gTrackedAdds[i].framesLeft <= 0)
+			gTrackedAdds[i].entity = NULL;
+	}
+}
+
 // Find a building/dummy entity by model ID near a position.
 // Returns the closest match within radius, or NULL.
 static CEntity*
@@ -52,7 +158,7 @@ FindEntityByModelNearPos(int modelId, float x, float y, float z, float radius)
 		true,   // buildings
 		false,  // vehicles
 		false,  // peds
-		false,  // objects
+		true,   // objects
 		true);  // dummies
 	ConsiderMatches(entities, count);
 
@@ -80,6 +186,21 @@ PromoteToBigBuildingIfNeeded(CEntity *entity)
 	CWorld::Add(entity);
 }
 
+static void
+SetupBigBuildingIfNeededBeforeAdd(CEntity *entity)
+{
+	if(!entity)
+		return;
+	const CBaseModelInfo *mi = CModelInfo::GetModelInfo(entity->m_nModelIndex);
+	if(!mi)
+		return;
+	if(entity->m_nNumLodChildren == 0 && mi->m_fDrawDistance <= 300.0f)
+		return;
+	if(entity->bIsBIGBuilding)
+		return;
+	entity->SetupBigBuilding();
+}
+
 // Process entity-level commands from ariane_reload_entities.txt
 static void
 ProcessEntityReload(void)
@@ -105,25 +226,70 @@ ProcessEntityReload(void)
 				&modelId, &x, &y, &z, &qx, &qy, &qz, &qw,
 				&area, &lodModelId, &lodX, &lodY, &lodZ) == 13)
 			{
-				CFileObjectInstance inst = {};
-				inst.m_nModelId = modelId;
-				inst.m_vecPosition = CVector(x, y, z);
-				inst.m_qRotation.imag = CVector(qx, qy, qz);
-				inst.m_qRotation.real = qw;
-				inst.m_nInstanceType = 0;
-				inst.m_nAreaCode = area & 0xFF;
-				inst.m_bRedundantStream = (area & 0x100) != 0;
-				inst.m_bUnderwater = (area & 0x400) != 0;
-				inst.m_bTunnel = (area & 0x800) != 0;
-				inst.m_bTunnelTransition = (area & 0x1000) != 0;
-				inst.m_nLodInstanceIndex = -1;
+				CVector pos(x, y, z);
+				LogHotReload("A begin model=%d pos=(%.3f,%.3f,%.3f) area=%d lod=%d",
+					modelId, x, y, z, area & 0xFF, lodModelId);
+				CStreaming::RequestModel(modelId,
+					ARIANE_STREAMING_MISSION_REQUIRED |
+					ARIANE_STREAMING_KEEP_IN_MEMORY |
+					ARIANE_STREAMING_PRIORITY_REQUEST);
+				CColStore::RequestCollision(pos, area & 0xFF);
+				CStreaming::LoadAllRequestedModels(false);
+				CColStore::EnsureCollisionIsInMemory(pos);
+				CBaseModelInfo *mi = CModelInfo::GetModelInfo(modelId);
+				if(mi)
+					mi->m_nAlpha = 255;
+				CColModel *cm = CModelInfo::GetColModel(modelId);
+				LogHotReload("A modelinfo model=%d mi=%p baseRw=%p col=%p alpha=%d",
+					modelId, mi, mi ? mi->m_pRwObject : NULL, cm, mi ? mi->m_nAlpha : -1);
 
-				CEntity *e = CFileLoader::LoadObjectInstance(&inst, NULL);
-				if(e){
-					CWorld::Add(e);
-					PromoteToBigBuildingIfNeeded(e);
-					e->UpdateRwFrame();
+				CObject *obj = CObject::Create(modelId);
+				if(obj){
+					CVector previewPos = pos;
+					obj->m_nObjectType = OBJECT_MISSION;
+					obj->bDontStream = false;
+					obj->bStreamingDontDelete = true;
+					obj->SetPosn(previewPos);
+					obj->SetIsStatic(true);
+					obj->m_nAreaCode = (unsigned char)(area & 0xFF);
+					obj->bUnderwater |= (area & 0x400) != 0;
+					obj->bTunnel |= (area & 0x800) != 0;
+					obj->bTunnelTransition |= (area & 0x1000) != 0;
+					obj->bUnimportantStream |= (area & 0x100) != 0;
 
+					const float cqx = -qx;
+					const float cqy = -qy;
+					const float cqz = -qz;
+					const float cqw = qw;
+
+					CMatrix mat;
+					float x2 = cqx+cqx, y2 = cqy+cqy, z2 = cqz+cqz;
+					float xx = cqx*x2, xy = cqx*y2, xz = cqx*z2;
+					float yy = cqy*y2, yz = cqy*z2, zz = cqz*z2;
+					float wx = cqw*x2, wy = cqw*y2, wz = cqw*z2;
+
+					mat.right.x = 1.0f-(yy+zz); mat.right.y = xy+wz;         mat.right.z = xz-wy;
+					mat.up.x    = xy-wz;         mat.up.y    = 1.0f-(xx+zz); mat.up.z    = yz+wx;
+					mat.at.x    = xz+wy;         mat.at.y    = yz-wx;         mat.at.z    = 1.0f-(xx+yy);
+					mat.pos.x   = previewPos.x;  mat.pos.y   = previewPos.y;  mat.pos.z   = previewPos.z;
+
+					obj->SetMatrix(mat);
+					obj->CreateRwObject();
+					obj->UpdateRwMatrix();
+					obj->UpdateRwFrame();
+					CPlayerPed *player = FindPlayerPed();
+					CVector playerPos = player ? player->GetPosition() : CVector(0.0f, 0.0f, 0.0f);
+					float pdx = playerPos.x - previewPos.x;
+					float pdy = playerPos.y - previewPos.y;
+					float pdz = playerPos.z - previewPos.z;
+					float playerDist = sqrtf(pdx*pdx + pdy*pdy + pdz*pdz);
+					LogHotReload("A created obj=%p rw=%p area=%d type=%d static=%d visible=%d onScreen=%d previewPos=(%.3f,%.3f,%.3f) playerPos=(%.3f,%.3f,%.3f) dist=%.3f",
+						obj, obj->m_pRwObject, obj->m_nAreaCode, obj->m_nObjectType, obj->bIsStatic,
+						obj->bIsVisible, obj->GetIsOnScreen(),
+						previewPos.x, previewPos.y, previewPos.z,
+						playerPos.x, playerPos.y, playerPos.z, playerDist);
+
+					CEntity *e = obj;
 					if(lodModelId >= 0 && numPendingLodLinks < 256){
 						pendingLodLinks[numPendingLodLinks].entity = e;
 						pendingLodLinks[numPendingLodLinks].lodModelId = lodModelId;
@@ -131,7 +297,16 @@ ProcessEntityReload(void)
 						pendingLodLinks[numPendingLodLinks].lodY = lodY;
 						pendingLodLinks[numPendingLodLinks].lodZ = lodZ;
 						numPendingLodLinks++;
+					}else{
+						SetupBigBuildingIfNeededBeforeAdd(e);
+						CWorld::Add(e);
+						TrackAddedEntity(e, modelId, previewPos);
+						CEntity *found = FindEntityByModelNearPos(modelId, x, y, z, 10.0f);
+						LogHotReload("A added obj=%p found=%p pos=(%.3f,%.3f,%.3f)",
+							obj, found, obj->GetPosition().x, obj->GetPosition().y, obj->GetPosition().z);
 					}
+				}else{
+					LogHotReload("A create failed model=%d", modelId);
 				}
 			}
 		}else if(line[0] == 'M'){
@@ -147,12 +322,20 @@ ProcessEntityReload(void)
 					CWorld::Remove(e);
 					e->SetPosn(nx, ny, nz);
 
-					// Build rotation matrix from quaternion
+					// Ariane stores instance rotation in the same convention as the IPL.
+					// Both the editor preview and SA's LoadObjectInstance build the
+					// world matrix from the conjugated quaternion.
+					const float cqx = -qx;
+					const float cqy = -qy;
+					const float cqz = -qz;
+					const float cqw = qw;
+
+					// Build rotation matrix from the conjugated quaternion
 					CMatrix mat;
-					float x2 = qx+qx, y2 = qy+qy, z2 = qz+qz;
-					float xx = qx*x2, xy = qx*y2, xz = qx*z2;
-					float yy = qy*y2, yz = qy*z2, zz = qz*z2;
-					float wx = qw*x2, wy = qw*y2, wz = qw*z2;
+					float x2 = cqx+cqx, y2 = cqy+cqy, z2 = cqz+cqz;
+					float xx = cqx*x2, xy = cqx*y2, xz = cqx*z2;
+					float yy = cqy*y2, yz = cqy*z2, zz = cqz*z2;
+					float wx = cqw*x2, wy = cqw*y2, wz = cqw*z2;
 
 					mat.right.x = 1.0f-(yy+zz); mat.right.y = xy+wz;         mat.right.z = xz-wy;
 					mat.up.x    = xy-wz;         mat.up.y    = 1.0f-(xx+zz); mat.up.z    = yz+wx;
@@ -187,7 +370,8 @@ ProcessEntityReload(void)
 		link.entity->m_pLod = lod;
 		lod->m_nNumLodChildren++;
 		PromoteToBigBuildingIfNeeded(lod);
-		PromoteToBigBuildingIfNeeded(link.entity);
+		SetupBigBuildingIfNeededBeforeAdd(link.entity);
+		CWorld::Add(link.entity);
 	}
 
 	fclose(f);
@@ -201,6 +385,7 @@ public:
 		Events::gameProcessEvent += [] {
 			CPlayerPed *player = FindPlayerPed();
 			if(!player) return;
+			LogTrackedAdds();
 
 			// --- Phase 1: one-time teleport from editor ---
 			static bool teleportDone = false;

@@ -1,4 +1,5 @@
 #include "euryopa.h"
+#include <vector>
 
 GameFile*
 NewGameFile(char *path)
@@ -120,6 +121,7 @@ LoadObject(char *line)
 	}
 
 	ObjectDef *obj = AddObjectDef(id);
+	if(obj == nil) return;
 	obj->m_type = ObjectDef::ATOMIC;
 	strncpy(obj->m_name, model, MODELNAMELEN);
 	obj->m_txdSlot = AddTxdSlot(txd);
@@ -174,6 +176,7 @@ LoadTimeObject(char *line)
 	}
 
 	ObjectDef *obj = AddObjectDef(id);
+	if(obj == nil) return;
 	obj->m_type = ObjectDef::ATOMIC;
 	strncpy(obj->m_name, model, MODELNAMELEN);
 	obj->m_txdSlot = AddTxdSlot(txd);
@@ -203,6 +206,7 @@ LoadAnimatedObject(char *line)
 	sscanf(line, "%d %s %s %s %f %d", &id, model, txd, anim, &dist, &flags);
 
 	ObjectDef *obj = AddObjectDef(id);
+	if(obj == nil) return;
 	obj->m_type = ObjectDef::CLUMP;
 	strncpy(obj->m_name, model, MODELNAMELEN);
 	obj->m_txdSlot = AddTxdSlot(txd);
@@ -356,8 +360,7 @@ LoadTXDParent(char *line)
 }
 
 
-static ObjectInst *tmpInsts[8096];
-static int numTmpInsts;
+static std::vector<ObjectInst*> tmpInsts;
 static int iplInstCounter;  // tracks instance index within current IPL file
 
 void
@@ -367,7 +370,7 @@ LoadObjectInstance(char *line)
 
 	// Deleted instance (commented out) - keep index slot for streaming IPL compatibility
 	if(line[0] == '#'){
-		tmpInsts[numTmpInsts++] = nil;
+		tmpInsts.push_back(nil);
 		iplInstCounter++;
 		return;
 	}
@@ -406,7 +409,7 @@ LoadObjectInstance(char *line)
 	ObjectDef *obj = GetObjectDef(fi.objectId);
 	if(obj == nil){
 		log("warning: object %d was never defined\n", fi.objectId);
-		tmpInsts[numTmpInsts++] = nil;
+		tmpInsts.push_back(nil);
 		iplInstCounter++;
 		return;
 	}
@@ -419,7 +422,7 @@ LoadObjectInstance(char *line)
 		inst->SetupBigBuilding();
 
 	if(isSA())
-		tmpInsts[numTmpInsts++] = inst;
+		tmpInsts.push_back(inst);
 
 	inst->m_file = currentFile;
 }
@@ -433,7 +436,8 @@ LoadZone(char *line)
 	CBox box;
 	int level;
 	int n;
-	n = sscanf(line, "%s %d %f %f %f %f %f %f %d %s",
+	if(line[0] == '#') return;
+	n = sscanf(line, "%23s %d %f %f %f %f %f %f %d %23s",
 			name, &type,
 			&box.min.x, &box.min.y, &box.min.z,
 			&box.max.x, &box.max.y, &box.max.z,
@@ -616,12 +620,17 @@ SetupBigBuildings(void)
 	ObjectInst *inst, *lodinst;
 	ObjectDef *obj, *lodobj;
 
+	int numTmpInsts = (int)tmpInsts.size();
 	for(i = 0; i < numTmpInsts; i++){
 		inst = tmpInsts[i];
 		if(inst == nil) continue;	// deleted placeholder
 		if(inst->m_lodId < 0)
 			inst->m_lod = nil;
 		else{
+			if(inst->m_lodId >= numTmpInsts){
+				inst->m_lod = nil;
+				continue;
+			}
 			lodinst = tmpInsts[inst->m_lodId];
 			if(lodinst == nil){
 				inst->m_lod = nil;	// LOD was deleted
@@ -636,38 +645,46 @@ SetupBigBuildings(void)
 		inst = tmpInsts[i];
 		if(inst == nil) continue;	// deleted placeholder
 		obj = GetObjectDef(inst->m_objectId);
+		if(obj == nil) continue;
 		if(obj->m_isBigBuilding || inst->m_numChildren)
 			inst->SetupBigBuilding();
 		lodinst = inst->m_lod;
 		if(lodinst == nil)
 			continue;
 		lodobj = GetObjectDef(lodinst->m_objectId);
+		if(lodobj == nil) continue;
 		if(lodinst->m_numChildren == 1 && obj->m_colModel){
 			lodobj->m_colModel = obj->m_colModel;
 			lodobj->m_gotChildCol = true;
 		}
-		assert(lodobj->m_colModel);
-		assert(obj->m_colModel);
+		if(lodobj->m_colModel == nil)
+			log("warning: LOD object %s (%d) has no collision\n", lodobj->m_name, lodobj->m_id);
+		if(obj->m_colModel == nil)
+			log("warning: object %s (%d) has no collision\n", obj->m_name, obj->m_id);
 	}
 }
 
 void
 LoadScene(const char *filename)
 {
-	numTmpInsts = 0;
+	tmpInsts.clear();
 	iplInstCounter = 0;
 	LoadDataFile(filename, iplDesc);
+	debug("  parsed %d instances\n", (int)tmpInsts.size());
 
 	if(isSA()){
 		int i = -1;
-		if(numTmpInsts){
-			i = AddInstArraySlot(numTmpInsts);
+		if(tmpInsts.size()){
+			i = AddInstArraySlot((int)tmpInsts.size());
 			ObjectInst **ia = GetInstArray(i);
-			memcpy(ia, tmpInsts, numTmpInsts*sizeof(ObjectInst*));
+			memcpy(ia, tmpInsts.data(), tmpInsts.size()*sizeof(ObjectInst*));
 		}
 
+		debug("  SetupRelatedIPLs...\n");
 		SetupRelatedIPLs(filename, i);
+		debug("  SetupBigBuildings...\n");
 		SetupBigBuildings();
+		debug("  done\n");
 	}
 }
 
@@ -815,7 +832,9 @@ LoadLevel(const char *filename)
 
 			strncpy(path, line+4, 256);
 			currentFile = NewGameFile(path);
+			debug("Loading scene %s\n", path);
 			LoadScene(path);
+			debug("Scene loaded OK\n");
 		}else if(strncmp(line, "MAPZONE", 7) == 0){
 //			debug("MAPZONE\n");
 			strncpy(path, line+8, 256);

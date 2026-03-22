@@ -1,6 +1,8 @@
 #define WITH_D3D
 #include "euryopa.h"
 #include "templates.h"
+#include <algorithm>
+#include <vector>
 
 struct InstDist
 {
@@ -8,13 +10,9 @@ struct InstDist
 	union { float dist, sort; };
 };
 
-static ObjectInst *visibleInsts[60000];
-static int numVisibleInsts;
-
-static CLinkList<InstDist> sortedInstList;
-
-static InstDist lodList[100];
-static int numLods;
+static std::vector<ObjectInst*> visibleInsts;
+static std::vector<InstDist> sortedInsts;
+static std::vector<InstDist> lodList;
 
 static uint16 currentScanCode;
 
@@ -32,16 +30,17 @@ static void
 AddToRenderList(ObjectInst *inst, float dist)
 {
 	ObjectDef *obj = GetObjectDef(inst->m_objectId);
-	assert(inst->m_rwObject);
+	if(obj == nil) return;
+	if(inst->m_rwObject == nil) return;
 
 	inst->PreRender();
 	if(obj->m_drawLast){
 		InstDist e;
 		e.inst = inst;
 		e.dist = dist;
-		sortedInstList.InsertSorted(e);
+		sortedInsts.push_back(e);
 	}else
-		visibleInsts[numVisibleInsts++] = inst;
+		visibleInsts.push_back(inst);
 }
 
 // This is a list of potentially rendered LODs
@@ -50,9 +49,10 @@ AddToLodRenderList(ObjectInst *inst, float dist)
 {
 	// Highlighted objects are always visible
 	if(!inst->m_selected && inst->m_highlight == 0){
-		int i = numLods++;
-		lodList[i].inst = inst;
-		lodList[i].dist = dist;
+		InstDist e;
+		e.inst = inst;
+		e.dist = dist;
+		lodList.push_back(e);
 	}else
 		AddToRenderList(inst, dist);
 }
@@ -67,6 +67,7 @@ SetupVisibilitySimple(ObjectInst *inst, float *distout)
 	rw::Clump *instclump;
 
 	obj = GetObjectDef(inst->m_objectId);
+	if(obj == nil) return VIS_INVISIBLE;
 
 	// Highlighted objects are always visible
 	if(!inst->m_selected && inst->m_highlight == 0){
@@ -120,6 +121,7 @@ SetupVisibilityIII(ObjectInst *inst, float *distout)
 	rw::Clump *instclump;
 
 	obj = GetObjectDef(inst->m_objectId);
+	if(obj == nil) return VIS_INVISIBLE;
 
 	// Highlighted objects are always visible
 	if(!inst->m_selected && inst->m_highlight == 0){
@@ -176,6 +178,7 @@ SetupVisibilitySA(ObjectInst *inst, float camdist)
 	rw::Clump *instclump;
 
 	obj = GetObjectDef(inst->m_objectId);
+	if(obj == nil) return VIS_INVISIBLE;
 	lodinst = inst->m_lod;
 
 	// Highlighted objects are always visible
@@ -291,6 +294,7 @@ ProcessLodList(void)
 	// I don't understand SA's code of this function...
 	// So this one doesn't make perfect sense either.
 
+	int numLods = (int)lodList.size();
 	for(i = 0; i < numLods; i++){
 		inst = lodList[i].inst;
 		if(inst == nil) continue;
@@ -371,6 +375,7 @@ RenderInst(ObjectInst *inst)
 //		return;
 
 	obj = GetObjectDef(inst->m_objectId);
+	if(obj == nil) return;
 	obj->m_hasPreRendered = false;
 
 	uint32 cull;
@@ -405,6 +410,7 @@ RenderTransparentInst(ObjectInst *inst)
 {
 	ObjectDef *obj;
 	obj = GetObjectDef(inst->m_objectId);
+	if(obj == nil) return;
 
 	if(obj->m_noZwrite){
 		SetRenderState(rw::ZWRITEENABLE, 0);
@@ -481,17 +487,10 @@ BuildRenderList(void)
 	CPtrNode *p;
 	ObjectInst *inst;
 
-	static bool listInit;
-	if(!listInit){
-		sortedInstList.Init(2000);
-		listInit = true;
-	}
-
-	numVisibleInsts = 0;
-	numLods = 0;
-	sortedInstList.Clear();
-
 	currentScanCode++;
+	visibleInsts.clear();
+	sortedInsts.clear();
+	lodList.clear();
 
 	rw::BBox frustBox = TheCamera.m_rwcam->frustumBoundBox;
 //	printf("%f %f %f    %f %f %f\n",
@@ -551,7 +550,7 @@ RenderOpaque(void)
 	SetRenderState(rw::ALPHATESTREF, params.alphaRef);
 
 	SetRenderState(rw::CULLMODE, gDoBackfaceCulling ? rw::CULLBACK : rw::CULLNONE);
-	int i;
+	int i, numVisibleInsts = (int)visibleInsts.size();
 	for(i = 0; i < numVisibleInsts; i++)
 		RenderInst(visibleInsts[i]);
 }
@@ -559,14 +558,12 @@ RenderOpaque(void)
 void
 RenderTransparent(void)
 {
-	CLink<InstDist> *node;
 	SetRenderState(rw::CULLMODE, gDoBackfaceCulling ? rw::CULLBACK : rw::CULLNONE);
-	for(node = sortedInstList.tail.prev;
-	    node != &sortedInstList.head;
-	    node = node->prev){
-		ObjectInst *inst = node->item.inst;
-		RenderTransparentInst(inst);
-	}
+	std::sort(sortedInsts.begin(), sortedInsts.end(), [](const InstDist &a, const InstDist &b) {
+		return a.dist < b.dist;
+	});
+	for(int i = (int)sortedInsts.size()-1; i >= 0; i--)
+		RenderTransparentInst(sortedInsts[i].inst);
 }
 
 void
@@ -580,6 +577,7 @@ static void
 RenderCollision(ObjectInst *inst)
 {
 	ObjectDef *obj = GetObjectDef(inst->m_objectId);
+	if(obj == nil) return;
 	if(obj->m_colModel)
 		RenderColModelWire(obj->m_colModel, &inst->m_matrix, obj->m_isBigBuilding);
 	else
@@ -589,17 +587,13 @@ RenderCollision(ObjectInst *inst)
 void
 RenderEverythingCollisions(void)
 {
-	int i;
+	int i, numVisibleInsts = (int)visibleInsts.size();
 	for(i = 0; i < numVisibleInsts; i++)
 		RenderCollision(visibleInsts[i]);
 
-	CLink<InstDist> *node;
-	for(node = sortedInstList.tail.prev;
-	    node != &sortedInstList.head;
-	    node = node->prev){
-		ObjectInst *inst = node->item.inst;
-		RenderCollision(inst);
-	}
+	int numSortedInsts = (int)sortedInsts.size();
+	for(i = 0; i < numSortedInsts; i++)
+		RenderCollision(sortedInsts[i].inst);
 }
 
 void

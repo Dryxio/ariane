@@ -132,18 +132,18 @@ extern float gNeoLightMapStrength;
 // These don't necessarily match the game's values, roughly double of SA PC
 enum {
 	MODELNAMELEN = 30,
-	NUMOBJECTDEFS = 40000,
-	NUMTEXDICTS = 10000,
+	NUMOBJECTDEFS = 200000,
+	NUMTEXDICTS = 20000,
 	NUMCOLS = 510,
-	NUMSCENES = 80,
-	NUMIPLS = 512,
-	NUMCDIMAGES = 100,
+	NUMSCENES = 512,
+	NUMIPLS = 1024,
+	NUMCDIMAGES = 200,
 	NUMTCYCBOXES = 64,
 
 	NUMWATERVERTICES = 4000,
 	NUMWATERQUADS = 1000,
 	NUMWATERTRIS = 1000,
-	NUMZONES = 500,	// for each type
+	NUMZONES = 1500,	// for each type
 };
 
 #define LODDISTANCE (300.0f)

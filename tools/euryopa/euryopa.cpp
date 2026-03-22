@@ -1172,18 +1172,26 @@ LoadGame(void)
 	case GAME_VCS: FileLoader::LoadLevel("data/gta_vcs.dat"); break;
 	}
 
+	debug("LoadLevel done, starting post-load init\n");
 	InitLodLookup();
+	debug("InitLodLookup done\n");
 	InitObjectCategories();
+	debug("InitObjectCategories done\n");
 	LoadFavourites();
+	debug("LoadFavourites done\n");
 	// InitPreviewRenderer called lazily on first use
 	InitSectors();
+	debug("InitSectors done\n");
 
 	CPtrNode *p;
 	ObjectInst *inst;
+	int instCount = 0;
 	for(p = instances.first; p; p = p->next){
 		inst = (ObjectInst*)p->item;
 		InsertInstIntoSectors(inst);
+		instCount++;
 	}
+	debug("InsertInstIntoSectors done (%d instances)\n", instCount);
 
 	// hide the islands
 	ObjectDef *obj;
@@ -1211,6 +1219,7 @@ updateRwFrame(ObjectInst *inst)
 {
 	if(inst->m_rwObject == nil) return;
 	ObjectDef *obj = GetObjectDef(inst->m_objectId);
+	if(obj == nil) return;
 	rw::Frame *f;
 	if(obj->m_type == ObjectDef::ATOMIC)
 		f = ((rw::Atomic*)inst->m_rwObject)->getFrame();

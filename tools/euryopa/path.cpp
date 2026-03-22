@@ -60,6 +60,8 @@ AddNode(PathType type, int id, PathNode node)
 			tabid = 1;
 	}else{
 		ObjectDef *obj = GetObjectDef(id);
+		if(obj == nil)
+			return;
 		if(type == PedPath){
 			obj->m_pedPathIndex = pedNodes.size() / 12;
 			tabid = 2;
@@ -234,6 +236,8 @@ RenderPedPaths(void)
 	for(CPtrNode *p = instances.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
 		ObjectDef *obj = GetObjectDef(inst->m_objectId);
+		if(obj == nil)
+			continue;
 		if(obj->m_pedPathIndex >= 0)
 			DrawNodePatch(positions, pedNodes, obj->m_pedPathIndex*12, inst, magenta);
 	}
@@ -248,6 +252,8 @@ RenderCarPaths(void)
 	for(CPtrNode *p = instances.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
 		ObjectDef *obj = GetObjectDef(inst->m_objectId);
+		if(obj == nil)
+			continue;
 		if(obj->m_carPathIndex >= 0){
 			DrawNodePatch(positions, carNodes, obj->m_carPathIndex*12, inst, red);
 			DrawLanes(positions, carNodes, obj->m_carPathIndex*12, green);

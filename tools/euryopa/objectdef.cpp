@@ -334,6 +334,10 @@ ObjectDef::SetFlags(int flags)
 ObjectDef*
 AddObjectDef(int id)
 {
+	if(id < 0 || id >= NUMOBJECTDEFS){
+		log("warning: object id %d out of range (max %d), skipping\n", id, NUMOBJECTDEFS-1);
+		return nil;
+	}
 	ObjectDef *obj = new ObjectDef;
 	memset(obj, 0, sizeof(ObjectDef));
 	obj->m_imageIndex = -1;
@@ -351,6 +355,7 @@ AddObjectDef(int id)
 ObjectDef*
 GetObjectDef(int id)
 {
+	if(id < 0 || id >= NUMOBJECTDEFS) return nil;
 	return objdefs[id];
 }
 

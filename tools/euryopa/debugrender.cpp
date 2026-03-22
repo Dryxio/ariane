@@ -1,7 +1,5 @@
 #include "euryopa.h"
 
-
-
 struct DebugLine
 {
 	rw::V3d v1;
@@ -9,9 +7,18 @@ struct DebugLine
 	rw::RGBA col1;
 	rw::RGBA col2;
 };
-#define MAXDEBUGLINES 40000
-static DebugLine debugLines[MAXDEBUGLINES];
+
+#define MAXDEBUGLINES 262144
+#define DEBUGLINE_PADDING 64
+static DebugLine *debugLines;
 static int numDebugLines;
+
+static void
+EnsureDebugLineBuffer(void)
+{
+	if(debugLines == nil)
+		debugLines = (DebugLine*)calloc(MAXDEBUGLINES + DEBUGLINE_PADDING, sizeof(DebugLine));
+}
 
 #define TEMPBUFFERVERTSIZE 256
 #define TEMPBUFFERINDEXSIZE 1024
@@ -75,18 +82,18 @@ RenderDebugLines(void)
 static void
 AddDebugLine(float x1, float y1, float z1, float x2, float y2, float z2, rw::RGBA c1, rw::RGBA c2)
 {
-	int n;
-	if(numDebugLines >= MAXDEBUGLINES)
+	EnsureDebugLineBuffer();
+	if(debugLines == nil || numDebugLines >= MAXDEBUGLINES)
 		return;
-	n = numDebugLines++;
-	debugLines[n].v1.x = x1;
-	debugLines[n].v1.y = y1;
-	debugLines[n].v1.z = z1;
-	debugLines[n].v2.x = x2;
-	debugLines[n].v2.y = y2;
-	debugLines[n].v2.z = z2;
-	debugLines[n].col1 = c1;
-	debugLines[n].col2 = c2;
+	DebugLine *line = &debugLines[numDebugLines++];
+	line->v1.x = x1;
+	line->v1.y = y1;
+	line->v1.z = z1;
+	line->v2.x = x2;
+	line->v2.y = y2;
+	line->v2.z = z2;
+	line->col1 = c1;
+	line->col2 = c2;
 }
 
 void RenderLine(rw::V3d v1, rw::V3d v2, rw::RGBA c1, rw::RGBA c2) { AddDebugLine(v1.x, v1.y, v1.z, v2.x, v2.y, v2.z, c1, c2); }

@@ -19,6 +19,7 @@ ObjectInst::CreateRwObject(void)
 	rw::Atomic *atomic;
 	rw::Clump *clump;
 	ObjectDef *obj = GetObjectDef(m_objectId);
+	if(obj == nil) return nil;
 
 	if(obj->m_type == ObjectDef::ATOMIC){
 		if(obj->m_atomics[0] == nil)
@@ -67,7 +68,10 @@ ObjectInst::GetBoundRect(void)
 {
 	CRect rect;
 	rw::V3d v;
-	CColModel *col = GetObjectDef(m_objectId)->m_colModel;
+	ObjectDef *obj = GetObjectDef(m_objectId);
+	if(obj == nil || obj->m_colModel == nil)
+		return rect;
+	CColModel *col = obj->m_colModel;
 
 	v = col->boundingBox.min;
 	rw::V3d::transformPoints(&v, &v, 1, &m_matrix);
@@ -95,6 +99,8 @@ ObjectInst::IsOnScreen(void)
 {
 	rw::Sphere sph;
 	ObjectDef *obj = GetObjectDef(m_objectId);
+	if(obj == nil || obj->m_colModel == nil)
+		return false;
 	CColModel *col = obj->m_colModel;
 	sph.center = col->boundingSphere.center;
 	sph.radius = col->boundingSphere.radius;
@@ -115,6 +121,8 @@ ObjectInst::PreRender(void)
 {
 	int i;
 	ObjectDef *obj = GetObjectDef(m_objectId);
+	if(obj == nil)
+		return;
 	if(obj->m_hasPreRendered)
 		return;
 	obj->m_hasPreRendered = true;
@@ -132,6 +140,8 @@ ObjectInst::JumpTo(void)
 {
 	rw::V3d center;
 	ObjectDef *obj = GetObjectDef(m_objectId);
+	if(obj == nil || obj->m_colModel == nil)
+		return;
 	CSphere *sph = &obj->m_colModel->boundingSphere;
 	rw::V3d::transformPoints(&center, &sph->center, 1, &m_matrix);
 	TheCamera.setTarget(center);
@@ -726,6 +736,7 @@ updateRwFrameForInst(ObjectInst *inst)
 {
 	if(inst->m_rwObject == nil) return;
 	ObjectDef *obj = GetObjectDef(inst->m_objectId);
+	if(obj == nil) return;
 	rw::Frame *f;
 	if(obj->m_type == ObjectDef::ATOMIC)
 		f = ((rw::Atomic*)inst->m_rwObject)->getFrame();
@@ -1105,10 +1116,10 @@ InitSectors(void)
 	case GAME_SA:
 		numSectorsX = 120;
 		numSectorsY = 120;
-		worldBounds.left = -3000.0f;
-		worldBounds.bottom = -3000.0f;
-		worldBounds.right = 3000.0f;
-		worldBounds.top = 3000.0f;
+		worldBounds.left = -10000.0f;
+		worldBounds.bottom = -10000.0f;
+		worldBounds.right = 10000.0f;
+		worldBounds.top = 10000.0f;
 		break;
 	}
 	sectors = new Sector[numSectorsX*numSectorsY];
@@ -1134,15 +1145,17 @@ GetSector(int ix, int iy)
 int
 GetSectorIndexX(float x)
 {
-	assert(x >= worldBounds.left && x < worldBounds.right);
-	return (x + worldBounds.right - worldBounds.left)/numSectorsX;
+	if(x < worldBounds.left) x = worldBounds.left;
+	if(x >= worldBounds.right) x = worldBounds.right - 1.0f;
+	return (x - worldBounds.left) / ((worldBounds.right - worldBounds.left) / numSectorsX);
 }
 
 int
 GetSectorIndexY(float y)
 {
-	assert(y >= worldBounds.bottom && y < worldBounds.top);
-	return (y + worldBounds.top - worldBounds.bottom)/numSectorsY;
+	if(y < worldBounds.bottom) y = worldBounds.bottom;
+	if(y >= worldBounds.top) y = worldBounds.top - 1.0f;
+	return (y - worldBounds.bottom) / ((worldBounds.top - worldBounds.bottom) / numSectorsY);
 }
 
 bool
@@ -1152,7 +1165,7 @@ IsInstInBounds(ObjectInst *inst)
 	// Some objects don't have collision data
 	// TODO: figure out what to do with them
 	obj = GetObjectDef(inst->m_objectId);
-	if(obj->m_colModel == nil)
+	if(obj == nil || obj->m_colModel == nil)
 		return false;
 	CRect bounds = inst->GetBoundRect();
 	return bounds.left >= worldBounds.left &&

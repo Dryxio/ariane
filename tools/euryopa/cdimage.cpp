@@ -391,7 +391,7 @@ LoadAllRequestedObjects(void)
 	for(p = requestList.first; p; p = p->next){
 		id = (int)(uintptr)p->item;
 		ObjectDef *obj = GetObjectDef(id);
-		if(!obj->IsLoaded())
+		if(obj && !obj->IsLoaded())
 			obj->Load();
 	}
 	requestList.Flush();
