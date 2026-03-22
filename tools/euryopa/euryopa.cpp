@@ -1045,6 +1045,11 @@ GetPlacementPosition(void)
 void
 handleTool(void)
 {
+	// Don't process viewport clicks when ImGui wants the mouse
+	ImGuiIO &io = ImGui::GetIO();
+	if(io.WantCaptureMouse)
+		return;
+
 	// Place mode intercepts all clicks
 	if(gPlaceMode){
 		if(CPad::IsMButtonClicked(1)){
