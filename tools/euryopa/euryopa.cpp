@@ -7,6 +7,8 @@ Params params;
 
 int gGizmoMode = GIZMO_TRANSLATE;
 bool gGizmoEnabled = true;
+bool gGizmoHovered = false;
+bool gGizmoUsing = false;
 bool gPlaceSnapToObjects = true;
 bool gPlaceSnapToGround = true;
 bool gDragFollowGround = false;
@@ -1224,6 +1226,9 @@ updateRwFrame(ObjectInst *inst)
 void
 dogizmo(void)
 {
+	gGizmoHovered = false;
+	gGizmoUsing = false;
+
 	if(!gGizmoEnabled)
 		return;
 	if(!selection.first)
@@ -1261,7 +1266,9 @@ dogizmo(void)
 	ImGuizmo::OPERATION op = gGizmoMode == GIZMO_ROTATE ? ImGuizmo::ROTATE : ImGuizmo::TRANSLATE;
 	ImGuizmo::Manipulate(fview, fproj, op, ImGuizmo::LOCAL, fobj, nil, nil);
 
+	gGizmoHovered = ImGuizmo::IsOver();
 	bool isUsing = ImGuizmo::IsUsing();
+	gGizmoUsing = isUsing;
 
 	// Capture start state when drag begins
 	if(isUsing && !wasDragging){

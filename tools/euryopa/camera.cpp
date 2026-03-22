@@ -17,6 +17,7 @@ CCamera::Process(void)
 	float sensitivity = 1.0f;
 
 	ImGuiIO &io = ImGui::GetIO();
+	bool blockMouse = io.WantCaptureMouse || gGizmoHovered || gGizmoUsing;
 	this->mx = CPad::newMouseState.x/io.DisplaySize.x;
 	this->my = CPad::newMouseState.y/io.DisplaySize.y;
 	this->mx = this->mx*2.0f - 1.0f;
@@ -32,7 +33,7 @@ CCamera::Process(void)
 
 	// Mouse
 	// first person
-	if(CPad::IsMButtonDown(1)){
+	if(!blockMouse && CPad::IsMButtonDown(1)){
 		if(CPad::IsAltDown() && CPad::IsCtrlDown()){
 			float dy = (CPad::oldMouseState.y - CPad::newMouseState.y);
 			dolly(dy*scl);
@@ -43,7 +44,7 @@ CCamera::Process(void)
 		}
 	}
 	// roughly 3ds max controls
-	if(CPad::IsMButtonDown(2)){
+	if(!blockMouse && CPad::IsMButtonDown(2)){
 		if(CPad::IsAltDown() && CPad::IsCtrlDown()){
 			float dy = (CPad::oldMouseState.y - CPad::newMouseState.y);
 			zoom(dy*scl);

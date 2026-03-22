@@ -295,6 +295,8 @@ enum GizmoMode {
 };
 extern int gGizmoMode;
 extern bool gGizmoEnabled;
+extern bool gGizmoHovered;
+extern bool gGizmoUsing;
 extern bool gPlaceSnapToObjects;
 extern bool gPlaceSnapToGround;
 extern bool gDragFollowGround;
