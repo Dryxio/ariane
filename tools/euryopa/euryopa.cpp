@@ -1444,7 +1444,7 @@ Draw(void)
 
 	UpdateDayNightBalance();
 
-	TheCamera.m_rwcam->setFarPlane(Timecycle::currentColours.farClp);
+	TheCamera.m_rwcam->setFarPlane(max(Timecycle::currentColours.farClp, 500.0f));
 	TheCamera.m_rwcam->fogPlane = Timecycle::currentColours.fogSt;
 	TheCamera.m_rwcam_viewer->setFarPlane(5000.0f);
 	TheCamera.m_rwcam_viewer->fogPlane = Timecycle::currentColours.fogSt;
