@@ -53,6 +53,10 @@ ObjectInst::Init(FileObjectInstance *fi)
 	m_translation = fi->position;
 	m_origTranslation = fi->position;
 	m_origRotation = fi->rotation;
+	m_savedTranslation = fi->position;
+	m_savedRotation = fi->rotation;
+	m_savedStateValid = true;
+	m_wasSavedDeleted = false;
 	m_lodId = fi->lod;
 	UpdateMatrix();
 }
@@ -179,6 +183,7 @@ ObjectInst::Delete(void)
 {
 	if(m_isDeleted) return;
 	m_isDeleted = true;
+	StampChangeSeq(this);
 	Deselect();
 
 	// If this HD building has a LOD, delete it too
@@ -402,6 +407,9 @@ createSpawnedInstance(int objectId, rw::V3d position, GameFile *file, int iplInd
 	inst->m_iplIndex = iplIndex;
 	inst->m_isAdded = true;
 	inst->m_isDirty = true;
+	inst->m_savedStateValid = false;
+	inst->m_wasSavedDeleted = false;
+	StampChangeSeq(inst);
 
 	ObjectDef *obj = GetObjectDef(objectId);
 
@@ -565,6 +573,46 @@ ToggleFavourite(int id)
 	if(id < 0 || id >= NUMOBJECTDEFS) return;
 	favourites[id] = !favourites[id];
 	SaveFavourites();
+}
+
+// Diff viewer — monotonic change counter for chronological ordering
+static uint32 gChangeSeqCounter = 0;
+
+void
+StampChangeSeq(ObjectInst *inst)
+{
+	inst->m_changeSeq = ++gChangeSeqCounter;
+}
+
+// Diff viewer — compute bitmask of changes since last save
+int
+GetInstanceDiffFlags(ObjectInst *inst)
+{
+	if(!inst->m_savedStateValid){
+		// Never saved — it's new (if not deleted)
+		if(!inst->m_isDeleted)
+			return DIFF_ADDED;
+		return 0;	// created then deleted before save — ignore
+	}
+	if(inst->m_isDeleted && !inst->m_wasSavedDeleted)
+		return DIFF_DELETED;
+	if(inst->m_isDeleted)
+		return 0;	// was deleted at save, still deleted
+
+	int flags = 0;
+	if(!inst->m_isDeleted && inst->m_wasSavedDeleted)
+		flags |= DIFF_RESTORED;
+	float dist = length(sub(inst->m_translation, inst->m_savedTranslation));
+	if(dist >= 0.001f)
+		flags |= DIFF_MOVED;
+	// quaternion distance: if |dot| < 0.9999 the rotation changed
+	float dot = fabsf(inst->m_rotation.x * inst->m_savedRotation.x +
+	                   inst->m_rotation.y * inst->m_savedRotation.y +
+	                   inst->m_rotation.z * inst->m_savedRotation.z +
+	                   inst->m_rotation.w * inst->m_savedRotation.w);
+	if(dot < 0.9999f)
+		flags |= DIFF_ROTATED;
+	return flags;
 }
 
 // 3D Preview — uses Scene camera with swapped framebuffers (librw pattern)
@@ -987,6 +1035,9 @@ cloneInstance(ObjectInst *src, GameFile *dstFile, int iplIndex, rw::V3d offset)
 	inst->m_iplIndex = iplIndex;
 	inst->m_isAdded = true;
 	inst->m_isDirty = true;
+	inst->m_savedStateValid = false;
+	inst->m_wasSavedDeleted = false;
+	StampChangeSeq(inst);
 	inst->UpdateMatrix();
 	inst->CreateRwObject();
 	InsertInstIntoSectors(inst);

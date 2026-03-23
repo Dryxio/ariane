@@ -13,6 +13,7 @@ static bool showTimeWeatherWindow;
 static bool showViewWindow;
 static bool showRenderingWindow;
 static bool showBrowserWindow;
+static bool showDiffWindow;
 
 static bool
 getEditorRootDirectory(char *dir, size_t size)
@@ -360,6 +361,25 @@ saveAllIpls(void)
 
 	// Also patch binary IPLs in IMG for streaming instances
 	FileLoader::SaveBinaryIpls();
+
+	// Update saved-state snapshot for diff viewer
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst->m_imageIndex < 0){
+			// Text IPL — everything is persisted (deletions as comments)
+			inst->m_savedTranslation = inst->m_translation;
+			inst->m_savedRotation = inst->m_rotation;
+			inst->m_wasSavedDeleted = inst->m_isDeleted;
+		}else{
+			// Binary IPL — positions/rotations persisted, deletions NOT
+			if(!inst->m_isDeleted){
+				inst->m_savedTranslation = inst->m_translation;
+				inst->m_savedRotation = inst->m_rotation;
+			}
+			inst->m_wasSavedDeleted = false;
+		}
+		inst->m_savedStateValid = true;
+	}
 }
 
 static void
@@ -618,6 +638,7 @@ uiMainmenu(void)
 			if(ImGui::MenuItem("Object Info", "I", showInstanceWindow)) { showInstanceWindow ^= 1; }
 			if(ImGui::MenuItem("Editor", "E", showEditorWindow)) { showEditorWindow ^= 1; }
 			if(ImGui::MenuItem("Object Browser", "B", showBrowserWindow)) { showBrowserWindow ^= 1; }
+			if(ImGui::MenuItem("Changes", "F", showDiffWindow)) { showDiffWindow ^= 1; }
 			if(ImGui::MenuItem("Log ", nil, showLogWindow)) { showLogWindow ^= 1; }
 			if(ImGui::MenuItem("Demo ", nil, showDemoWindow)) { showDemoWindow ^= 1; }
 			if(ImGui::MenuItem("Help", nil, showHelpWindow)) { showHelpWindow ^= 1; }
@@ -2113,6 +2134,141 @@ uiBrowserWindow(void)
 	ImGui::End();
 }
 
+static void
+uiDiffWindow(void)
+{
+	ImGui::Begin("Changes Since Last Save", &showDiffWindow);
+
+	// Count changes by category
+	int numAdded = 0, numDeleted = 0, numMoved = 0, numRotated = 0, numRestored = 0;
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		int flags = GetInstanceDiffFlags((ObjectInst*)p->item);
+		if(flags & DIFF_ADDED)    numAdded++;
+		if(flags & DIFF_DELETED)  numDeleted++;
+		if(flags & DIFF_MOVED)    numMoved++;
+		if(flags & DIFF_ROTATED)  numRotated++;
+		if(flags & DIFF_RESTORED) numRestored++;
+	}
+
+	int total = numAdded + numDeleted + numMoved + numRotated + numRestored;
+	if(total == 0){
+		ImGui::TextDisabled("No changes since last save.");
+		ImGui::End();
+		return;
+	}
+
+	ImGui::Text("%d added, %d deleted, %d moved, %d rotated", numAdded, numDeleted, numMoved, numRotated);
+	if(numRestored > 0)
+		ImGui::SameLine(), ImGui::Text(", %d restored", numRestored);
+	ImGui::Separator();
+
+	// Filter buttons (bitmask — 0 = show all)
+	static int diffFilter = 0;
+	if(ImGui::RadioButton("All", diffFilter == 0)) diffFilter = 0;
+	ImGui::SameLine();
+	if(ImGui::RadioButton("Added", diffFilter == DIFF_ADDED)) diffFilter = DIFF_ADDED;
+	ImGui::SameLine();
+	if(ImGui::RadioButton("Deleted", diffFilter == DIFF_DELETED)) diffFilter = DIFF_DELETED;
+	ImGui::SameLine();
+	if(ImGui::RadioButton("Moved", diffFilter == DIFF_MOVED)) diffFilter = DIFF_MOVED;
+	ImGui::SameLine();
+	if(ImGui::RadioButton("Rotated", diffFilter == DIFF_ROTATED)) diffFilter = DIFF_ROTATED;
+	if(numRestored > 0){
+		ImGui::SameLine();
+		if(ImGui::RadioButton("Restored", diffFilter == DIFF_RESTORED)) diffFilter = DIFF_RESTORED;
+	}
+
+	// Collect changed instances into temp array for sorting
+	ObjectInst *changed[4096];
+	int numChanged = 0;
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		int flags = GetInstanceDiffFlags(inst);
+		if(flags == 0) continue;
+		if(diffFilter != 0 && !(flags & diffFilter)) continue;
+		if(numChanged < 4096)
+			changed[numChanged++] = inst;
+	}
+
+	// Sort by m_changeSeq descending (most recent first)
+	for(int i = 0; i < numChanged - 1; i++)
+		for(int j = i + 1; j < numChanged; j++)
+			if(changed[j]->m_changeSeq > changed[i]->m_changeSeq){
+				ObjectInst *tmp = changed[i];
+				changed[i] = changed[j];
+				changed[j] = tmp;
+			}
+
+	ImGui::BeginChild("DiffList", ImVec2(0, 0), true);
+	for(int i = 0; i < numChanged; i++){
+		ObjectInst *inst = changed[i];
+		int flags = GetInstanceDiffFlags(inst);
+		ObjectDef *obj = GetObjectDef(inst->m_objectId);
+		const char *name = obj ? obj->m_name : "???";
+
+		// Build prefix string from flags
+		char prefix[8] = "";
+		ImVec4 color = ImVec4(1,1,1,1);
+		if(flags & DIFF_ADDED){
+			strcat(prefix, "+");
+			color = ImVec4(0.3f, 1.0f, 0.3f, 1.0f);
+		}else if(flags & DIFF_DELETED){
+			strcat(prefix, "-");
+			color = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+		}else if(flags & DIFF_RESTORED){
+			strcat(prefix, "U");
+			color = ImVec4(0.5f, 1.0f, 0.5f, 1.0f);
+		}else{
+			if(flags & DIFF_MOVED)  strcat(prefix, "M");
+			if(flags & DIFF_ROTATED) strcat(prefix, "R");
+			color = ImVec4(1.0f, 1.0f, 0.3f, 1.0f);
+			if(flags == DIFF_ROTATED)
+				color = ImVec4(0.3f, 0.7f, 1.0f, 1.0f);
+		}
+
+		char buf[256];
+		if(flags & DIFF_MOVED){
+			float dist = length(sub(inst->m_translation, inst->m_savedTranslation));
+			snprintf(buf, sizeof(buf), "%-3s %-20s  %.1f, %.1f, %.1f  (%.1fm)",
+				prefix, name,
+				inst->m_translation.x, inst->m_translation.y, inst->m_translation.z,
+				dist);
+		}else if(flags & DIFF_ROTATED){
+			float dot = fabsf(inst->m_rotation.x * inst->m_savedRotation.x +
+			                   inst->m_rotation.y * inst->m_savedRotation.y +
+			                   inst->m_rotation.z * inst->m_savedRotation.z +
+			                   inst->m_rotation.w * inst->m_savedRotation.w);
+			if(dot > 1.0f) dot = 1.0f;
+			float angleDeg = 2.0f * acosf(dot) * (180.0f / 3.14159265f);
+			snprintf(buf, sizeof(buf), "%-3s %-20s  %.1f, %.1f, %.1f  (%.1f deg)",
+				prefix, name,
+				inst->m_translation.x, inst->m_translation.y, inst->m_translation.z,
+				angleDeg);
+		}else{
+			snprintf(buf, sizeof(buf), "%-3s %-20s  %.1f, %.1f, %.1f",
+				prefix, name,
+				inst->m_translation.x, inst->m_translation.y, inst->m_translation.z);
+		}
+
+		ImGui::PushStyleColor(ImGuiCol_Text, color);
+		ImGui::PushID(inst);
+		if(ImGui::Selectable(buf)){
+			inst->Select();
+		}
+		ImGui::PopID();
+		ImGui::PopStyleColor();
+
+		if(ImGui::IsItemHovered()){
+			inst->m_highlight = HIGHLIGHT_HOVER;
+			if(ImGui::IsMouseDoubleClicked(0))
+				inst->JumpTo();
+		}
+	}
+	ImGui::EndChild();
+
+	ImGui::End();
+}
+
 static ExampleAppLog logwindow;
 // TODO: this crashes for me on linux. should figure out how to fix
 //void addToLogWindow(const char *fmt, va_list args) { logwindow.AddLog(fmt, args); }
@@ -2224,6 +2380,9 @@ gui(void)
 
 	if(CPad::IsKeyJustDown('E')) showEditorWindow ^= 1;
 	if(showEditorWindow) uiEditorWindow();
+
+	if(!CPad::IsCtrlDown() && CPad::IsKeyJustDown('F')) showDiffWindow ^= 1;
+	if(showDiffWindow) uiDiffWindow();
 
 	if(CPad::IsKeyJustDown('B')){
 		showBrowserWindow ^= 1;

@@ -375,6 +375,17 @@ enum ToastCategory {
 };
 void Toast(ToastCategory cat, const char *fmt, ...);
 
+// Diff viewer flags (bitmask — an instance can be both moved and rotated)
+enum DiffFlags {
+	DIFF_ADDED    = 1,
+	DIFF_DELETED  = 2,
+	DIFF_MOVED    = 4,
+	DIFF_ROTATED  = 8,
+	DIFF_RESTORED = 16,
+};
+int GetInstanceDiffFlags(ObjectInst *inst);
+void StampChangeSeq(ObjectInst *inst);
+
 // Object Spawner
 extern bool gPlaceMode;
 void InitLodLookup(void);
@@ -580,6 +591,12 @@ struct ObjectInst
 	bool m_isDirty;		// position/rotation was modified
 	rw::V3d m_origTranslation;	// position the game currently has (for hot reload)
 	rw::Quat m_origRotation;	// rotation the game currently has (for hot reload)
+	// saved state (updated when IPL is written to disk)
+	rw::V3d m_savedTranslation;
+	rw::Quat m_savedRotation;
+	bool m_savedStateValid;		// false for instances that have never been saved
+	bool m_wasSavedDeleted;		// deletion state at last save (text IPL only)
+	uint32 m_changeSeq;		// monotonic counter for chronological diff ordering
 	int m_iplIndex;		// index of this instance within its IPL file (for save)
 	int32 m_imageIndex;	// IMG directory index (for binary IPL save), -1 if text IPL
 	int m_binInstIndex;	// index within binary IPL instance array

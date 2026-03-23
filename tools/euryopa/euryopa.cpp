@@ -891,6 +891,7 @@ ApplyTransform(UndoTransform &t)
 	if(t.flags & UNDO_TRANSFORM_ROT)
 		inst->m_rotation = t.newRot;
 	inst->m_isDirty = true;
+	StampChangeSeq(inst);
 	inst->UpdateMatrix();
 	updateRwFrame(inst);
 	if(refreshSectors)
@@ -1311,6 +1312,9 @@ dogizmo(void)
 	}
 	// Record undo when drag ends
 	if(!isUsing && wasDragging){
+		StampChangeSeq(inst);
+		if(dragLodInst)
+			StampChangeSeq(dragLodInst);
 		if(gGizmoMode == GIZMO_TRANSLATE){
 			if(dragStartAlignToSurface){
 				UndoTransform transforms[2];
