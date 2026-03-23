@@ -306,6 +306,9 @@ CheckThread(void *arg)
 
 	const char *p = json;
 	bool found = false;
+	int changelogLen = 0;
+	gChangelog[0] = '\0';
+
 	while((p = strstr(p, "\"tag_name\"")) != nil){
 		char tag[128] = {};
 		const char *cursor = p + 10;
@@ -322,34 +325,52 @@ CheckThread(void *arg)
 				verClean[j] = ver[j];
 
 			if(IsNewerVersion(verClean, ARIANE_VERSION)){
-				strncpy(gNewVersion, verClean, sizeof(gNewVersion) - 1);
+				// Only grab version + download URL from the latest release
+				if(!found){
+					strncpy(gNewVersion, verClean, sizeof(gNewVersion) - 1);
 
-				const char *assetSearch = p;
-				for(int attempts = 0; attempts < 5; attempts++){
-					const char *dlUrl = strstr(assetSearch, "\"browser_download_url\"");
-					if(!dlUrl) break;
-					char url[1024] = {};
-					const char *u = dlUrl + 21;
-					while(*u == ' ' || *u == ':' || *u == '\t' || *u == '"') u++;
-					int k = 0;
-					while(*u && *u != '"' && k < 1023) url[k++] = *u++;
-					url[k] = '\0';
+					const char *assetSearch = p;
+					for(int attempts = 0; attempts < 5; attempts++){
+						const char *dlUrl = strstr(assetSearch, "\"browser_download_url\"");
+						if(!dlUrl) break;
+						char url[1024] = {};
+						const char *u = dlUrl + 21;
+						while(*u == ' ' || *u == ':' || *u == '\t' || *u == '"') u++;
+						int k = 0;
+						while(*u && *u != '"' && k < 1023) url[k++] = *u++;
+						url[k] = '\0';
 
-					if(strstr(url, "ariane.exe") || strstr(url, "ariane-windows")){
-						strncpy(gDownloadUrl, url, sizeof(gDownloadUrl) - 1);
-						found = true;
-						break;
+						if(strstr(url, "ariane.exe") || strstr(url, "ariane-windows")){
+							strncpy(gDownloadUrl, url, sizeof(gDownloadUrl) - 1);
+							found = true;
+							break;
+						}
+						assetSearch = u;
 					}
-					assetSearch = u;
 				}
 
+				// Accumulate changelog from all newer releases
 				const char *nextTag = strstr(p + 1, "\"tag_name\"");
 				const char *bodyTag = strstr(p, "\"body\"");
 				if(bodyTag && (!nextTag || bodyTag < nextTag)){
-					JsonGetString(p, "body", gChangelog, sizeof(gChangelog));
+					char bodyBuf[1024] = {};
+					JsonGetString(p, "body", bodyBuf, sizeof(bodyBuf));
+					if(bodyBuf[0]){
+						int remaining = (int)sizeof(gChangelog) - changelogLen - 1;
+						if(changelogLen > 0 && remaining > 2){
+							gChangelog[changelogLen++] = '\n';
+							gChangelog[changelogLen++] = '\n';
+							remaining -= 2;
+						}
+						int blen = (int)strlen(bodyBuf);
+						if(blen > remaining) blen = remaining;
+						if(blen > 0){
+							memcpy(gChangelog + changelogLen, bodyBuf, blen);
+							changelogLen += blen;
+							gChangelog[changelogLen] = '\0';
+						}
+					}
 				}
-
-				if(found) break;
 			}
 		}
 		p = cursor;
