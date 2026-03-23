@@ -1,4 +1,5 @@
 #include "euryopa.h"
+#include "modloader.h"
 
 static TxdDef txdlist[NUMTEXDICTS];
 static int numTxds;
@@ -64,6 +65,7 @@ LoadTxd(int i)
 {
 	uint8 *buffer;
 	int size;
+	bool looseFile = false;
 	rw::StreamMemory stream;
 	TxdDef *td = GetTxdDef(i);
 	if(td->txd)
@@ -71,12 +73,18 @@ LoadTxd(int i)
 	if(td->parentId >= 0)
 		LoadTxd(td->parentId);
 
-	if(td->imageIndex < 0){
-		log("warning: no streaming info for txd %s\n", td->name);
-		return;
+	const char *loosePath = ModloaderFindOverride(td->name, "txd");
+	if(loosePath){
+		buffer = ReadLooseFile(loosePath, &size);
+		looseFile = true;
+	}else{
+		if(td->imageIndex < 0){
+			log("warning: no streaming info for txd %s\n", td->name);
+			return;
+		}
+		buffer = ReadFileFromImage(td->imageIndex, &size);
 	}
 
-	buffer = ReadFileFromImage(td->imageIndex, &size);
 	stream.open((uint8*)buffer, size);
 	if(findChunk(&stream, rw::ID_TEXDICTIONARY, nil, nil)){
 		td->txd = rw::TexDictionary::streamRead(&stream);
@@ -90,6 +98,7 @@ LoadTxd(int i)
 	}
 
 	stream.close();
+	if(looseFile) free(buffer);
 }
 
 void

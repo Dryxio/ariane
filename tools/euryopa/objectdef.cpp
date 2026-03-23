@@ -1,4 +1,5 @@
 #include "euryopa.h"
+#include "modloader.h"
 
 static ObjectDef *objdefs[NUMOBJECTDEFS];
 
@@ -147,6 +148,7 @@ ObjectDef::LoadAtomic(void)
 {
 	uint8 *buffer;
 	int size;
+	bool looseFile = false;
 	rw::StreamMemory stream;
 	rw::Clump *clump;
 	rw::Atomic *atomic;
@@ -154,7 +156,13 @@ ObjectDef::LoadAtomic(void)
 	char name[MODELNAMELEN];
 	int n;
 
-	buffer = ReadFileFromImage(this->m_imageIndex, &size);
+	const char *loosePath = ModloaderFindOverride(this->m_name, "dff");
+	if(loosePath){
+		buffer = ReadLooseFile(loosePath, &size);
+		looseFile = true;
+	}else{
+		buffer = ReadFileFromImage(this->m_imageIndex, &size);
+	}
 	stream.open((uint8*)buffer, size);
 	clump = loadclump(&stream);
 	if(clump){
@@ -175,6 +183,7 @@ ObjectDef::LoadAtomic(void)
 			CantLoad();
 	}
 	stream.close();
+	if(looseFile) free(buffer);
 }
 
 void
@@ -182,11 +191,18 @@ ObjectDef::LoadClump(void)
 {
 	uint8 *buffer;
 	int size;
+	bool looseFile = false;
 	rw::StreamMemory stream;
 	rw::Clump *clump;
 	rw::Atomic *atomic;
 
-	buffer = ReadFileFromImage(this->m_imageIndex, &size);
+	const char *loosePath = ModloaderFindOverride(this->m_name, "dff");
+	if(loosePath){
+		buffer = ReadLooseFile(loosePath, &size);
+		looseFile = true;
+	}else{
+		buffer = ReadFileFromImage(this->m_imageIndex, &size);
+	}
 	stream.open((uint8*)buffer, size);
 	clump = loadclump(&stream);
 	if(clump){
@@ -199,6 +215,7 @@ ObjectDef::LoadClump(void)
 			CantLoad();
 	}
 	stream.close();
+	if(looseFile) free(buffer);
 }
 
 void
@@ -207,7 +224,9 @@ ObjectDef::Load(void)
 	if(m_cantLoad)
 		return;
 
-	if(this->m_imageIndex < 0){
+	bool hasLooseDff = ModloaderFindOverride(this->m_name, "dff") != nil;
+
+	if(this->m_imageIndex < 0 && !hasLooseDff){
 		log("warning: no streaming info for object %s %d %X\n", this->m_name, this->m_id, this->m_imageIndex);
 		CantLoad();
 		return;

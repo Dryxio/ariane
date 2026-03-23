@@ -1,4 +1,5 @@
 #include "euryopa.h"
+#include "modloader.h"
 #include <vector>
 
 GameFile*
@@ -6,6 +7,8 @@ NewGameFile(char *path)
 {
 	GameFile *f = new GameFile;
 	f->name = strdup(path);
+	const char *src = ModloaderGetSourcePath(path);
+	f->sourcePath = src ? strdup(src) : nil;
 	return f;
 }
 
@@ -715,7 +718,7 @@ AddTexDictionaries(rw::TexDictionary *dst, rw::TexDictionary *src)
 		dst->addFront(rw::Texture::fromDict(lnk));
 }
 
-static void
+void
 LoadCollisionFile(const char *path)
 {
 	FILE *f;
@@ -916,10 +919,22 @@ SaveScene(const char *filename)
 				fileInsts[j] = tmp;
 			}
 
-	// Resolve the real OS path (converts backslashes etc)
+	// Resolve the real OS path — prefer sourcePath from mod files
 	char realpath[1024];
-	strncpy(realpath, filename, sizeof(realpath));
-	rw::makePath(realpath);
+	const char *srcPath = nil;
+	for(p = instances.first; p; p = p->next){
+		inst = (ObjectInst*)p->item;
+		if(strcmp(inst->m_file->name, filename) == 0){
+			srcPath = inst->m_file->sourcePath;
+			break;
+		}
+	}
+	if(srcPath){
+		strncpy(realpath, srcPath, sizeof(realpath));
+	}else{
+		strncpy(realpath, filename, sizeof(realpath));
+		rw::makePath(realpath);
+	}
 
 	snprintf(tmppath, sizeof(tmppath), "%s.tmp", realpath);
 	fin = fopen(realpath, "rb");

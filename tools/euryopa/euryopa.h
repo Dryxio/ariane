@@ -274,6 +274,7 @@ void Update(void);
 struct GameFile
 {
 	char *name;
+	char *sourcePath;  // physical disk path for I/O, or nil for base game files
 	// types of files we want to have eventually:
 	//	IDE Definition
 	//	IPL Scene
@@ -821,6 +822,9 @@ struct DatDesc
 
 char *LoadLine(FILE *f);
 void LoadLevel(const char *filename);
+void LoadObjectTypes(const char *filename);
+void LoadScene(const char *filename);
+void LoadCollisionFile(const char *path);
 rw::TexDictionary *LoadTexDictionary(const char *path);
 void SaveScene(const char *filename);
 void SaveBinaryIpls(void);

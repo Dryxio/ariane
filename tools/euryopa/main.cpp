@@ -1,6 +1,7 @@
 #include "euryopa.h"
 #include "version.h"
 #include "updater.h"
+#include "modloader.h"
 
 //#define XINPUT
 #ifdef XINPUT
@@ -64,6 +65,9 @@ getPath(const char *path)
 FILE*
 fopen_ci(const char *path, const char *mode)
 {
+	const char *redirect = ModloaderRedirectPath(path);
+	if(redirect)
+		return fopen(redirect, mode);
 	char cipath[1024];
 	strncpy(cipath, path, 1024);
 	rw::makePath(cipath);

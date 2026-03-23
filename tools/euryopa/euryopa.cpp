@@ -1,4 +1,5 @@
 #include "euryopa.h"
+#include "modloader.h"
 
 int gameversion;
 int gameplatform;
@@ -1127,6 +1128,7 @@ LoadGame(void)
 //	SetCurrentDirectory("C:/Users/aap/games/gtasa");
 
 	FindVersion();
+	ModloaderInit();
 	switch(gameversion){
 	case GAME_III: debug("found III!\n"); break;
 	case GAME_VC: debug("found VC!\n"); break;
@@ -1174,6 +1176,14 @@ LoadGame(void)
 	if(isSA())
 		AddCdImage("MODELS\\GTA_INT.IMG");
 
+	if(ModloaderIsActive()){
+		ModloaderDatEntry imgEntries[64];
+		int nImg = ModloaderGetAdditions(imgEntries, 64);
+		for(int i = 0; i < nImg; i++)
+			if(strcmp(imgEntries[i].type, "IMG") == 0 || strcmp(imgEntries[i].type, "CDIMAGE") == 0)
+				AddCdImage(imgEntries[i].logicalPath);
+	}
+
 	FileLoader::LoadLevel("data/default.dat");
 	switch(gameversion){
 	case GAME_III: FileLoader::LoadLevel("data/gta3.dat"); break;
@@ -1182,6 +1192,30 @@ LoadGame(void)
 	case GAME_LCS: FileLoader::LoadLevel("data/gta_lcs.dat"); break;
 	case GAME_VCS: FileLoader::LoadLevel("data/gta_vcs.dat"); break;
 	}
+
+	if(ModloaderIsActive()){
+		ModloaderDatEntry entries[256];
+		int n = ModloaderGetAdditions(entries, 256);
+		for(int i = 0; i < n; i++){
+			if(strcmp(entries[i].type, "IDE") == 0){
+				FileLoader::currentFile = NewGameFile((char*)entries[i].logicalPath);
+				FileLoader::LoadObjectTypes(entries[i].logicalPath);
+			}
+		}
+		for(int i = 0; i < n; i++){
+			if(strcmp(entries[i].type, "COLFILE") == 0){
+				FileLoader::currentFile = NewGameFile((char*)entries[i].logicalPath);
+				FileLoader::LoadCollisionFile(entries[i].logicalPath);
+			}
+		}
+		for(int i = 0; i < n; i++){
+			if(strcmp(entries[i].type, "IPL") == 0){
+				FileLoader::currentFile = NewGameFile((char*)entries[i].logicalPath);
+				FileLoader::LoadScene(entries[i].logicalPath);
+			}
+		}
+	}
+
 	InitLodLookup();
 	InitObjectCategories();
 	LoadFavourites();
