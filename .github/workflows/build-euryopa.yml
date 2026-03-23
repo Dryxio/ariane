@@ -106,8 +106,6 @@ jobs:
           name: Ariane ${{ steps.version.outputs.version }} (${{ steps.version.outputs.channel }})
           body: |
             Ariane ${{ steps.version.outputs.version }} — channel: **${{ steps.version.outputs.channel }}**
-
-            Built from commit ${{ github.sha }}
           files: ariane/bin/win-amd64-d3d9/Release/ariane.exe
           draft: false
           prerelease: ${{ steps.version.outputs.channel == 'PE' }}
