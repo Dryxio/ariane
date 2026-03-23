@@ -99,9 +99,7 @@ findFileRecursive(const char *dir, const char *name)
 static const char*
 getRequiredTeleportAsiName(void)
 {
-	if(isIII()) return "ariane_teleport.III.asi";
-	if(isVC()) return "ariane_teleport.VC.asi";
-	if(isSA()) return "ariane_teleport.SA.asi";
+	if(isIII() || isVC() || isSA()) return "ariane.asi";
 	return nil;
 }
 
