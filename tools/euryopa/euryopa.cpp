@@ -13,6 +13,9 @@ bool gPlaceSnapToObjects = true;
 bool gPlaceSnapToGround = true;
 bool gDragFollowGround = false;
 bool gDragAlignToSurface = false;
+bool gGizmoSnap = false;
+float gGizmoSnapAngle = 15.0f;
+float gGizmoSnapTranslate = 1.0f;
 
 int gameTxdSlot;
 
@@ -1269,7 +1272,21 @@ dogizmo(void)
 	ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
 
 	ImGuizmo::OPERATION op = gGizmoMode == GIZMO_ROTATE ? ImGuizmo::ROTATE : ImGuizmo::TRANSLATE;
-	ImGuizmo::Manipulate(fview, fproj, op, ImGuizmo::LOCAL, fobj, nil, nil);
+	float snapValues[3];
+	float *snapPtr = nil;
+	if(gGizmoSnap){
+		if(gGizmoMode == GIZMO_ROTATE){
+			snapValues[0] = gGizmoSnapAngle;
+			snapValues[1] = gGizmoSnapAngle;
+			snapValues[2] = gGizmoSnapAngle;
+		}else{
+			snapValues[0] = gGizmoSnapTranslate;
+			snapValues[1] = gGizmoSnapTranslate;
+			snapValues[2] = gGizmoSnapTranslate;
+		}
+		snapPtr = snapValues;
+	}
+	ImGuizmo::Manipulate(fview, fproj, op, ImGuizmo::LOCAL, fobj, nil, snapPtr);
 
 	gGizmoHovered = ImGuizmo::IsOver();
 	bool isUsing = ImGuizmo::IsUsing();

@@ -301,6 +301,9 @@ extern bool gPlaceSnapToObjects;
 extern bool gPlaceSnapToGround;
 extern bool gDragFollowGround;
 extern bool gDragAlignToSurface;
+extern bool gGizmoSnap;
+extern float gGizmoSnapAngle;
+extern float gGizmoSnapTranslate;
 
 // Undo/Redo
 enum UndoType {

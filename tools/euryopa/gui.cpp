@@ -1739,6 +1739,42 @@ uiInstWindow(void)
 		ImGui::SameLine();
 		if(ImGui::RadioButton("Rotate (Q)", gGizmoMode == GIZMO_ROTATE))
 			gGizmoMode = GIZMO_ROTATE;
+		ImGui::Checkbox("Snap", &gGizmoSnap);
+		if(gGizmoSnap){
+			char buf[32];
+			ImGui::SameLine();
+			if(gGizmoMode == GIZMO_ROTATE){
+				snprintf(buf, sizeof(buf), "%d\xC2\xB0", (int)gGizmoSnapAngle);
+				ImGui::SetNextItemWidth(80);
+				if(ImGui::BeginCombo("##snapangle", buf)){
+					float angles[] = { 5, 10, 15, 30, 45, 90 };
+					for(int i = 0; i < 6; i++){
+						bool selected = gGizmoSnapAngle == angles[i];
+						snprintf(buf, sizeof(buf), "%d\xC2\xB0", (int)angles[i]);
+						if(ImGui::Selectable(buf, selected))
+							gGizmoSnapAngle = angles[i];
+						if(selected)
+							ImGui::SetItemDefaultFocus();
+					}
+					ImGui::EndCombo();
+				}
+			}else{
+				snprintf(buf, sizeof(buf), "%d", (int)gGizmoSnapTranslate);
+				ImGui::SetNextItemWidth(80);
+				if(ImGui::BeginCombo("##snaptrans", buf)){
+					float intervals[] = { 1, 2, 5, 10, 25, 50 };
+					for(int i = 0; i < 6; i++){
+						bool selected = gGizmoSnapTranslate == intervals[i];
+						snprintf(buf, sizeof(buf), "%d", (int)intervals[i]);
+						if(ImGui::Selectable(buf, selected))
+							gGizmoSnapTranslate = intervals[i];
+						if(selected)
+							ImGui::SetItemDefaultFocus();
+					}
+					ImGui::EndCombo();
+				}
+			}
+		}
 		if(gGizmoMode == GIZMO_TRANSLATE){
 			ImGui::Checkbox("Ground Follow While Dragging", &gDragFollowGround);
 			ImGui::BeginDisabled(!gDragFollowGround);
