@@ -331,6 +331,15 @@ struct ExampleAppLog
 
 static ImVec4 mkColor(rw::RGBA &c) { return ImVec4(c.red/255.0f, c.green/255.0f, c.blue/255.0f, c.alpha/255.0f); }
 
+static bool
+binaryImageWasSaved(const FileLoader::BinaryIplSaveResult &result, int32 imageIndex)
+{
+	for(int i = 0; i < result.numSavedImages; i++)
+		if(result.savedImages[i] == imageIndex)
+			return true;
+	return false;
+}
+
 static void
 saveAllIpls(void)
 {
@@ -360,7 +369,11 @@ saveAllIpls(void)
 	}
 
 	// Also patch binary IPLs in IMG for streaming instances
-	FileLoader::SaveBinaryIpls();
+	FileLoader::BinaryIplSaveResult binaryResult = FileLoader::SaveBinaryIpls();
+	if(binaryResult.numBlockedEmptyDeletes)
+		Toast(TOAST_SAVE, "Blocked %d binary delete(s): can't empty a streaming IPL", binaryResult.numBlockedEmptyDeletes);
+	else if(binaryResult.numFailedImages)
+		Toast(TOAST_SAVE, "Failed to save %d binary IPL(s)", binaryResult.numFailedImages);
 
 	// Update saved-state snapshot for diff viewer
 	for(p = instances.first; p; p = p->next){
@@ -370,15 +383,15 @@ saveAllIpls(void)
 			inst->m_savedTranslation = inst->m_translation;
 			inst->m_savedRotation = inst->m_rotation;
 			inst->m_wasSavedDeleted = inst->m_isDeleted;
-		}else{
-			// Binary IPL — positions/rotations persisted, deletions NOT
+			inst->m_savedStateValid = true;
+		}else if(binaryImageWasSaved(binaryResult, inst->m_imageIndex)){
 			if(!inst->m_isDeleted){
 				inst->m_savedTranslation = inst->m_translation;
 				inst->m_savedRotation = inst->m_rotation;
 			}
-			inst->m_wasSavedDeleted = false;
+			inst->m_wasSavedDeleted = inst->m_isDeleted;
+			inst->m_savedStateValid = true;
 		}
-		inst->m_savedStateValid = true;
 	}
 }
 
@@ -490,12 +503,18 @@ hotReloadIpls(void)
 	// --- Streaming IPLs (binary, reloaded via CIplStore) ---
 	const char *iplNames[256];
 	int numNames = 0;
+	FileLoader::BinaryIplSaveResult binaryResult = FileLoader::SaveBinaryIpls();
+	if(binaryResult.numBlockedEmptyDeletes)
+		Toast(TOAST_SAVE, "Blocked %d binary delete(s): can't empty a streaming IPL", binaryResult.numBlockedEmptyDeletes);
+	else if(binaryResult.numFailedImages)
+		Toast(TOAST_SAVE, "Failed to save %d binary IPL(s)", binaryResult.numFailedImages);
 
 	for(p = instances.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
 		if(inst->m_imageIndex < 0) continue;
-		if(!inst->m_isDirty && !inst->m_isDeleted) continue;
 		if(inst->m_file == nil) continue;
+		if(!binaryImageWasSaved(binaryResult, inst->m_imageIndex))
+			continue;
 
 		bool found = false;
 		for(int i = 0; i < numNames; i++){
@@ -509,7 +528,6 @@ hotReloadIpls(void)
 	}
 
 	if(numNames > 0){
-		FileLoader::SaveBinaryIpls();
 
 		FILE *f = fopen(reloadPath, "w");
 		if(f){
@@ -529,6 +547,9 @@ hotReloadIpls(void)
 		for(p = instances.first; p; p = p->next){
 			ObjectInst *inst = (ObjectInst*)p->item;
 			if(!inst->m_isDirty && !inst->m_isDeleted) continue;
+			if(inst->m_imageIndex >= 0 &&
+			   binaryImageWasSaved(binaryResult, inst->m_imageIndex))
+				continue;
 
 			if(inst->m_isAdded){
 				if(inst->m_isDeleted)

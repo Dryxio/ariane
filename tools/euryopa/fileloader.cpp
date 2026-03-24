@@ -1,5 +1,6 @@
 #include "euryopa.h"
 #include "modloader.h"
+#include <algorithm>
 #include <vector>
 
 GameFile*
@@ -1037,100 +1038,236 @@ SaveScene(const char *filename)
 
 // Save modified instances in binary streaming IPLs by patching
 // directly in the IMG archive (in-place, same file size).
-// Only transform/area edits are safe here; deleting binary entries would
-// require re-packing the IPL and fixing instance/Lod indices.
-void
+// Pure transform/area edits patch the current slots in-place.
+// If the live set changed (delete/restore), rebuild the inst section by
+// compacting surviving entries to the front and updating indices/counts.
+static bool
+binaryInstNeedsSave(ObjectInst *inst)
+{
+	return inst->m_imageIndex >= 0 &&
+		(inst->m_isDirty || inst->m_isDeleted != inst->m_wasSavedDeleted);
+}
+
+static int
+buildBinaryAreaFlags(ObjectInst *inst)
+{
+	int area = inst->m_area;
+	if(inst->m_isUnimportant) area |= 0x100;
+	if(inst->m_isUnderWater) area |= 0x400;
+	if(inst->m_isTunnel) area |= 0x800;
+	if(inst->m_isTunnelTransition) area |= 0x1000;
+	return area;
+}
+
+static void
+fillBinaryInstData(FileObjectInstance *dst, ObjectInst *inst)
+{
+	dst->position = inst->m_translation;
+	dst->rotation = inst->m_rotation;
+	dst->objectId = inst->m_objectId;
+	dst->area = buildBinaryAreaFlags(inst);
+	dst->lod = inst->m_lodId;
+}
+
+static void
+rememberBinaryImage(int32 *images, int *numImages, int32 imageIndex)
+{
+	for(int i = 0; i < *numImages; i++)
+		if(images[i] == imageIndex)
+			return;
+	if(*numImages < 256)
+		images[(*numImages)++] = imageIndex;
+}
+
+struct BinaryIplHeader
+{
+	uint32 fourcc;
+	uint32 numInst;
+	uint32 numUnk1;
+	uint32 numUnk2;
+	uint32 numUnk3;
+	uint32 numCarGens;
+	uint32 numUnk4;
+	uint32 offsetInst;
+	uint32 sizeInst;
+	uint32 offsetUnk1;
+	uint32 sizeUnk1;
+	uint32 offsetUnk2;
+	uint32 sizeUnk2;
+	uint32 offsetUnk3;
+	uint32 sizeUnk3;
+	uint32 offsetCarGens;
+	uint32 sizeCarGens;
+	uint32 offsetUnk4;
+	uint32 sizeUnk4;
+};
+
+BinaryIplSaveResult
 SaveBinaryIpls(void)
 {
+	BinaryIplSaveResult result = {};
 	CPtrNode *p;
 	int numDeleted = 0, numMoved = 0;
-
-	// Collect all streaming instances that need patching
-	struct PatchInfo {
-		int32 imageIndex;
-		int binInstIndex;
-		ObjectInst *inst;
-	};
-	PatchInfo patches[4096];
-	int numPatches = 0;
+	int32 imagesToProcess[256];
+	int numImagesToProcess = 0;
 
 	for(p = instances.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
-		if(inst->m_imageIndex < 0) continue;	// text IPL instance
-		if(!inst->m_isDeleted && !inst->m_isDirty) continue;	// unmodified
-		if(numPatches < 4096){
-			patches[numPatches].imageIndex = inst->m_imageIndex;
-			patches[numPatches].binInstIndex = inst->m_binInstIndex;
-			patches[numPatches].inst = inst;
-			numPatches++;
-		}
+		if(!binaryInstNeedsSave(inst))
+			continue;
+		rememberBinaryImage(imagesToProcess, &numImagesToProcess, inst->m_imageIndex);
 	}
 
-	log("SaveBinaryIpls: %d modified streaming instances to write back\n", numPatches);
-	if(numPatches == 0) return;
+	log("SaveBinaryIpls: %d modified streaming IPL(s) to write back\n", numImagesToProcess);
+	if(numImagesToProcess == 0)
+		return result;
 
-	// Process each unique imageIndex
-	int32 processedImgs[256];
-	int numProcessed = 0;
-
-	for(int pi = 0; pi < numPatches; pi++){
-		int32 imgIdx = patches[pi].imageIndex;
-
-		// Check if already processed
-		bool done = false;
-		for(int j = 0; j < numProcessed; j++)
-			if(processedImgs[j] == imgIdx){ done = true; break; }
-		if(done) continue;
-		processedImgs[numProcessed++] = imgIdx;
+	for(int ii = 0; ii < numImagesToProcess; ii++){
+		int32 imgIdx = imagesToProcess[ii];
 
 		// Read the binary IPL
 		int size;
 		uint8 *buffer = ReadFileFromImage(imgIdx, &size);
-		if(*(uint32*)buffer != 0x79726E62) continue;	// not bnry
+		if(buffer == nil || *(uint32*)buffer != 0x79726E62){
+			log("SaveBinaryIpls: image %d is not a binary IPL\n", imgIdx & 0xFFFFFF);
+			rememberBinaryImage(result.failedImages, &result.numFailedImages, imgIdx);
+			continue;
+		}
 
-		FileObjectInstance *instData =
-			(FileObjectInstance*)(buffer + *(int32*)(buffer+0x1C));
+		BinaryIplHeader *hdr = (BinaryIplHeader*)buffer;
+		FileObjectInstance *instData = (FileObjectInstance*)(buffer + hdr->offsetInst);
 
-		// Apply all patches for this imageIndex
+		std::vector<ObjectInst*> imageInsts;
+		imageInsts.reserve(128);
+		bool rebuild = false;
+		for(p = instances.first; p; p = p->next){
+			ObjectInst *inst = (ObjectInst*)p->item;
+			if(inst->m_imageIndex != imgIdx)
+				continue;
+			imageInsts.push_back(inst);
+			if(inst->m_isDeleted != inst->m_wasSavedDeleted)
+				rebuild = true;
+		}
+
+		if(imageInsts.empty())
+			continue;
+
+		std::sort(imageInsts.begin(), imageInsts.end(),
+			[](ObjectInst *a, ObjectInst *b) {
+				if(a->m_binInstIndex != b->m_binInstIndex)
+					return a->m_binInstIndex < b->m_binInstIndex;
+				return a->m_id < b->m_id;
+			});
+
+		// Determine the maximum space the inst section can occupy inside this entry.
+		uint32 nextOffset = (uint32)size;
+		const uint32 sectionOffsets[] = {
+			hdr->offsetUnk1, hdr->offsetUnk2, hdr->offsetUnk3,
+			hdr->offsetCarGens, hdr->offsetUnk4
+		};
+		const uint32 sectionSizes[] = {
+			hdr->sizeUnk1, hdr->sizeUnk2, hdr->sizeUnk3,
+			hdr->sizeCarGens, hdr->sizeUnk4
+		};
+		for(int si = 0; si < 5; si++){
+			if(sectionSizes[si] == 0)
+				continue;
+			if(sectionOffsets[si] > hdr->offsetInst && sectionOffsets[si] < nextOffset)
+				nextOffset = sectionOffsets[si];
+		}
+		uint32 maxInstBytes = nextOffset > hdr->offsetInst ? nextOffset - hdr->offsetInst : 0;
+		uint32 maxInstCount = maxInstBytes / sizeof(FileObjectInstance);
+
 		bool modified = false;
-		for(int k = 0; k < numPatches; k++){
-			if(patches[k].imageIndex != imgIdx) continue;
-			int idx = patches[k].binInstIndex;
-			ObjectInst *inst = patches[k].inst;
+		std::vector<int> rebuiltIndices;
+		if(rebuild){
+			int numAlive = 0;
+			for(size_t i = 0; i < imageInsts.size(); i++)
+				if(!imageInsts[i]->m_isDeleted)
+					numAlive++;
 
-			if(inst->m_isDeleted){
-				numDeleted++;
-			}else{
-				// Write back current position and rotation
-				instData[idx].position = inst->m_translation;
-				instData[idx].rotation = inst->m_rotation;
-				// area flags
-				int area = inst->m_area;
-				if(inst->m_isUnimportant) area |= 0x100;
-				if(inst->m_isUnderWater) area |= 0x400;
-				if(inst->m_isTunnel) area |= 0x800;
-				if(inst->m_isTunnelTransition) area |= 0x1000;
-				instData[idx].area = area;
+			if(numAlive == 0){
+				log("SaveBinaryIpls: refusing to empty binary IPL image %d\n", imgIdx & 0xFFFFFF);
+				result.numBlockedEmptyDeletes++;
+				continue;
+			}
+			if((uint32)numAlive > maxInstCount){
+				log("SaveBinaryIpls: image %d needs %d inst(s), but only %u fit in section\n",
+					imgIdx & 0xFFFFFF, numAlive, maxInstCount);
+				rememberBinaryImage(result.failedImages, &result.numFailedImages, imgIdx);
+				continue;
+			}
+
+			int nextIdx = 0;
+			rebuiltIndices.assign(imageInsts.size(), -1);
+			for(size_t i = 0; i < imageInsts.size(); i++){
+				ObjectInst *inst = imageInsts[i];
+				if(inst->m_isDeleted){
+					numDeleted++;
+					continue;
+				}
+				fillBinaryInstData(&instData[nextIdx], inst);
+				rebuiltIndices[i] = nextIdx++;
+			}
+			hdr->numInst = numAlive;
+			hdr->sizeInst = numAlive * sizeof(FileObjectInstance);
+			modified = true;
+		}else{
+			bool validPatch = true;
+			for(size_t i = 0; i < imageInsts.size(); i++){
+				ObjectInst *inst = imageInsts[i];
+				if(!inst->m_isDirty)
+					continue;
+				int idx = inst->m_binInstIndex;
+				if(idx < 0 || (uint32)idx >= hdr->numInst){
+					log("SaveBinaryIpls: invalid binary inst index %d for image %d\n",
+						idx, imgIdx & 0xFFFFFF);
+					modified = false;
+					rememberBinaryImage(result.failedImages, &result.numFailedImages, imgIdx);
+					validPatch = false;
+					break;
+				}
+				fillBinaryInstData(&instData[idx], inst);
 				numMoved++;
 				modified = true;
 			}
+			if(!validPatch)
+				continue;
 		}
 
-		if(!modified) continue;
+		if(!modified)
+			continue;
 
 		// Write the modified buffer back to the IMG
 		uint8 *writeBuf = rwNewT(uint8, size, 0);
 		memcpy(writeBuf, buffer, size);
-		WriteFileToImage(imgIdx, writeBuf, size);
+		if(!WriteFileToImage(imgIdx, writeBuf, size)){
+			rememberBinaryImage(result.failedImages, &result.numFailedImages, imgIdx);
+			rwFree(writeBuf);
+			continue;
+		}
 		rwFree(writeBuf);
 
+		if(rebuild){
+			for(size_t i = 0; i < imageInsts.size(); i++)
+				if(rebuiltIndices[i] >= 0)
+					imageInsts[i]->m_binInstIndex = rebuiltIndices[i];
+		}
+
 		log("Patched binary IPL (image %d)\n", imgIdx & 0xFFFFFF);
+		rememberBinaryImage(result.savedImages, &result.numSavedImages, imgIdx);
 	}
 
 	if(numDeleted)
-		log("Binary IPLs: %d delete(s) skipped (hot reload handles runtime removal only)\n", numDeleted);
+		log("Binary IPLs: %d delete(s) persisted\n", numDeleted);
 	if(numMoved)
 		log("Binary IPLs: %d updated\n", numMoved);
+	if(result.numBlockedEmptyDeletes)
+		log("Binary IPLs: %d delete(s) blocked because they would empty a streaming IPL\n",
+			result.numBlockedEmptyDeletes);
+	if(result.numFailedImages)
+		log("Binary IPLs: %d image(s) failed to save\n", result.numFailedImages);
+	return result;
 }
 
 }

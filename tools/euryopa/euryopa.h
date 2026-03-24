@@ -812,6 +812,15 @@ void LoadIpl(int i);
 namespace FileLoader
 {
 
+struct BinaryIplSaveResult
+{
+	int numSavedImages;
+	int32 savedImages[256];
+	int numFailedImages;
+	int32 failedImages[256];
+	int numBlockedEmptyDeletes;
+};
+
 extern GameFile *currentFile;
 
 struct DatDesc
@@ -829,7 +838,7 @@ void LoadScene(const char *filename);
 void LoadCollisionFile(const char *path);
 rw::TexDictionary *LoadTexDictionary(const char *path);
 void SaveScene(const char *filename);
-void SaveBinaryIpls(void);
+BinaryIplSaveResult SaveBinaryIpls(void);
 }
 
 // Rendering

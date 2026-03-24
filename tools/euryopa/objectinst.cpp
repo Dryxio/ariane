@@ -204,6 +204,9 @@ ObjectInst::Undelete(void)
 {
 	if(!m_isDeleted) return;
 	m_isDeleted = false;
+	StampChangeSeq(this);
+	if(m_imageIndex >= 0 && m_wasSavedDeleted)
+		m_isDirty = true;
 
 	// Also undelete the LOD pair
 	if(m_lod && m_lod->m_isDeleted)
