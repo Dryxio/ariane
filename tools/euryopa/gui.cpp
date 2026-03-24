@@ -661,12 +661,20 @@ hotReloadIpls(void)
 	char reloadPath[2048];
 	char entityReloadPath[2048];
 	char familyReloadPath[2048];
+	char tracePath[2048];
 	if(!getEditorRootDirectory(rootDir, sizeof(rootDir)) ||
+	   !buildPath(tracePath, sizeof(tracePath), rootDir, "ariane_hot_reload_log.txt") ||
 	   !buildPath(familyReloadPath, sizeof(familyReloadPath), rootDir, "ariane_reload_families.txt") ||
 	   !buildPath(reloadPath, sizeof(reloadPath), rootDir, "ariane_reload.txt") ||
 	   !buildPath(entityReloadPath, sizeof(entityReloadPath), rootDir, "ariane_reload_entities.txt")){
 		Toast(TOAST_SAVE, "Hot Reload: failed to resolve game folder");
 		return;
+	}
+	setHotReloadTracePath(tracePath);
+	FILE *traceFile = fopen(tracePath, "w");
+	if(traceFile){
+		fprintf(traceFile, "HotReload begin\n");
+		fclose(traceFile);
 	}
 
 	CPtrNode *p;
@@ -756,11 +764,17 @@ hotReloadIpls(void)
 		familyOldCounts[numFamilyReloads] = countSavedActiveTextInstances(parentScene);
 		log("HotReload: family candidate parent=%s oldActive=%d\n",
 			parentScene, familyOldCounts[numFamilyReloads]);
+		hotReloadTrace("HotReload: family candidate parent=%s oldActive=%d\n",
+			parentScene, familyOldCounts[numFamilyReloads]);
 		FileLoader::BinaryIplSaveResult familyResult = FileLoader::SaveScene(parentScene);
 		totalBlockedDeletes += familyResult.numBlockedEmptyDeletes;
 		totalFailedImages += familyResult.numFailedImages;
 		if(familyResult.numBlockedEmptyDeletes || familyResult.numFailedImages){
 			log("HotReload: family save failed parent=%s blocked=%d failed=%d\n",
+				parentScene,
+				familyResult.numBlockedEmptyDeletes,
+				familyResult.numFailedImages);
+			hotReloadTrace("HotReload: family save failed parent=%s blocked=%d failed=%d\n",
 				parentScene,
 				familyResult.numBlockedEmptyDeletes,
 				familyResult.numFailedImages);
@@ -771,6 +785,8 @@ hotReloadIpls(void)
 		resolveSceneRealPathForHotReload(parentScene, familyRealPaths[numFamilyReloads], sizeof(familyRealPaths[numFamilyReloads]));
 		familyNewCounts[numFamilyReloads] = countLiveActiveTextInstances(parentScene);
 		log("HotReload: family saved parent=%s newActive=%d realPath=%s\n",
+			parentScene, familyNewCounts[numFamilyReloads], familyRealPaths[numFamilyReloads]);
+		hotReloadTrace("HotReload: family saved parent=%s newActive=%d realPath=%s\n",
 			parentScene, familyNewCounts[numFamilyReloads], familyRealPaths[numFamilyReloads]);
 		markStreamingFamilySaved(parentScene);
 		numFamilyReloads++;

@@ -459,11 +459,16 @@ WriteFileToImage(int i, uint8 *data, int size)
 	if(de->sizeInArchive != 0){
 		log("WriteFileToImage: refusing write to compressed entry %s in %s (source %s): sizeInArchive=%u\n",
 		    de->name, cdimg->logicalName, cdimg->sourcePath, de->sizeInArchive);
+		hotReloadTrace("WriteFileToImage: refusing write to compressed entry %s in %s (source %s): sizeInArchive=%u\n",
+		    de->name, cdimg->logicalName, cdimg->sourcePath, de->sizeInArchive);
 		return false;
 	}
 
 	if(de->archiveSize == 0 || de->readableSize == 0 || de->archiveSize != de->readableSize){
 		log("WriteFileToImage: refusing write to %s in %s (source %s): inconsistent entry metadata (archive=%u readable=%u sizeInArchive=%u)\n",
+		    de->name, cdimg->logicalName, cdimg->sourcePath,
+		    de->archiveSize, de->readableSize, de->sizeInArchive);
+		hotReloadTrace("WriteFileToImage: refusing write to %s in %s (source %s): inconsistent entry metadata (archive=%u readable=%u sizeInArchive=%u)\n",
 		    de->name, cdimg->logicalName, cdimg->sourcePath,
 		    de->archiveSize, de->readableSize, de->sizeInArchive);
 		return false;
@@ -473,10 +478,14 @@ WriteFileToImage(int i, uint8 *data, int size)
 	if(size > entryBytes){
 		log("WriteFileToImage: refusing write to %s in %s (source %s): %d bytes exceeds allocated span %d\n",
 		    de->name, cdimg->logicalName, cdimg->sourcePath, size, entryBytes);
+		hotReloadTrace("WriteFileToImage: refusing write to %s in %s (source %s): %d bytes exceeds allocated span %d\n",
+		    de->name, cdimg->logicalName, cdimg->sourcePath, size, entryBytes);
 		return false;
 	}
 	if(size != entryBytes){
 		log("WriteFileToImage: refusing write to %s in %s (source %s): %d bytes does not match entry span %d\n",
+		    de->name, cdimg->logicalName, cdimg->sourcePath, size, entryBytes);
+		hotReloadTrace("WriteFileToImage: refusing write to %s in %s (source %s): %d bytes does not match entry span %d\n",
 		    de->name, cdimg->logicalName, cdimg->sourcePath, size, entryBytes);
 		return false;
 	}
@@ -485,6 +494,8 @@ WriteFileToImage(int i, uint8 *data, int size)
 	FILE *f = fopen(cdimg->sourcePath, "r+b");
 	if(f == nil){
 		log("WriteFileToImage: can't open %s (source %s) for writing\n",
+		    cdimg->logicalName, cdimg->sourcePath);
+		hotReloadTrace("WriteFileToImage: can't open %s (source %s) for writing\n",
 		    cdimg->logicalName, cdimg->sourcePath);
 		return false;
 	}
@@ -495,9 +506,14 @@ WriteFileToImage(int i, uint8 *data, int size)
 		log("WriteFileToImage: short write for %s in %s (source %s): wrote %d/%d bytes at sector %d\n",
 		    de->name, cdimg->logicalName, cdimg->sourcePath,
 		    (int)written, size, de->position);
+		hotReloadTrace("WriteFileToImage: short write for %s in %s (source %s): wrote %d/%d bytes at sector %d\n",
+		    de->name, cdimg->logicalName, cdimg->sourcePath,
+		    (int)written, size, de->position);
 		return false;
 	}
 	log("WriteFileToImage: wrote %d/%d bytes for %s at sector %d in %s (source %s)\n",
+		(int)written, size, de->name, de->position, cdimg->logicalName, cdimg->sourcePath);
+	hotReloadTrace("WriteFileToImage: wrote %d/%d bytes for %s at sector %d in %s (source %s)\n",
 		(int)written, size, de->name, de->position, cdimg->logicalName, cdimg->sourcePath);
 
 	// Also update the in-memory cached file handle

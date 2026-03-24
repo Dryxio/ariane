@@ -41,6 +41,8 @@ struct ObjectInst;
 void panic(const char *fmt, ...);
 void debug(const char *fmt, ...);
 void log(const char *fmt, ...);
+void setHotReloadTracePath(const char *path);
+void hotReloadTrace(const char *fmt, ...);
 void addToLogWindow(const char *fmt, va_list args);
 
 char *getPath(const char *path);
