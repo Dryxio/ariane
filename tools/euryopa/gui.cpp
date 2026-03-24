@@ -3,10 +3,6 @@
 #include "object_categories.h"
 #include "updater.h"
 
-#ifdef _WIN32
-#include <TlHelp32.h>
-#endif
-
 static bool showDemoWindow;
 static bool showEditorWindow;
 static bool showInstanceWindow;
@@ -152,23 +148,21 @@ isProcessRunningByName(const char *exeName)
 	if(exeName == nil || exeName[0] == '\0')
 		return false;
 
-	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-	if(snapshot == INVALID_HANDLE_VALUE)
+	char cmd[256];
+	snprintf(cmd, sizeof(cmd), "tasklist /NH /FI \"IMAGENAME eq %s\"", exeName);
+	FILE *pipe = _popen(cmd, "r");
+	if(pipe == nil)
 		return false;
 
-	PROCESSENTRY32A entry;
-	entry.dwSize = sizeof(entry);
 	bool found = false;
-	if(Process32FirstA(snapshot, &entry)){
-		do{
-			if(_stricmp(entry.szExeFile, exeName) == 0){
-				found = true;
-				break;
-			}
-		}while(Process32NextA(snapshot, &entry));
+	char line[512];
+	while(fgets(line, sizeof(line), pipe)){
+		if(_strnicmp(line, exeName, strlen(exeName)) == 0){
+			found = true;
+			break;
+		}
 	}
-
-	CloseHandle(snapshot);
+	_pclose(pipe);
 	return found;
 }
 #endif
