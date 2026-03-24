@@ -482,38 +482,6 @@ instanceBelongsToStreamingFamily(ObjectInst *inst, const char *scenePath)
 }
 
 static bool
-resolveSceneRealPathForHotReload(const char *filename, char *realpath, size_t realpathSize)
-{
-	CPtrNode *p;
-
-	if(realpathSize == 0)
-		return false;
-
-	for(p = instances.first; p; p = p->next){
-		ObjectInst *inst = (ObjectInst*)p->item;
-		if(inst->m_file == nil)
-			continue;
-		if(strcmp(inst->m_file->name, filename) != 0)
-			continue;
-
-		if(inst->m_file->sourcePath){
-			strncpy(realpath, inst->m_file->sourcePath, realpathSize);
-			realpath[realpathSize-1] = '\0';
-		}else{
-			strncpy(realpath, filename, realpathSize);
-			realpath[realpathSize-1] = '\0';
-			rw::makePath(realpath);
-		}
-		return true;
-	}
-
-	strncpy(realpath, filename, realpathSize);
-	realpath[realpathSize-1] = '\0';
-	rw::makePath(realpath);
-	return true;
-}
-
-static bool
 textInstNeedsSave(ObjectInst *inst)
 {
 	return inst &&
@@ -760,65 +728,6 @@ warnStreamingBinarySaveBlockedByRunningGame(const char *actionName)
 	return true;
 }
 
-static int
-countSavedActiveTextInstances(const char *scenePath)
-{
-	int count = 0;
-	CPtrNode *p;
-
-	for(p = instances.first; p; p = p->next){
-		ObjectInst *inst = (ObjectInst*)p->item;
-		if(inst->m_file == nil || inst->m_imageIndex >= 0)
-			continue;
-		if(strcmp(inst->m_file->name, scenePath) != 0)
-			continue;
-		if(inst->m_savedStateValid && !inst->m_wasSavedDeleted)
-			count++;
-	}
-	return count;
-}
-
-static int
-countLiveActiveTextInstances(const char *scenePath)
-{
-	int count = 0;
-	CPtrNode *p;
-
-	for(p = instances.first; p; p = p->next){
-		ObjectInst *inst = (ObjectInst*)p->item;
-		if(inst->m_file == nil || inst->m_imageIndex >= 0)
-			continue;
-		if(strcmp(inst->m_file->name, scenePath) != 0)
-			continue;
-		if(!inst->m_isDeleted)
-			count++;
-	}
-	return count;
-}
-
-static void
-markStreamingFamilySaved(const char *scenePath)
-{
-	CPtrNode *p;
-
-	for(p = instances.first; p; p = p->next){
-		ObjectInst *inst = (ObjectInst*)p->item;
-		if(!instanceBelongsToStreamingFamily(inst, scenePath))
-			continue;
-
-		if(!inst->m_isDeleted){
-			inst->m_savedTranslation = inst->m_translation;
-			inst->m_savedRotation = inst->m_rotation;
-			inst->m_origTranslation = inst->m_translation;
-			inst->m_origRotation = inst->m_rotation;
-		}
-		inst->m_wasSavedDeleted = inst->m_isDeleted;
-		inst->m_savedStateValid = true;
-		inst->m_isDirty = false;
-		inst->m_isAdded = false;
-	}
-}
-
 static bool
 saveAllIpls(void)
 {
@@ -967,11 +876,9 @@ hotReloadIpls(void)
 	char rootDir[2048];
 	char reloadPath[2048];
 	char entityReloadPath[2048];
-	char familyReloadPath[2048];
 	char tracePath[2048];
 	if(!getEditorRootDirectory(rootDir, sizeof(rootDir)) ||
 	   !buildPath(tracePath, sizeof(tracePath), rootDir, "ariane_hot_reload_log.txt") ||
-	   !buildPath(familyReloadPath, sizeof(familyReloadPath), rootDir, "ariane_reload_families.txt") ||
 	   !buildPath(reloadPath, sizeof(reloadPath), rootDir, "ariane_reload.txt") ||
 	   !buildPath(entityReloadPath, sizeof(entityReloadPath), rootDir, "ariane_reload_entities.txt")){
 		Toast(TOAST_SAVE, "Hot Reload: failed to resolve game folder");
@@ -985,15 +892,6 @@ hotReloadIpls(void)
 	}
 
 	CPtrNode *p;
-	const char *knownFamilyScenes[256];
-	int numKnownFamilyScenes = 0;
-	const char *excludedFamilyScenes[256];
-	int numExcludedFamilyScenes = 0;
-	const char *familyScenes[256];
-	char familyRealPaths[256][1024];
-	int familyOldCounts[256];
-	int familyNewCounts[256];
-	int numFamilyReloads = 0;
 	int numStreamingIpls = 0;
 	int numEntityCmds = 0;
 	int totalBlockedDeletes = 0;
@@ -1007,112 +905,6 @@ hotReloadIpls(void)
 		return area;
 	};
 
-	// Precompute text IPL parents that actually own a streaming family.
-	for(p = instances.first; p; p = p->next){
-		ObjectInst *inst = (ObjectInst*)p->item;
-		if(inst->m_file == nil || inst->m_imageIndex >= 0)
-			continue;
-
-		bool alreadyKnown = false;
-		for(int i = 0; i < numKnownFamilyScenes; i++)
-			if(strcmp(knownFamilyScenes[i], inst->m_file->name) == 0){
-				alreadyKnown = true;
-				break;
-			}
-		if(alreadyKnown)
-			continue;
-		if(!sceneHasRelatedStreamingFamily(inst->m_file->name))
-			continue;
-		if(numKnownFamilyScenes < 256)
-			knownFamilyScenes[numKnownFamilyScenes++] = inst->m_file->name;
-	}
-
-	// --- Streaming families (text parent + related binary IPLs) ---
-	for(p = instances.first; p; p = p->next){
-		ObjectInst *inst = (ObjectInst*)p->item;
-		const char *parentScene = nil;
-		if(inst->m_file == nil)
-			continue;
-		if(inst->m_imageIndex < 0){
-			for(int i = 0; i < numKnownFamilyScenes; i++)
-				if(strcmp(knownFamilyScenes[i], inst->m_file->name) == 0){
-					parentScene = knownFamilyScenes[i];
-					break;
-				}
-		}else{
-			for(int i = 0; i < numKnownFamilyScenes; i++)
-				if(instanceBelongsToStreamingFamily(inst, knownFamilyScenes[i])){
-					parentScene = knownFamilyScenes[i];
-					break;
-				}
-		}
-		if(parentScene == nil)
-			continue;
-
-		bool needsFamilySave =
-			inst->m_isDirty ||
-			inst->m_isAdded ||
-			!inst->m_savedStateValid ||
-			inst->m_isDeleted != inst->m_wasSavedDeleted;
-		if(!needsFamilySave)
-			continue;
-
-		bool found = false;
-		for(int i = 0; i < numExcludedFamilyScenes; i++)
-			if(strcmp(excludedFamilyScenes[i], parentScene) == 0){
-				found = true;
-				break;
-			}
-		if(found || numExcludedFamilyScenes >= 256 || numFamilyReloads >= 256)
-			continue;
-
-		excludedFamilyScenes[numExcludedFamilyScenes++] = parentScene;
-
-		familyOldCounts[numFamilyReloads] = countSavedActiveTextInstances(parentScene);
-		log("HotReload: family candidate parent=%s oldActive=%d\n",
-			parentScene, familyOldCounts[numFamilyReloads]);
-		hotReloadTrace("HotReload: family candidate parent=%s oldActive=%d\n",
-			parentScene, familyOldCounts[numFamilyReloads]);
-		FileLoader::BinaryIplSaveResult familyResult = FileLoader::SaveScene(parentScene);
-		totalBlockedDeletes += familyResult.numBlockedEmptyDeletes;
-		totalFailedImages += familyResult.numFailedImages;
-		if(familyResult.numBlockedEmptyDeletes || familyResult.numFailedImages){
-			log("HotReload: family save failed parent=%s blocked=%d failed=%d\n",
-				parentScene,
-				familyResult.numBlockedEmptyDeletes,
-				familyResult.numFailedImages);
-			hotReloadTrace("HotReload: family save failed parent=%s blocked=%d failed=%d\n",
-				parentScene,
-				familyResult.numBlockedEmptyDeletes,
-				familyResult.numFailedImages);
-			continue;
-		}
-
-		familyScenes[numFamilyReloads] = parentScene;
-		resolveSceneRealPathForHotReload(parentScene, familyRealPaths[numFamilyReloads], sizeof(familyRealPaths[numFamilyReloads]));
-		familyNewCounts[numFamilyReloads] = countLiveActiveTextInstances(parentScene);
-		log("HotReload: family saved parent=%s newActive=%d realPath=%s\n",
-			parentScene, familyNewCounts[numFamilyReloads], familyRealPaths[numFamilyReloads]);
-		hotReloadTrace("HotReload: family saved parent=%s newActive=%d realPath=%s\n",
-			parentScene, familyNewCounts[numFamilyReloads], familyRealPaths[numFamilyReloads]);
-		markStreamingFamilySaved(parentScene);
-		numFamilyReloads++;
-	}
-
-	if(numFamilyReloads > 0){
-		FILE *ff = fopen(familyReloadPath, "w");
-		if(ff){
-			for(int i = 0; i < numFamilyReloads; i++)
-				fprintf(ff, "F\t%s\t%d\t%d\n",
-					familyRealPaths[i], familyOldCounts[i], familyNewCounts[i]);
-			fclose(ff);
-		}else{
-			Toast(TOAST_SAVE, "Hot Reload: failed to write family reload file");
-			return;
-		}
-	}else
-		remove(familyReloadPath);
-
 	// --- Streaming IPLs (binary, reloaded via CIplStore) ---
 	const char *iplNames[256];
 	int numNames = 0;
@@ -1124,14 +916,6 @@ hotReloadIpls(void)
 		ObjectInst *inst = (ObjectInst*)p->item;
 		if(inst->m_imageIndex < 0) continue;
 		if(inst->m_file == nil) continue;
-		bool excludedByFamily = false;
-		for(int i = 0; i < numExcludedFamilyScenes; i++)
-			if(instanceBelongsToStreamingFamily(inst, excludedFamilyScenes[i])){
-				excludedByFamily = true;
-				break;
-			}
-		if(excludedByFamily)
-			continue;
 		if(!binaryImageWasSaved(binaryResult, inst->m_imageIndex))
 			continue;
 
@@ -1165,14 +949,6 @@ hotReloadIpls(void)
 	if(fe){
 		for(p = instances.first; p; p = p->next){
 			ObjectInst *inst = (ObjectInst*)p->item;
-			bool excludedByFamily = false;
-			for(int i = 0; i < numExcludedFamilyScenes; i++)
-				if(instanceBelongsToStreamingFamily(inst, excludedFamilyScenes[i])){
-					excludedByFamily = true;
-					break;
-				}
-			if(excludedByFamily)
-				continue;
 			if(!inst->m_isDirty && !inst->m_isDeleted) continue;
 			if(inst->m_imageIndex >= 0 &&
 			   binaryImageWasSaved(binaryResult, inst->m_imageIndex))
@@ -1247,7 +1023,7 @@ hotReloadIpls(void)
 			remove(entityReloadPath);
 	}
 
-	if(numFamilyReloads == 0 && numStreamingIpls == 0 && numEntityCmds == 0){
+	if(numStreamingIpls == 0 && numEntityCmds == 0){
 		if(totalBlockedDeletes)
 			Toast(TOAST_SAVE, "Blocked %d binary delete(s): can't empty a streaming IPL", totalBlockedDeletes);
 		else if(totalFailedImages)
@@ -1261,17 +1037,6 @@ hotReloadIpls(void)
 		Toast(TOAST_SAVE, "Blocked %d binary delete(s): can't empty a streaming IPL", totalBlockedDeletes);
 	else if(totalFailedImages)
 		Toast(TOAST_SAVE, "Failed to save %d binary IPL(s)", totalFailedImages);
-	else if(numFamilyReloads > 0 && numStreamingIpls > 0 && numEntityCmds > 0)
-		Toast(TOAST_SAVE, "Hot Reload: %d family(s) + %d IPL(s) + %d entity(s)",
-			numFamilyReloads, numStreamingIpls, numEntityCmds);
-	else if(numFamilyReloads > 0 && numStreamingIpls > 0)
-		Toast(TOAST_SAVE, "Hot Reload: %d family(s) + %d IPL(s)",
-			numFamilyReloads, numStreamingIpls);
-	else if(numFamilyReloads > 0 && numEntityCmds > 0)
-		Toast(TOAST_SAVE, "Hot Reload: %d family(s) + %d entity(s)",
-			numFamilyReloads, numEntityCmds);
-	else if(numFamilyReloads > 0)
-		Toast(TOAST_SAVE, "Hot Reload: %d family(s)", numFamilyReloads);
 	else if(numStreamingIpls > 0 && numEntityCmds > 0)
 		Toast(TOAST_SAVE, "Hot Reload: %d IPL(s) + %d entity(s)", numStreamingIpls, numEntityCmds);
 	else if(numStreamingIpls > 0)
