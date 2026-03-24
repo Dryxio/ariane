@@ -3,6 +3,11 @@
 #include "object_categories.h"
 #include "updater.h"
 
+#ifdef _WIN32
+#include <Psapi.h>
+#pragma comment(lib, "Psapi.lib")
+#endif
+
 static bool showDemoWindow;
 static bool showEditorWindow;
 static bool showInstanceWindow;
@@ -148,22 +153,37 @@ isProcessRunningByName(const char *exeName)
 	if(exeName == nil || exeName[0] == '\0')
 		return false;
 
-	char cmd[256];
-	snprintf(cmd, sizeof(cmd), "tasklist /NH /FI \"IMAGENAME eq %s\"", exeName);
-	FILE *pipe = _popen(cmd, "r");
-	if(pipe == nil)
+	DWORD processIds[2048];
+	DWORD bytesReturned = 0;
+	if(!EnumProcesses(processIds, sizeof(processIds), &bytesReturned))
 		return false;
 
-	bool found = false;
-	char line[512];
-	while(fgets(line, sizeof(line), pipe)){
-		if(_strnicmp(line, exeName, strlen(exeName)) == 0){
-			found = true;
-			break;
+	const DWORD processCount = bytesReturned / sizeof(DWORD);
+	for(DWORD i = 0; i < processCount; i++){
+		const DWORD pid = processIds[i];
+		if(pid == 0)
+			continue;
+
+		HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+		if(process == nil)
+			continue;
+
+		char imagePath[MAX_PATH];
+		DWORD imagePathSize = sizeof(imagePath);
+		bool match = false;
+		if(QueryFullProcessImageNameA(process, 0, imagePath, &imagePathSize)){
+			const char *baseName = strrchr(imagePath, '\\');
+			if(baseName == nil)
+				baseName = strrchr(imagePath, '/');
+			baseName = baseName ? baseName + 1 : imagePath;
+			match = _stricmp(baseName, exeName) == 0;
 		}
+		CloseHandle(process);
+
+		if(match)
+			return true;
 	}
-	_pclose(pipe);
-	return found;
+	return false;
 }
 #endif
 
