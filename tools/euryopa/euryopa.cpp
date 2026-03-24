@@ -5,6 +5,7 @@ int gameversion;
 int gameplatform;
 
 Params params;
+SaveDestination gSaveDestination = SAVE_DESTINATION_ORIGINAL_FILES;
 
 int gGizmoMode = GIZMO_TRANSLATE;
 bool gGizmoEnabled = true;

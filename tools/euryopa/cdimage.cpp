@@ -70,8 +70,46 @@ static uint8 *streamingBuffer;
 // for LZO compressed files
 static uint8 *compressionBuf;
 static uint32 compressionBufSize;
+static uint8 *looseOverrideBuffer;
 
 static CPtrList requestList;
+
+static const char*
+GetDirEntryExtension(const DirEntry *de)
+{
+	switch(de->filetype){
+	case FILE_MODEL: return "dff";
+	case FILE_TXD: return "txd";
+	case FILE_COL: return "col";
+	case FILE_IPL: return "ipl";
+	default: return nil;
+	}
+}
+
+static bool
+BuildDirEntryFilename(const DirEntry *de, char *dst, size_t size)
+{
+	const char *ext = GetDirEntryExtension(de);
+	if(dst == nil || size == 0 || ext == nil)
+		return false;
+	int written = snprintf(dst, size, "%s.%s", de->name, ext);
+	return written >= 0 && (size_t)written < size;
+}
+
+static uint8*
+ReadLooseOverrideBuffer(const char *path, int *size)
+{
+	int looseSize = 0;
+	uint8 *buf = ReadLooseFile(path, &looseSize);
+	if(buf == nil)
+		return nil;
+	if(looseOverrideBuffer)
+		free(looseOverrideBuffer);
+	looseOverrideBuffer = buf;
+	if(size)
+		*size = looseSize;
+	return looseOverrideBuffer;
+}
 
 
 void
@@ -428,6 +466,13 @@ GetGameFileFromImage(int i)
 	return de->file;
 }
 
+const char*
+GetCdImageLogicalName(int i)
+{
+	int img = i>>24 & 0xFF;
+	return cdImages[img].logicalName;
+}
+
 uint8*
 ReadFileFromImage(int i, int *size)
 {
@@ -437,6 +482,18 @@ ReadFileFromImage(int i, int *size)
 	i = i & 0xFFFFFF;
 	cdimg = &cdImages[img];
 	DirEntry *de = &cdimg->directory[i];
+	char entryFilename[32];
+	if(BuildDirEntryFilename(de, entryFilename, sizeof(entryFilename))){
+		const char *overridePath = ModloaderFindImageEntryOverride(cdimg->logicalName, entryFilename);
+		if(overridePath){
+			uint8 *overrideBuffer = ReadLooseOverrideBuffer(overridePath, size);
+			if(overrideBuffer){
+				de->overridden = 1;
+				return overrideBuffer;
+			}
+		}
+	}
+	de->overridden = 0;
 	fseek(cdimg->file, de->position*2048, SEEK_SET);
 	fread(streamingBuffer, 1, de->archiveSize*2048, cdimg->file);
 	if(*(uint32*)streamingBuffer == 0x67A3A1CE)
@@ -526,6 +583,36 @@ WriteFileToImage(int i, uint8 *data, int size)
 	// Also update the in-memory cached file handle
 	// (re-read will pick up new data)
 	return true;
+}
+
+bool
+BuildModloaderImageEntryExportPath(int i, char *dst, size_t size)
+{
+	int img;
+	CdImage *cdimg;
+	char logicalPath[512];
+	char entryFilename[32];
+
+	if(dst == nil || size == 0)
+		return false;
+
+	img = i>>24 & 0xFF;
+	i = i & 0xFFFFFF;
+	cdimg = &cdImages[img];
+	DirEntry *de = &cdimg->directory[i];
+	if(!BuildDirEntryFilename(de, entryFilename, sizeof(entryFilename)))
+		return false;
+	if(!BuildModloaderLogicalExportPath(cdimg->logicalName, logicalPath, sizeof(logicalPath)))
+		return false;
+
+	size_t len = strlen(logicalPath);
+#ifdef _WIN32
+	const char *sep = (len > 0 && (logicalPath[len-1] == '\\' || logicalPath[len-1] == '/')) ? "" : "\\";
+#else
+	const char *sep = (len > 0 && logicalPath[len-1] == '/') ? "" : "/";
+#endif
+	int written = snprintf(dst, size, "%s%s%s", logicalPath, sep, entryFilename);
+	return written >= 0 && (size_t)written < size;
 }
 
 void

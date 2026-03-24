@@ -1,7 +1,15 @@
 #include "euryopa.h"
 #include "modloader.h"
 #include <algorithm>
+#include <string>
+#include <utility>
 #include <vector>
+
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
 
 GameFile*
 NewGameFile(char *path)
@@ -883,6 +891,9 @@ LoadLevel(const char *filename)
 static void rememberBinaryImage(int32 *images, int *numImages, int32 imageIndex);
 static bool SaveBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDeleted, int *numMoved);
 static void WriteInstLine(FILE *f, ObjectInst *inst, int lodIdx, bool deleted);
+static bool BuildBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDeleted, int *numMoved,
+                                    std::vector<uint8> *outBuffer,
+                                    std::vector<std::pair<ObjectInst*, int>> *rebuiltIndexUpdates);
 
 static int
 CollectRelatedStreamingImages(const char *path, int32 *images, int maxImages)
@@ -933,10 +944,23 @@ IsImageInList(int32 imageIndex, int32 *images, int numImages)
 }
 
 static bool
-ResolveSceneRealPath(const char *filename, char *realpath, size_t realpathSize)
+ResolveSceneReadPath(const char *filename, char *realpath, size_t realpathSize)
 {
 	CPtrNode *p;
 	const char *srcPath = nil;
+
+	if(gSaveDestination == SAVE_DESTINATION_MODLOADER){
+		srcPath = ModloaderGetSourcePath(filename);
+		if(srcPath){
+			strncpy(realpath, srcPath, realpathSize);
+			realpath[realpathSize-1] = '\0';
+		}else{
+			strncpy(realpath, filename, realpathSize);
+			realpath[realpathSize-1] = '\0';
+			rw::makePath(realpath);
+		}
+		return true;
+	}
 
 	for(p = instances.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
@@ -960,24 +984,193 @@ ResolveSceneRealPath(const char *filename, char *realpath, size_t realpathSize)
 }
 
 static bool
-WriteSceneFileInternal(const char *filename, ObjectInst **insts, int numInsts, bool compactDeletes)
+EnsureParentDirectories(const char *path)
 {
-	FILE *fin, *fout;
-	ObjectInst *inst;
-	char tmppath[1024];
-	char realpath[1024];
-
-	ResolveSceneRealPath(filename, realpath, sizeof(realpath));
-
-	snprintf(tmppath, sizeof(tmppath), "%s.tmp", realpath);
-	fin = fopen(realpath, "rb");
-	fout = fopen(tmppath, "w");
-	if(fout == nil){
-		log("SaveScene: can't create temp file %s\n", tmppath);
-		if(fin) fclose(fin);
+	if(path == nil || path[0] == '\0')
 		return false;
+
+	char dirpath[1024];
+	strncpy(dirpath, path, sizeof(dirpath)-1);
+	dirpath[sizeof(dirpath)-1] = '\0';
+	char *slash = strrchr(dirpath, '/');
+#ifdef _WIN32
+	char *backslash = strrchr(dirpath, '\\');
+	if(backslash && (slash == nil || backslash > slash))
+		slash = backslash;
+#endif
+	if(slash == nil)
+		return true;
+	*slash = '\0';
+	if(dirpath[0] == '\0')
+		return true;
+
+	for(char *p = dirpath; *p; p++){
+		if(*p != '/' && *p != '\\')
+			continue;
+		char saved = *p;
+		*p = '\0';
+		if(dirpath[0] != '\0'){
+#ifdef _WIN32
+			_mkdir(dirpath);
+#else
+			mkdir(dirpath, 0777);
+#endif
+		}
+		*p = saved;
+	}
+#ifdef _WIN32
+	_mkdir(dirpath);
+#else
+	mkdir(dirpath, 0777);
+#endif
+	return true;
+}
+
+static bool
+ReplacePath(const char *src, const char *dst)
+{
+#ifdef _WIN32
+	return MoveFileExA(src, dst, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+	return rename(src, dst) == 0;
+#endif
+}
+
+struct PendingSaveFile
+{
+	std::string finalPath;
+	std::vector<uint8> data;
+	std::string tempPath;
+	std::string backupPath;
+	bool hadOriginal = false;
+	bool backupMoved = false;
+	bool committed = false;
+};
+
+static bool
+CommitPendingSaveFiles(std::vector<PendingSaveFile> &files)
+{
+	for(size_t i = 0; i < files.size(); i++){
+		PendingSaveFile &file = files[i];
+		if(!EnsureParentDirectories(file.finalPath.c_str())){
+			log("SaveScene: failed to create parent directories for %s\n", file.finalPath.c_str());
+			return false;
+		}
+		file.tempPath = file.finalPath + ".ariane.tmp";
+		file.backupPath = file.finalPath + ".ariane.bak";
+		remove(file.tempPath.c_str());
+		remove(file.backupPath.c_str());
+
+		FILE *f = fopen(file.tempPath.c_str(), "wb");
+		if(f == nil){
+			log("SaveScene: can't create temp file %s\n", file.tempPath.c_str());
+			goto fail;
+		}
+		if(!file.data.empty()){
+			size_t written = fwrite(&file.data[0], 1, file.data.size(), f);
+			fclose(f);
+			if(written != file.data.size()){
+				log("SaveScene: short write for temp file %s\n", file.tempPath.c_str());
+				goto fail;
+			}
+		}else
+			fclose(f);
 	}
 
+	for(size_t i = 0; i < files.size(); i++){
+		PendingSaveFile &file = files[i];
+		FILE *existing = fopen(file.finalPath.c_str(), "rb");
+		if(existing){
+			fclose(existing);
+			file.hadOriginal = true;
+			if(!ReplacePath(file.finalPath.c_str(), file.backupPath.c_str())){
+				log("SaveScene: can't move %s to backup %s\n",
+				    file.finalPath.c_str(), file.backupPath.c_str());
+				goto fail;
+			}
+			file.backupMoved = true;
+		}
+	}
+
+	for(size_t i = 0; i < files.size(); i++){
+		PendingSaveFile &file = files[i];
+		if(!ReplacePath(file.tempPath.c_str(), file.finalPath.c_str())){
+			log("SaveScene: can't promote temp file %s to %s\n",
+			    file.tempPath.c_str(), file.finalPath.c_str());
+			goto fail;
+		}
+		file.committed = true;
+	}
+
+	for(size_t i = 0; i < files.size(); i++)
+		if(files[i].backupMoved)
+			remove(files[i].backupPath.c_str());
+	return true;
+
+fail:
+	for(size_t i = 0; i < files.size(); i++){
+		PendingSaveFile &file = files[i];
+		if(file.committed)
+			remove(file.finalPath.c_str());
+		if(file.backupMoved){
+			ReplacePath(file.backupPath.c_str(), file.finalPath.c_str());
+			file.backupMoved = false;
+		}
+		remove(file.tempPath.c_str());
+		remove(file.backupPath.c_str());
+	}
+	return false;
+}
+
+static int
+FormatInstLine(char *dst, size_t size, ObjectInst *inst, int lodIdx, bool deleted)
+{
+	ObjectDef *obj = GetObjectDef(inst->m_objectId);
+
+	int area = inst->m_area;
+	if(isSA()){
+		if(inst->m_isUnimportant) area |= 0x100;
+		if(inst->m_isUnderWater) area |= 0x400;
+		if(inst->m_isTunnel) area |= 0x800;
+		if(inst->m_isTunnelTransition) area |= 0x1000;
+	}
+
+	const char *prefix = deleted ? "# " : "";
+	if(isSA()){
+		return snprintf(dst, size, "%s%d, %s, %d, %f, %f, %f, %f, %f, %f, %f, %d\n",
+			prefix,
+			inst->m_objectId, obj->m_name, area,
+			inst->m_translation.x, inst->m_translation.y, inst->m_translation.z,
+			inst->m_rotation.x, inst->m_rotation.y, inst->m_rotation.z, inst->m_rotation.w,
+			lodIdx);
+	}
+	return snprintf(dst, size, "%s%d, %s, %d, %f, %f, %f, 1, 1, 1, %f, %f, %f, %f\n",
+		prefix,
+		inst->m_objectId, obj->m_name, area,
+		inst->m_translation.x, inst->m_translation.y, inst->m_translation.z,
+		inst->m_rotation.x, inst->m_rotation.y, inst->m_rotation.z, inst->m_rotation.w);
+}
+
+static void
+AppendInstLine(std::string &out, ObjectInst *inst, int lodIdx, bool deleted)
+{
+	char linebuf[512];
+	int written = FormatInstLine(linebuf, sizeof(linebuf), inst, lodIdx, deleted);
+	if(written > 0)
+		out.append(linebuf, (size_t)written);
+}
+
+static bool
+BuildSceneFileContents(const char *filename, ObjectInst **insts, int numInsts, bool compactDeletes,
+                       std::string &out)
+{
+	FILE *fin;
+	ObjectInst *inst;
+	char realpath[1024];
+
+	out.clear();
+	ResolveSceneReadPath(filename, realpath, sizeof(realpath));
+	fin = fopen(realpath, "rb");
 	if(fin){
 		char linebuf[1024];
 		bool inInstSection = false;
@@ -990,20 +1183,19 @@ WriteSceneFileInternal(const char *filename, ObjectInst **insts, int numInsts, b
 			if(!inInstSection){
 				if(strncmp(s, "inst", 4) == 0 && (s[4] == '\0' || s[4] == '\n' || s[4] == '\r')){
 					inInstSection = true;
-					fprintf(fout, "inst\n");
+					out += "inst\n";
 					for(int i = 0; i < numInsts; i++){
 						inst = insts[i];
 						if(compactDeletes && inst->m_isDeleted)
 							continue;
-						WriteInstLine(fout, inst, inst->m_lodId, !compactDeletes && inst->m_isDeleted);
+						AppendInstLine(out, inst, inst->m_lodId, !compactDeletes && inst->m_isDeleted);
 					}
 					instWritten = true;
-				}else{
-					fputs(linebuf, fout);
-				}
+				}else
+					out += linebuf;
 			}else{
 				if(strncmp(s, "end", 3) == 0 && (s[3] == '\0' || s[3] == '\n' || s[3] == '\r')){
-					fprintf(fout, "end\n");
+					out += "end\n";
 					inInstSection = false;
 				}
 			}
@@ -1011,31 +1203,43 @@ WriteSceneFileInternal(const char *filename, ObjectInst **insts, int numInsts, b
 		fclose(fin);
 
 		if(!instWritten){
-			fprintf(fout, "inst\n");
+			out += "inst\n";
 			for(int i = 0; i < numInsts; i++){
 				inst = insts[i];
 				if(compactDeletes && inst->m_isDeleted)
 					continue;
-				WriteInstLine(fout, inst, inst->m_lodId, !compactDeletes && inst->m_isDeleted);
+				AppendInstLine(out, inst, inst->m_lodId, !compactDeletes && inst->m_isDeleted);
 			}
-			fprintf(fout, "end\n");
+			out += "end\n";
 		}
 	}else{
-		fprintf(fout, "inst\n");
+		out += "inst\n";
 		for(int i = 0; i < numInsts; i++){
 			inst = insts[i];
 			if(compactDeletes && inst->m_isDeleted)
 				continue;
-			WriteInstLine(fout, inst, inst->m_lodId, !compactDeletes && inst->m_isDeleted);
+			AppendInstLine(out, inst, inst->m_lodId, !compactDeletes && inst->m_isDeleted);
 		}
-		fprintf(fout, "end\n");
+		out += "end\n";
 	}
-
-	fclose(fout);
-
-	remove(realpath);
-	rename(tmppath, realpath);
 	return true;
+}
+
+static bool
+WriteSceneFileInternal(const char *filename, ObjectInst **insts, int numInsts, bool compactDeletes)
+{
+	std::string out;
+	char realpath[1024];
+	if(!BuildSceneFileContents(filename, insts, numInsts, compactDeletes, out))
+		return false;
+	ResolveSceneReadPath(filename, realpath, sizeof(realpath));
+	if(!EnsureParentDirectories(realpath))
+		return false;
+
+	std::vector<PendingSaveFile> files(1);
+	files[0].finalPath = realpath;
+	files[0].data.assign(out.begin(), out.end());
+	return CommitPendingSaveFiles(files);
 }
 
 
@@ -1043,33 +1247,28 @@ WriteSceneFileInternal(const char *filename, ObjectInst **insts, int numInsts, b
 static void
 WriteInstLine(FILE *f, ObjectInst *inst, int lodIdx, bool deleted)
 {
-	ObjectDef *obj = GetObjectDef(inst->m_objectId);
+	char linebuf[512];
+	int written = FormatInstLine(linebuf, sizeof(linebuf), inst, lodIdx, deleted);
+	if(written > 0)
+		fwrite(linebuf, 1, (size_t)written, f);
+}
 
-	// Reconstruct area flags
-	int area = inst->m_area;
-	if(isSA()){
-		if(inst->m_isUnimportant) area |= 0x100;
-		if(inst->m_isUnderWater) area |= 0x400;
-		if(inst->m_isTunnel) area |= 0x800;
-		if(inst->m_isTunnelTransition) area |= 0x1000;
-	}
+static bool
+QueueSceneFileSave(const char *filename, ObjectInst **insts, int numInsts, bool compactDeletes,
+                   std::vector<PendingSaveFile> &pendingFiles)
+{
+	std::string out;
+	char exportPath[1024];
+	if(!BuildSceneFileContents(filename, insts, numInsts, compactDeletes, out))
+		return false;
+	if(!BuildModloaderLogicalExportPath(filename, exportPath, sizeof(exportPath)))
+		return false;
 
-	const char *prefix = deleted ? "# " : "";
-
-	if(isSA()){
-		fprintf(f, "%s%d, %s, %d, %f, %f, %f, %f, %f, %f, %f, %d\n",
-			prefix,
-			inst->m_objectId, obj->m_name, area,
-			inst->m_translation.x, inst->m_translation.y, inst->m_translation.z,
-			inst->m_rotation.x, inst->m_rotation.y, inst->m_rotation.z, inst->m_rotation.w,
-			lodIdx);
-	}else{
-		fprintf(f, "%s%d, %s, %d, %f, %f, %f, 1, 1, 1, %f, %f, %f, %f\n",
-			prefix,
-			inst->m_objectId, obj->m_name, area,
-			inst->m_translation.x, inst->m_translation.y, inst->m_translation.z,
-			inst->m_rotation.x, inst->m_rotation.y, inst->m_rotation.z, inst->m_rotation.w);
-	}
+	PendingSaveFile pending;
+	pending.finalPath = exportPath;
+	pending.data.assign(out.begin(), out.end());
+	pendingFiles.push_back(pending);
+	return true;
 }
 
 // Save all instances that belong to a given IPL file
@@ -1127,6 +1326,7 @@ SaveScene(const char *filename)
 			int oldLodId;
 			ObjectInst *oldLod;
 			bool oldDirty;
+			int oldBinInstIndex;
 		};
 
 		int maxOldIndex = -1;
@@ -1176,7 +1376,7 @@ SaveScene(const char *filename)
 			if(!IsImageInList(inst->m_imageIndex, relatedImages, numRelatedImages))
 				continue;
 
-			binaryStates.push_back({ inst, inst->m_lodId, inst->m_lod, inst->m_isDirty });
+			binaryStates.push_back({ inst, inst->m_lodId, inst->m_lod, inst->m_isDirty, inst->m_binInstIndex });
 
 			int oldLodId = inst->m_lodId;
 			if(oldLodId >= 0 &&
@@ -1197,6 +1397,8 @@ SaveScene(const char *filename)
 		int numDeleted = 0;
 		int numMoved = 0;
 		bool binarySaveFailed = false;
+		std::vector<PendingSaveFile> pendingFiles;
+		std::vector<std::pair<ObjectInst*, int>> rebuiltIndexUpdates;
 		for(int i = 0; i < numRelatedImages; i++){
 			GameFile *relatedFile = GetGameFileFromImage(relatedImages[i]);
 			log("SaveScene: patching related image %d (%s) for parent %s\n",
@@ -1207,15 +1409,65 @@ SaveScene(const char *filename)
 				relatedImages[i] & 0xFFFFFF,
 				relatedFile && relatedFile->name ? relatedFile->name : "<unknown>",
 				filename);
-			if(!SaveBinaryImageByIndex(relatedImages[i], &result, &numDeleted, &numMoved)){
+			if(gSaveDestination == SAVE_DESTINATION_MODLOADER){
+				std::vector<uint8> writeBuf;
+				std::vector<std::pair<ObjectInst*, int>> imageRebuiltUpdates;
+				if(!BuildBinaryImageByIndex(relatedImages[i], &result, &numDeleted, &numMoved,
+				                            &writeBuf, &imageRebuiltUpdates)){
+					binarySaveFailed = true;
+					break;
+				}
+				if(!writeBuf.empty()){
+					char exportPath[1024];
+					if(!BuildModloaderImageEntryExportPath(relatedImages[i], exportPath, sizeof(exportPath))){
+						binarySaveFailed = true;
+						result.numFailedFiles++;
+						break;
+					}
+
+					PendingSaveFile pending;
+					pending.finalPath = exportPath;
+					pending.data.swap(writeBuf);
+					pendingFiles.push_back(pending);
+					rebuiltIndexUpdates.insert(rebuiltIndexUpdates.end(),
+					                           imageRebuiltUpdates.begin(), imageRebuiltUpdates.end());
+				}
+			}else if(!SaveBinaryImageByIndex(relatedImages[i], &result, &numDeleted, &numMoved)){
 				binarySaveFailed = true;
 				break;
 			}
 		}
 
 		if(!binarySaveFailed){
-			if(!WriteSceneFileInternal(filename, fileInsts, numInsts, true))
+			if(gSaveDestination == SAVE_DESTINATION_MODLOADER){
+				if(!QueueSceneFileSave(filename, fileInsts, numInsts, true, pendingFiles) ||
+				   !CommitPendingSaveFiles(pendingFiles)){
+					binarySaveFailed = true;
+					result.numFailedFiles++;
+				}else{
+					for(size_t i = 0; i < rebuiltIndexUpdates.size(); i++)
+						rebuiltIndexUpdates[i].first->m_binInstIndex = rebuiltIndexUpdates[i].second;
+					for(int i = 0; i < numRelatedImages; i++){
+						bool hadOutput = false;
+						for(size_t pi = 0; pi < pendingFiles.size(); pi++){
+							char exportPath[1024];
+							if(!BuildModloaderImageEntryExportPath(relatedImages[i], exportPath, sizeof(exportPath)))
+								continue;
+							if(pendingFiles[pi].finalPath == exportPath){
+								hadOutput = true;
+								break;
+							}
+						}
+						if(hadOutput)
+							rememberBinaryImage(result.savedImages, &result.numSavedImages, relatedImages[i]);
+					}
+					ModloaderInit();
+				}
+			}else if(!WriteSceneFileInternal(filename, fileInsts, numInsts, true))
+			{
 				binarySaveFailed = true;
+				result.numFailedFiles++;
+			}
 		}
 
 		if(binarySaveFailed){
@@ -1230,7 +1482,9 @@ SaveScene(const char *filename)
 				binaryStates[i].inst->m_lodId = binaryStates[i].oldLodId;
 				binaryStates[i].inst->m_lod = binaryStates[i].oldLod;
 				binaryStates[i].inst->m_isDirty = binaryStates[i].oldDirty;
+				binaryStates[i].inst->m_binInstIndex = binaryStates[i].oldBinInstIndex;
 			}
+			result.numSavedImages = 0;
 			return result;
 		}
 
@@ -1239,8 +1493,20 @@ SaveScene(const char *filename)
 
 		for(int i = 0; i < numActiveTextInsts; i++)
 			activeTextInsts[i]->m_iplIndex = i;
-	}else if(!WriteSceneFileInternal(filename, fileInsts, numInsts, false))
-		return result;
+	}else{
+		if(gSaveDestination == SAVE_DESTINATION_MODLOADER){
+			std::vector<PendingSaveFile> pendingFiles;
+			if(!QueueSceneFileSave(filename, fileInsts, numInsts, false, pendingFiles) ||
+			   !CommitPendingSaveFiles(pendingFiles)){
+				result.numFailedFiles++;
+				return result;
+			}
+			ModloaderInit();
+		}else if(!WriteSceneFileInternal(filename, fileInsts, numInsts, false)){
+			result.numFailedFiles++;
+			return result;
+		}
+	}
 
 	int numActive = 0;
 	for(int i = 0; i < numInsts; i++)
@@ -1307,7 +1573,9 @@ struct BinaryIplHeader
 static_assert(sizeof(BinaryIplHeader) == 0x4C, "BinaryIplHeader size mismatch");
 
 static bool
-SaveBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDeleted, int *numMoved)
+BuildBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDeleted, int *numMoved,
+                        std::vector<uint8> *outBuffer,
+                        std::vector<std::pair<ObjectInst*, int>> *rebuiltIndexUpdates)
 {
 	CPtrNode *p;
 	int size;
@@ -1422,28 +1690,44 @@ SaveBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDelete
 
 	memset(hdr->pad20, 0, sizeof(hdr->pad20));
 
-	uint8 *writeBuf = rwNewT(uint8, size, 0);
-	memcpy(writeBuf, buffer, size);
-	if(!WriteFileToImage(imgIdx, writeBuf, size)){
+	if(outBuffer){
+		outBuffer->assign(buffer, buffer + size);
+	}
+
+	if(rebuild && rebuiltIndexUpdates){
+		for(size_t i = 0; i < imageInsts.size(); i++)
+			if(rebuiltIndices[i] >= 0)
+				rebuiltIndexUpdates->push_back(std::make_pair(imageInsts[i], rebuiltIndices[i]));
+	}
+
+	return true;
+}
+
+static bool
+SaveBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDeleted, int *numMoved)
+{
+	std::vector<uint8> writeBuf;
+	std::vector<std::pair<ObjectInst*, int>> rebuiltIndexUpdates;
+	GameFile *imageFile = GetGameFileFromImage(imgIdx);
+	const char *imageName = imageFile && imageFile->name ? imageFile->name : "<unknown>";
+
+	if(!BuildBinaryImageByIndex(imgIdx, result, numDeleted, numMoved, &writeBuf, &rebuiltIndexUpdates))
+		return false;
+	if(writeBuf.empty())
+		return true;
+	if(!WriteFileToImage(imgIdx, &writeBuf[0], (int)writeBuf.size())){
 		log("SaveBinaryIpls: WriteFileToImage failed for image %d (%s)\n",
 			imgIdx & 0xFFFFFF, imageName);
 		hotReloadTrace("SaveBinaryIpls: WriteFileToImage failed for image %d (%s)\n",
 			imgIdx & 0xFFFFFF, imageName);
 		rememberBinaryImage(result->failedImages, &result->numFailedImages, imgIdx);
-		rwFree(writeBuf);
 		return false;
 	}
-	rwFree(writeBuf);
-
-	if(rebuild){
-		for(size_t i = 0; i < imageInsts.size(); i++)
-			if(rebuiltIndices[i] >= 0)
-				imageInsts[i]->m_binInstIndex = rebuiltIndices[i];
-	}
-
+	for(size_t i = 0; i < rebuiltIndexUpdates.size(); i++)
+		rebuiltIndexUpdates[i].first->m_binInstIndex = rebuiltIndexUpdates[i].second;
+	rememberBinaryImage(result->savedImages, &result->numSavedImages, imgIdx);
 	log("Patched binary IPL (image %d, %s)\n", imgIdx & 0xFFFFFF, imageName);
 	hotReloadTrace("Patched binary IPL (image %d, %s)\n", imgIdx & 0xFFFFFF, imageName);
-	rememberBinaryImage(result->savedImages, &result->numSavedImages, imgIdx);
 	return true;
 }
 

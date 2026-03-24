@@ -1,4 +1,5 @@
 #include "euryopa.h"
+#include "modloader.h"
 #include "imgui/imgui_internal.h"
 #include "object_categories.h"
 #include "updater.h"
@@ -432,6 +433,7 @@ mergeBinarySaveResult(FileLoader::BinaryIplSaveResult *dst, const FileLoader::Bi
 	}
 
 	dst->numBlockedEmptyDeletes += src.numBlockedEmptyDeletes;
+	dst->numFailedFiles += src.numFailedFiles;
 }
 
 static bool
@@ -595,6 +597,8 @@ struct StreamingBinarySaveSummary
 	int numTouchedInstances;
 	int numFamilies;
 	int numBinaryIpls;
+	bool touchesGta3Img;
+	bool touchesGtaIntImg;
 	const char *sampleObjects[3];
 	int numSampleObjects;
 	const char *sampleBinaryIpls[2];
@@ -636,6 +640,33 @@ addSummaryBinaryIplName(StreamingBinarySaveSummary *summary, ObjectInst *inst)
 	summary->sampleBinaryIpls[summary->numSampleBinaryIpls++] = name;
 }
 
+static void
+addSummaryArchiveUsage(StreamingBinarySaveSummary *summary, ObjectInst *inst)
+{
+	if(summary == nil || inst == nil || inst->m_imageIndex < 0)
+		return;
+
+	const char *archiveLogicalName = GetCdImageLogicalName(inst->m_imageIndex);
+	if(archiveLogicalName == nil)
+		return;
+	if(strstr(archiveLogicalName, "gta_int.img") != nil)
+		summary->touchesGtaIntImg = true;
+	else if(strstr(archiveLogicalName, "gta3.img") != nil)
+		summary->touchesGta3Img = true;
+}
+
+static const char*
+getStreamingArchiveLabel(const StreamingBinarySaveSummary *summary)
+{
+	if(summary == nil)
+		return "streamed IMG archives";
+	if(summary->touchesGta3Img && summary->touchesGtaIntImg)
+		return "multiple IMG archives";
+	if(summary->touchesGtaIntImg)
+		return "gta_int.img";
+	return "gta3.img";
+}
+
 static bool
 buildStreamingBinarySaveSummary(StreamingBinarySaveSummary *summary)
 {
@@ -658,6 +689,7 @@ buildStreamingBinarySaveSummary(StreamingBinarySaveSummary *summary)
 				continue;
 			needsDiskWrite = true;
 			summary->numTouchedInstances++;
+			addSummaryArchiveUsage(summary, inst);
 			addSummaryObjectName(summary, inst);
 			addSummaryBinaryIplName(summary, inst);
 			continue;
@@ -686,6 +718,7 @@ buildStreamingBinarySaveSummary(StreamingBinarySaveSummary *summary)
 			if(familyInst->m_imageIndex >= 0){
 				if(binaryInstNeedsDiskSave(familyInst)){
 					summary->numTouchedInstances++;
+					addSummaryArchiveUsage(summary, familyInst);
 					addSummaryObjectName(summary, familyInst);
 					addSummaryBinaryIplName(summary, familyInst);
 				}
@@ -731,6 +764,12 @@ buildStreamingBinarySaveBlockedDetails(const StreamingBinarySaveSummary *summary
 		snprintf(dst, size, "%d streamed object change(s) are affected.", summary->numTouchedInstances);
 }
 
+static const char*
+getSaveDestinationLabel(void)
+{
+	return gSaveDestination == SAVE_DESTINATION_MODLOADER ? "modloader/Ariane" : "original files";
+}
+
 static bool
 warnStreamingBinarySaveBlockedByRunningGame(const char *actionName)
 {
@@ -739,9 +778,13 @@ warnStreamingBinarySaveBlockedByRunningGame(const char *actionName)
 		return false;
 	if(!buildStreamingBinarySaveSummary(&summary))
 		return false;
+	if(strcmp(actionName, "Hot Reload") != 0 &&
+	   gSaveDestination == SAVE_DESTINATION_MODLOADER)
+		return false;
 
 	char details[256];
 	buildStreamingBinarySaveBlockedDetails(&summary, details, sizeof(details));
+	const char *archiveLabel = getStreamingArchiveLabel(&summary);
 
 #ifdef _WIN32
 	char message[1400];
@@ -749,21 +792,24 @@ warnStreamingBinarySaveBlockedByRunningGame(const char *actionName)
 		snprintf(message, sizeof(message),
 			"%s can't apply these changes while GTA San Andreas is running.\n\n"
 			"%s\n\n"
-			"These objects come from streamed map data stored inside gta3.img.\n"
-			"For this case, Ariane's current Hot Reload path would need to update gta3.img, and GTA keeps that file in use while the game is open.\n\n"
+			"These objects come from streamed map data stored inside %s.\n"
+			"For this case, Ariane's current Hot Reload path would need to update %s, and GTA keeps that file in use while the game is open.\n\n"
 			"This type of streamed-binary change is not supported by Hot Reload yet.\n"
 			"To keep the change, close the game and use Save.",
 			actionName,
-			details[0] ? details : "One or more streamed objects were modified");
+			details[0] ? details : "One or more streamed objects were modified",
+			archiveLabel,
+			archiveLabel);
 	}else{
 		snprintf(message, sizeof(message),
 			"%s can't continue while GTA San Andreas is running.\n\n"
 			"%s\n\n"
-			"These changes are stored in streamed map data inside gta3.img.\n"
+			"These changes are stored in streamed map data inside %s.\n"
 			"GTA keeps that file in use while the game is open, so Ariane can't update it safely.\n\n"
 			"Close the game, then try %s again.",
 			actionName,
 			details[0] ? details : "One or more streamed objects were modified",
+			archiveLabel,
 			actionName);
 	}
 	MessageBoxA(nil, message, "Ariane", MB_OK | MB_ICONWARNING);
@@ -775,9 +821,9 @@ warnStreamingBinarySaveBlockedByRunningGame(const char *actionName)
 			Toast(TOAST_SAVE, "%s blocked: streamed binary map data is not supported by Hot Reload yet.", actionName);
 	}else{
 		if(details[0])
-			Toast(TOAST_SAVE, "%s blocked: %s Close the game to update gta3.img.", actionName, details);
+			Toast(TOAST_SAVE, "%s blocked: %s Close the game to update %s.", actionName, details, archiveLabel);
 		else
-			Toast(TOAST_SAVE, "%s blocked: streamed binary map data is in gta3.img. Close the game first.", actionName);
+			Toast(TOAST_SAVE, "%s blocked: streamed binary map data is in %s. Close the game first.", actionName, archiveLabel);
 	}
 	return true;
 }
@@ -815,8 +861,12 @@ saveAllIpls(void)
 		if(numChecked < 512)
 			checked[numChecked++] = inst->m_file->name;
 		if(sceneNeedsSave(inst->m_file->name) && numSaved < 512){
-			mergeBinarySaveResult(&binaryResult, FileLoader::SaveScene(inst->m_file->name));
-			saved[numSaved++] = inst->m_file->name;
+			FileLoader::BinaryIplSaveResult sceneResult = FileLoader::SaveScene(inst->m_file->name);
+			mergeBinarySaveResult(&binaryResult, sceneResult);
+			if(sceneResult.numFailedFiles == 0 &&
+			   sceneResult.numFailedImages == 0 &&
+			   sceneResult.numBlockedEmptyDeletes == 0)
+				saved[numSaved++] = inst->m_file->name;
 		}
 	}
 
@@ -824,12 +874,53 @@ saveAllIpls(void)
 		Toast(TOAST_SAVE, "Blocked %d binary delete(s): can't empty a streaming IPL", binaryResult.numBlockedEmptyDeletes);
 	else if(binaryResult.numFailedImages)
 		Toast(TOAST_SAVE, "Failed to save %d binary IPL(s)", binaryResult.numFailedImages);
+	else if(binaryResult.numFailedFiles)
+		Toast(TOAST_SAVE, "Failed to save %d file(s)", binaryResult.numFailedFiles);
+
+	if(gSaveDestination == SAVE_DESTINATION_MODLOADER && numSaved > 0){
+		int shadowedText = 0;
+		int shadowedBinary = 0;
+		for(int i = 0; i < numSaved; i++){
+			char exportPath[1024];
+			if(!BuildModloaderLogicalExportPath(saved[i], exportPath, sizeof(exportPath)))
+				continue;
+			const char *winningPath = ModloaderGetSourcePath(saved[i]);
+			if(winningPath && strcmp(winningPath, exportPath) != 0)
+				shadowedText++;
+		}
+		for(int i = 0; i < binaryResult.numSavedImages; i++){
+			char exportPath[1024];
+			char entryFilename[64];
+			if(!BuildModloaderImageEntryExportPath(binaryResult.savedImages[i], exportPath, sizeof(exportPath)))
+				continue;
+			GameFile *file = GetGameFileFromImage(binaryResult.savedImages[i]);
+			if(file == nil || file->name == nil)
+				continue;
+			if(snprintf(entryFilename, sizeof(entryFilename), "%s.ipl", file->name) >= (int)sizeof(entryFilename))
+				continue;
+			const char *winningPath = ModloaderFindImageEntryOverride(
+				GetCdImageLogicalName(binaryResult.savedImages[i]), entryFilename);
+			if(winningPath && strcmp(winningPath, exportPath) != 0)
+				shadowedBinary++;
+		}
+		if(shadowedText || shadowedBinary)
+			Toast(TOAST_SAVE,
+			      "Saved to modloader/Ariane, but %d text + %d streamed override(s) are still shadowed at runtime",
+			      shadowedText, shadowedBinary);
+	}
 
 	// Update saved-state snapshot for diff viewer
 	for(p = instances.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
 		if(inst->m_imageIndex < 0){
-			// Text IPL — everything is persisted (deletions as comments)
+			bool textWasSaved = false;
+			for(int i = 0; i < numSaved; i++)
+				if(strcmp(saved[i], inst->m_file->name) == 0){
+					textWasSaved = true;
+					break;
+				}
+			if(!textWasSaved)
+				continue;
 			inst->m_savedTranslation = inst->m_translation;
 			inst->m_savedRotation = inst->m_rotation;
 			inst->m_wasSavedDeleted = inst->m_isDeleted;
@@ -849,7 +940,9 @@ saveAllIpls(void)
 		}
 	}
 
-	return binaryResult.numBlockedEmptyDeletes == 0 && binaryResult.numFailedImages == 0;
+	return binaryResult.numBlockedEmptyDeletes == 0 &&
+	       binaryResult.numFailedImages == 0 &&
+	       binaryResult.numFailedFiles == 0;
 }
 
 static void
@@ -866,7 +959,7 @@ testInGame(void)
 	// Save all IPLs first
 	if(!saveAllIpls())
 		return;
-	Toast(TOAST_SAVE, "Saved all IPL files");
+	Toast(TOAST_SAVE, "Saved all IPL files to %s", getSaveDestinationLabel());
 
 	// Camera position -> snap to ground
 	rw::V3d pos = TheCamera.m_position;
@@ -1134,11 +1227,15 @@ uiMainmenu(void)
 		if(ImGui::BeginMenu("File")){
 			if(ImGui::MenuItem("Save All IPLs", "Ctrl+S")){
 				if(saveAllIpls())
-					Toast(TOAST_SAVE, "Saved all IPL files");
+					Toast(TOAST_SAVE, "Saved all IPL files to %s", getSaveDestinationLabel());
 			}
 			if(ImGui::MenuItem("Test in Game", "Ctrl+G")){
 				testInGame();
 			}
+			if(ImGui::MenuItem("Save to Modloader", nil,
+			                   gSaveDestination == SAVE_DESTINATION_MODLOADER))
+				gSaveDestination = gSaveDestination == SAVE_DESTINATION_MODLOADER ?
+					SAVE_DESTINATION_ORIGINAL_FILES : SAVE_DESTINATION_MODLOADER;
 			if(ImGui::MenuItem("Hot Reload", "Ctrl+R")){
 				hotReloadIpls();
 			}
@@ -2853,7 +2950,7 @@ gui(void)
 	// Ctrl+S to save all IPLs
 	if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('S')){
 		if(saveAllIpls())
-			Toast(TOAST_SAVE, "Saved all IPL files");
+			Toast(TOAST_SAVE, "Saved all IPL files to %s", getSaveDestinationLabel());
 	}
 
 	// Ctrl+G to test in game

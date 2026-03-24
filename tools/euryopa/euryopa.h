@@ -285,6 +285,13 @@ struct GameFile
 };
 GameFile *NewGameFile(char *path);
 
+enum SaveDestination
+{
+	SAVE_DESTINATION_ORIGINAL_FILES = 0,
+	SAVE_DESTINATION_MODLOADER,
+};
+extern SaveDestination gSaveDestination;
+
 bool IsHourInRange(int h1, int h2);
 void FindVersion(void);
 void LoadGame(void);
@@ -421,7 +428,9 @@ void InitCdImages(void);
 void RefreshCdImageMappings(void);
 uint8 *ReadFileFromImage(int i, int *size);
 GameFile *GetGameFileFromImage(int i);
+const char *GetCdImageLogicalName(int i);
 bool WriteFileToImage(int i, uint8 *data, int size);
+bool BuildModloaderImageEntryExportPath(int i, char *dst, size_t size);
 void RequestObject(int id);
 void LoadAllRequestedObjects(void);
 
@@ -822,6 +831,7 @@ struct BinaryIplSaveResult
 	int numFailedImages;
 	int32 failedImages[256];
 	int numBlockedEmptyDeletes;
+	int numFailedFiles;
 };
 
 extern GameFile *currentFile;

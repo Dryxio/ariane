@@ -16,21 +16,34 @@ struct ModFile {
 	char physicalPath[512];  // actual disk path
 	char basename[64];       // name without extension, lowercase
 	char ext[8];             // extension, lowercase
+	char modName[128];
+	int priority;
+};
+
+struct ImageEntryOverride {
+	char archiveLogicalPath[256];
+	char entryFilename[32];
+	char physicalPath[512];
+	char modName[128];
 	int priority;
 };
 
 struct InternalAddition {
 	ModloaderDatEntry entry;
+	char modName[128];
 	int priority;
 };
 
 static std::vector<ModFile> dffTxdOverrides;  // effective DFF/TXD (after priority dedup)
 static std::vector<ModFile> pathRedirects;    // effective IDE/IPL/COL/IMG redirects
+static std::vector<ImageEntryOverride> imageEntryOverrides; // effective loose overrides for archive entries
 static std::vector<InternalAddition> additionsInternal; // with priority for dedup
 static std::vector<ModloaderDatEntry> additions; // final deduplicated additions (public)
 // storage for strdup'd strings used by additions
 static std::vector<char*> additionStrings;
 static bool active = false;
+
+static void NormalizePath(const char *in, char *out, int maxLen);
 
 static bool
 HasRedirectForLogicalPath(const char *logicalPath)
@@ -39,6 +52,99 @@ HasRedirectForLogicalPath(const char *logicalPath)
 		if(strcmp(pathRedirects[i].logicalPath, logicalPath) == 0)
 			return true;
 	return false;
+}
+
+static void
+NormalizeModName(const char *modName, char *out, size_t outSize)
+{
+	if(outSize == 0)
+		return;
+	out[0] = '\0';
+	if(modName == nil)
+		return;
+
+	char normalized[128];
+	NormalizePath(modName, normalized, sizeof(normalized));
+	strncpy(out, normalized, outSize-1);
+	out[outSize-1] = '\0';
+}
+
+static int
+CompareModCandidates(const char *modNameA, int priorityA, const char *modNameB, int priorityB)
+{
+	if(priorityA != priorityB)
+		return priorityA - priorityB;
+
+	char normalizedA[128];
+	char normalizedB[128];
+	NormalizeModName(modNameA, normalizedA, sizeof(normalizedA));
+	NormalizeModName(modNameB, normalizedB, sizeof(normalizedB));
+	return strcmp(normalizedA, normalizedB);
+}
+
+static bool
+IsBetterModFileCandidate(const ModFile &candidate, const ModFile &current)
+{
+	return CompareModCandidates(candidate.modName, candidate.priority,
+	                            current.modName, current.priority) > 0;
+}
+
+static bool
+IsBetterImageEntryOverrideCandidate(const ImageEntryOverride &candidate,
+                                    const ImageEntryOverride &current)
+{
+	return CompareModCandidates(candidate.modName, candidate.priority,
+	                            current.modName, current.priority) > 0;
+}
+
+static void
+NormalizeStockArchiveAlias(const char *logicalPath, char *out, size_t outSize)
+{
+	if(outSize == 0)
+		return;
+	out[0] = '\0';
+	if(logicalPath == nil)
+		return;
+
+	char normalized[256];
+	NormalizePath(logicalPath, normalized, sizeof(normalized));
+	if(strcmp(normalized, "gta3.img") == 0)
+		strncpy(normalized, "models/gta3.img", sizeof(normalized)-1);
+	else if(strcmp(normalized, "gta_int.img") == 0)
+		strncpy(normalized, "models/gta_int.img", sizeof(normalized)-1);
+	normalized[sizeof(normalized)-1] = '\0';
+
+	strncpy(out, normalized, outSize-1);
+	out[outSize-1] = '\0';
+}
+
+static bool
+ExtractImageEntryOverrideKey(const char *logicalPath, char *archiveLogicalPath, size_t archiveSize,
+                             char *entryFilename, size_t entrySize)
+{
+	if(logicalPath == nil || archiveSize == 0 || entrySize == 0)
+		return false;
+
+	char normalized[256];
+	NormalizePath(logicalPath, normalized, sizeof(normalized));
+	char *imgMarker = strstr(normalized, ".img/");
+	if(imgMarker == nil)
+		return false;
+
+	size_t archiveLen = (imgMarker - normalized) + 4;
+	if(archiveLen == 0 || archiveLen >= archiveSize)
+		return false;
+	memcpy(archiveLogicalPath, normalized, archiveLen);
+	archiveLogicalPath[archiveLen] = '\0';
+	NormalizeStockArchiveAlias(archiveLogicalPath, archiveLogicalPath, archiveSize);
+
+	const char *entry = imgMarker + 5;
+	if(entry[0] == '\0' || strchr(entry, '/') != nil)
+		return false;
+
+	strncpy(entryFilename, entry, entrySize-1);
+	entryFilename[entrySize-1] = '\0';
+	return true;
 }
 
 static void
@@ -53,7 +159,7 @@ AddStockArchiveAliasRedirect(const char *stockLogicalPath, const char *aliasBase
 		ModFile &mf = allModFiles[i];
 		if(strcmp(mf.basename, aliasBasename) != 0 || strcmp(mf.ext, "img") != 0)
 			continue;
-		if(bestIdx < 0 || mf.priority > allModFiles[bestIdx].priority)
+		if(bestIdx < 0 || IsBetterModFileCandidate(mf, allModFiles[bestIdx]))
 			bestIdx = (int)i;
 	}
 	if(bestIdx < 0)
@@ -101,7 +207,7 @@ AddWrappedStockPathRedirects(const std::vector<std::string> &basePaths,
 				continue;
 			if(!HasWrappedLogicalSuffix(mf.logicalPath, stockLogicalPath))
 				continue;
-			if(bestIdx < 0 || mf.priority > allModFiles[bestIdx].priority)
+			if(bestIdx < 0 || IsBetterModFileCandidate(mf, allModFiles[bestIdx]))
 				bestIdx = (int)fi;
 		}
 		if(bestIdx < 0)
@@ -293,7 +399,7 @@ PreScanDatFile(const char *datPath, std::vector<std::string> &basePaths)
 // Recursive directory scan
 #ifdef _WIN32
 static void
-ScanDirectory(const char *dir, const char *relBase, std::vector<ModFile> &files, int priority)
+ScanDirectory(const char *dir, const char *relBase, std::vector<ModFile> &files, int priority, const char *modName)
 {
 	char pattern[512];
 	snprintf(pattern, sizeof(pattern), "%s\\*", dir);
@@ -313,7 +419,7 @@ ScanDirectory(const char *dir, const char *relBase, std::vector<ModFile> &files,
 			snprintf(relPath, sizeof(relPath), "%s", fd.cFileName);
 
 		if(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY){
-			ScanDirectory(fullPath, relPath, files, priority);
+			ScanDirectory(fullPath, relPath, files, priority, modName);
 		}else{
 			ModFile mf;
 			NormalizePath(relPath, mf.logicalPath, sizeof(mf.logicalPath));
@@ -321,6 +427,8 @@ ScanDirectory(const char *dir, const char *relBase, std::vector<ModFile> &files,
 			mf.physicalPath[sizeof(mf.physicalPath)-1] = '\0';
 			ExtractBasenameExt(mf.logicalPath, mf.basename, sizeof(mf.basename),
 			                   mf.ext, sizeof(mf.ext));
+			strncpy(mf.modName, modName, sizeof(mf.modName)-1);
+			mf.modName[sizeof(mf.modName)-1] = '\0';
 			mf.priority = priority;
 			files.push_back(mf);
 		}
@@ -329,7 +437,7 @@ ScanDirectory(const char *dir, const char *relBase, std::vector<ModFile> &files,
 }
 #else
 static void
-ScanDirectory(const char *dir, const char *relBase, std::vector<ModFile> &files, int priority)
+ScanDirectory(const char *dir, const char *relBase, std::vector<ModFile> &files, int priority, const char *modName)
 {
 	DIR *d = opendir(dir);
 	if(!d) return;
@@ -346,19 +454,21 @@ ScanDirectory(const char *dir, const char *relBase, std::vector<ModFile> &files,
 			snprintf(relPath, sizeof(relPath), "%s", ent->d_name);
 
 		struct stat st;
-		if(stat(fullPath, &st) != 0) continue;
-		if(S_ISDIR(st.st_mode)){
-			ScanDirectory(fullPath, relPath, files, priority);
-		}else{
-			ModFile mf;
-			NormalizePath(relPath, mf.logicalPath, sizeof(mf.logicalPath));
-			strncpy(mf.physicalPath, fullPath, sizeof(mf.physicalPath)-1);
-			mf.physicalPath[sizeof(mf.physicalPath)-1] = '\0';
-			ExtractBasenameExt(mf.logicalPath, mf.basename, sizeof(mf.basename),
-			                   mf.ext, sizeof(mf.ext));
-			mf.priority = priority;
-			files.push_back(mf);
-		}
+			if(stat(fullPath, &st) != 0) continue;
+			if(S_ISDIR(st.st_mode)){
+				ScanDirectory(fullPath, relPath, files, priority, modName);
+			}else{
+				ModFile mf;
+				NormalizePath(relPath, mf.logicalPath, sizeof(mf.logicalPath));
+				strncpy(mf.physicalPath, fullPath, sizeof(mf.physicalPath)-1);
+				mf.physicalPath[sizeof(mf.physicalPath)-1] = '\0';
+				ExtractBasenameExt(mf.logicalPath, mf.basename, sizeof(mf.basename),
+				                   mf.ext, sizeof(mf.ext));
+				strncpy(mf.modName, modName, sizeof(mf.modName)-1);
+				mf.modName[sizeof(mf.modName)-1] = '\0';
+				mf.priority = priority;
+				files.push_back(mf);
+			}
 	}
 	closedir(d);
 }
@@ -366,7 +476,7 @@ ScanDirectory(const char *dir, const char *relBase, std::vector<ModFile> &files,
 
 // Parse a .txt file for gta.dat-style addition lines
 static void
-ParseReadmeFile(const char *txtPath, const char *modDir,
+ParseReadmeFile(const char *txtPath, const char *modName,
                 std::vector<ModFile> &allFiles,
                 std::vector<InternalAddition> &additionList, int priority)
 {
@@ -411,6 +521,8 @@ ParseReadmeFile(const char *txtPath, const char *modDir,
 		InternalAddition ia;
 		ia.entry.type = storedType;
 		ia.entry.logicalPath = storedPath;
+		strncpy(ia.modName, modName, sizeof(ia.modName)-1);
+		ia.modName[sizeof(ia.modName)-1] = '\0';
 		ia.priority = priority;
 		additionList.push_back(ia);
 
@@ -486,6 +598,7 @@ ModloaderInit(void)
 	active = false;
 	dffTxdOverrides.clear();
 	pathRedirects.clear();
+	imageEntryOverrides.clear();
 	additionsInternal.clear();
 	additions.clear();
 	for(size_t i = 0; i < additionStrings.size(); i++)
@@ -520,6 +633,13 @@ ModloaderInit(void)
 	// Enumerate mod subdirectories
 	std::vector<std::string> modDirs;
 	ListModDirs("modloader", modDirs);
+	std::sort(modDirs.begin(), modDirs.end(), [](const std::string &a, const std::string &b) {
+		char normalizedA[128];
+		char normalizedB[128];
+		NormalizeModName(a.c_str(), normalizedA, sizeof(normalizedA));
+		NormalizeModName(b.c_str(), normalizedB, sizeof(normalizedB));
+		return strcmp(normalizedA, normalizedB) < 0;
+	});
 
 	// Collect all mod files
 	std::vector<ModFile> allModFiles;
@@ -544,12 +664,12 @@ ModloaderInit(void)
 
 		// Scan all files in this mod
 		std::vector<ModFile> modFiles;
-		ScanDirectory(modPath, "", modFiles, priority);
+			ScanDirectory(modPath, "", modFiles, priority, modDirs[mi].c_str());
 
 		// Parse .txt files for gta.dat-style additions
 		for(size_t fi = 0; fi < modFiles.size(); fi++){
 			if(strcmp(modFiles[fi].ext, "txt") == 0){
-				ParseReadmeFile(modFiles[fi].physicalPath, modPath,
+				ParseReadmeFile(modFiles[fi].physicalPath, modDirs[mi].c_str(),
 				                modFiles, additionsInternal, priority);
 			}
 		}
@@ -561,6 +681,54 @@ ModloaderInit(void)
 
 	if(allModFiles.empty()){
 		return;
+	}
+
+	// 0) Loose archive-entry overrides (for example models/gta3.img/foo.ipl)
+	{
+		std::vector<ImageEntryOverride> candidates;
+		for(size_t i = 0; i < allModFiles.size(); i++){
+			ModFile &mf = allModFiles[i];
+			if(strcmp(mf.ext, "ipl") != 0)
+				continue;
+
+			ImageEntryOverride ov = {};
+			if(!ExtractImageEntryOverrideKey(mf.logicalPath,
+			                                 ov.archiveLogicalPath, sizeof(ov.archiveLogicalPath),
+			                                 ov.entryFilename, sizeof(ov.entryFilename)))
+				continue;
+
+			strncpy(ov.physicalPath, mf.physicalPath, sizeof(ov.physicalPath)-1);
+			ov.physicalPath[sizeof(ov.physicalPath)-1] = '\0';
+			strncpy(ov.modName, mf.modName, sizeof(ov.modName)-1);
+			ov.modName[sizeof(ov.modName)-1] = '\0';
+			ov.priority = mf.priority;
+			candidates.push_back(ov);
+		}
+
+		for(size_t i = 0; i < candidates.size(); i++){
+			bool dominated = false;
+			for(size_t j = 0; j < candidates.size(); j++){
+				if(i == j) continue;
+				if(strcmp(candidates[i].archiveLogicalPath, candidates[j].archiveLogicalPath) == 0 &&
+				   strcmp(candidates[i].entryFilename, candidates[j].entryFilename) == 0 &&
+				   IsBetterImageEntryOverrideCandidate(candidates[j], candidates[i])){
+					dominated = true;
+					break;
+				}
+			}
+			if(!dominated){
+				bool dup = false;
+				for(size_t k = 0; k < imageEntryOverrides.size(); k++){
+					if(strcmp(imageEntryOverrides[k].archiveLogicalPath, candidates[i].archiveLogicalPath) == 0 &&
+					   strcmp(imageEntryOverrides[k].entryFilename, candidates[i].entryFilename) == 0){
+						dup = true;
+						break;
+					}
+				}
+				if(!dup)
+					imageEntryOverrides.push_back(candidates[i]);
+			}
+		}
 	}
 
 	// Priority resolution
@@ -581,7 +749,7 @@ ModloaderInit(void)
 				if(i == j) continue;
 				if(strcmp(dffTxdCandidates[i].basename, dffTxdCandidates[j].basename) == 0 &&
 				   strcmp(dffTxdCandidates[i].ext, dffTxdCandidates[j].ext) == 0 &&
-				   dffTxdCandidates[j].priority > dffTxdCandidates[i].priority){
+				   IsBetterModFileCandidate(dffTxdCandidates[j], dffTxdCandidates[i])){
 					dominated = true;
 					break;
 				}
@@ -625,7 +793,7 @@ ModloaderInit(void)
 			for(size_t j = 0; j < redirectCandidates.size(); j++){
 				if(i == j) continue;
 				if(strcmp(redirectCandidates[i].logicalPath, redirectCandidates[j].logicalPath) == 0 &&
-				   redirectCandidates[j].priority > redirectCandidates[i].priority){
+				   IsBetterModFileCandidate(redirectCandidates[j], redirectCandidates[i])){
 					dominated = true;
 					break;
 				}
@@ -657,12 +825,8 @@ ModloaderInit(void)
 				NormalizePath(additionsInternal[j].entry.logicalPath, normB, sizeof(normB));
 				if(strcmp(normA, normB) != 0) continue;
 				if(strcmp(additionsInternal[i].entry.type, additionsInternal[j].entry.type) != 0) continue;
-				// Same logical entry — higher priority wins; on tie, first seen wins
-				if(additionsInternal[j].priority > additionsInternal[i].priority){
-					dominated = true;
-					break;
-				}
-				if(additionsInternal[j].priority == additionsInternal[i].priority && j < i){
+				if(CompareModCandidates(additionsInternal[j].modName, additionsInternal[j].priority,
+				                        additionsInternal[i].modName, additionsInternal[i].priority) > 0){
 					dominated = true;
 					break;
 				}
@@ -700,11 +864,11 @@ ModloaderInit(void)
 		int bestExact = -1, bestFallback = -1;
 		for(size_t fi = 0; fi < allModFiles.size(); fi++){
 			if(strcmp(allModFiles[fi].logicalPath, normalizedLogical) == 0){
-				if(bestExact < 0 || allModFiles[fi].priority > allModFiles[bestExact].priority)
+				if(bestExact < 0 || IsBetterModFileCandidate(allModFiles[fi], allModFiles[bestExact]))
 					bestExact = (int)fi;
 			}else if(strcmp(allModFiles[fi].basename, wantBase) == 0 &&
 			         strcmp(allModFiles[fi].ext, wantExt) == 0){
-				if(bestFallback < 0 || allModFiles[fi].priority > allModFiles[bestFallback].priority)
+				if(bestFallback < 0 || IsBetterModFileCandidate(allModFiles[fi], allModFiles[bestFallback]))
 					bestFallback = (int)fi;
 			}
 		}
@@ -761,8 +925,9 @@ ModloaderInit(void)
 	}
 
 	active = true;
-	log("modloader: %d overrides, %d redirects, %d additions from %d mods\n",
+	log("modloader: %d overrides, %d redirects, %d image-entry overrides, %d additions from %d mods\n",
 	    (int)dffTxdOverrides.size(), (int)pathRedirects.size(),
+	    (int)imageEntryOverrides.size(),
 	    (int)additions.size(), numMods);
 }
 
@@ -770,6 +935,24 @@ bool
 ModloaderIsActive(void)
 {
 	return active;
+}
+
+bool
+BuildModloaderLogicalExportPath(const char *logicalPath, char *dst, size_t size)
+{
+	if(dst == nil || size == 0 || logicalPath == nil)
+		return false;
+
+	char normalized[256];
+	NormalizePath(logicalPath, normalized, sizeof(normalized));
+	if(normalized[0] == '\0')
+		return false;
+
+	int written = snprintf(dst, size, "modloader/Ariane/%s", normalized);
+	if(written < 0 || (size_t)written >= size)
+		return false;
+	rw::makePath(dst);
+	return true;
 }
 
 const char*
@@ -822,6 +1005,24 @@ ModloaderGetSourcePath(const char *logicalPath)
 	for(size_t i = 0; i < pathRedirects.size(); i++){
 		if(strcmp(pathRedirects[i].logicalPath, normalized) == 0)
 			return pathRedirects[i].physicalPath;
+	}
+	return nil;
+}
+
+const char*
+ModloaderFindImageEntryOverride(const char *archiveLogicalPath, const char *entryFilename)
+{
+	if(!active || archiveLogicalPath == nil || entryFilename == nil)
+		return nil;
+
+	char normalizedArchive[256];
+	char normalizedEntry[32];
+	NormalizeStockArchiveAlias(archiveLogicalPath, normalizedArchive, sizeof(normalizedArchive));
+	NormalizePath(entryFilename, normalizedEntry, sizeof(normalizedEntry));
+	for(size_t i = 0; i < imageEntryOverrides.size(); i++){
+		if(strcmp(imageEntryOverrides[i].archiveLogicalPath, normalizedArchive) == 0 &&
+		   strcmp(imageEntryOverrides[i].entryFilename, normalizedEntry) == 0)
+			return imageEntryOverrides[i].physicalPath;
 	}
 	return nil;
 }
