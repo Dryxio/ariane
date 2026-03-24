@@ -16,6 +16,28 @@ rw::EngineOpenParams engineOpenParams;
 rw::Light *pAmbient, *pDirect;
 rw::Texture *whiteTex;
 
+static FILE *
+getEditorLogFile(void)
+{
+	static FILE *s_editorLogFile;
+	if(s_editorLogFile == nil){
+		s_editorLogFile = fopen("ariane_editor_log.txt", "a");
+		if(s_editorLogFile)
+			setvbuf(s_editorLogFile, nil, _IOLBF, 0);
+	}
+	return s_editorLogFile;
+}
+
+static void
+writeEditorLogLine(const char *fmt, va_list ap)
+{
+	FILE *f = getEditorLogFile();
+	if(f == nil)
+		return;
+	vfprintf(f, fmt, ap);
+	fflush(f);
+}
+
 // TODO: print to log as well
 void
 panic(const char *fmt, ...)
@@ -33,10 +55,20 @@ void
 debug(const char *fmt, ...)
 {
 	va_list ap;
+	va_list stdoutAp;
+	va_list windowAp;
+	va_list fileAp;
 	va_start(ap, fmt);
-	vfprintf(stdout, fmt, ap);
-	addToLogWindow(fmt, ap);
+	va_copy(stdoutAp, ap);
+	va_copy(windowAp, ap);
+	va_copy(fileAp, ap);
+	vfprintf(stdout, fmt, stdoutAp);
+	addToLogWindow(fmt, windowAp);
+	writeEditorLogLine(fmt, fileAp);
 	fflush(stdout);
+	va_end(fileAp);
+	va_end(windowAp);
+	va_end(stdoutAp);
 	va_end(ap);
 }
 
@@ -45,10 +77,20 @@ void
 log(const char *fmt, ...)
 {
 	va_list ap;
+	va_list stdoutAp;
+	va_list windowAp;
+	va_list fileAp;
 	va_start(ap, fmt);
-	vfprintf(stdout, fmt, ap);
-	addToLogWindow(fmt, ap);
+	va_copy(stdoutAp, ap);
+	va_copy(windowAp, ap);
+	va_copy(fileAp, ap);
+	vfprintf(stdout, fmt, stdoutAp);
+	addToLogWindow(fmt, windowAp);
+	writeEditorLogLine(fmt, fileAp);
 	fflush(stdout);
+	va_end(fileAp);
+	va_end(windowAp);
+	va_end(stdoutAp);
 	va_end(ap);
 }
 

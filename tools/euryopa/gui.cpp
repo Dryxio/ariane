@@ -754,15 +754,24 @@ hotReloadIpls(void)
 		excludedFamilyScenes[numExcludedFamilyScenes++] = parentScene;
 
 		familyOldCounts[numFamilyReloads] = countSavedActiveTextInstances(parentScene);
+		log("HotReload: family candidate parent=%s oldActive=%d\n",
+			parentScene, familyOldCounts[numFamilyReloads]);
 		FileLoader::BinaryIplSaveResult familyResult = FileLoader::SaveScene(parentScene);
 		totalBlockedDeletes += familyResult.numBlockedEmptyDeletes;
 		totalFailedImages += familyResult.numFailedImages;
-		if(familyResult.numBlockedEmptyDeletes || familyResult.numFailedImages)
+		if(familyResult.numBlockedEmptyDeletes || familyResult.numFailedImages){
+			log("HotReload: family save failed parent=%s blocked=%d failed=%d\n",
+				parentScene,
+				familyResult.numBlockedEmptyDeletes,
+				familyResult.numFailedImages);
 			continue;
+		}
 
 		familyScenes[numFamilyReloads] = parentScene;
 		resolveSceneRealPathForHotReload(parentScene, familyRealPaths[numFamilyReloads], sizeof(familyRealPaths[numFamilyReloads]));
 		familyNewCounts[numFamilyReloads] = countLiveActiveTextInstances(parentScene);
+		log("HotReload: family saved parent=%s newActive=%d realPath=%s\n",
+			parentScene, familyNewCounts[numFamilyReloads], familyRealPaths[numFamilyReloads]);
 		markStreamingFamilySaved(parentScene);
 		numFamilyReloads++;
 	}

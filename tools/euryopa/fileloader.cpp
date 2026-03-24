@@ -1110,6 +1110,8 @@ SaveScene(const char *filename)
 	int numRelatedImages = CollectRelatedStreamingImages(filename, relatedImages, 256);
 
 	if(numRelatedImages > 0){
+		log("SaveScene: family save begin for %s with %d related streaming IPL(s)\n",
+			filename, numRelatedImages);
 		struct SavedTextState
 		{
 			ObjectInst *inst;
@@ -1193,11 +1195,17 @@ SaveScene(const char *filename)
 		int numDeleted = 0;
 		int numMoved = 0;
 		bool binarySaveFailed = false;
-		for(int i = 0; i < numRelatedImages; i++)
+		for(int i = 0; i < numRelatedImages; i++){
+			GameFile *relatedFile = GetGameFileFromImage(relatedImages[i]);
+			log("SaveScene: patching related image %d (%s) for parent %s\n",
+				relatedImages[i] & 0xFFFFFF,
+				relatedFile && relatedFile->name ? relatedFile->name : "<unknown>",
+				filename);
 			if(!SaveBinaryImageByIndex(relatedImages[i], &result, &numDeleted, &numMoved)){
 				binarySaveFailed = true;
 				break;
 			}
+		}
 
 		if(!binarySaveFailed){
 			if(!WriteSceneFileInternal(filename, fileInsts, numInsts, true))
@@ -1205,6 +1213,7 @@ SaveScene(const char *filename)
 		}
 
 		if(binarySaveFailed){
+			log("SaveScene: family save failed for %s\n", filename);
 			for(size_t i = 0; i < textStates.size(); i++){
 				textStates[i].inst->m_iplIndex = textStates[i].oldIplIndex;
 				textStates[i].inst->m_lodId = textStates[i].oldLodId;
@@ -1217,6 +1226,8 @@ SaveScene(const char *filename)
 			}
 			return result;
 		}
+
+		log("SaveScene: family save completed for %s\n", filename);
 
 		for(int i = 0; i < numActiveTextInsts; i++)
 			activeTextInsts[i]->m_iplIndex = i;
@@ -1292,9 +1303,12 @@ SaveBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDelete
 {
 	CPtrNode *p;
 	int size;
+	GameFile *imageFile = GetGameFileFromImage(imgIdx);
+	const char *imageName = imageFile && imageFile->name ? imageFile->name : "<unknown>";
 	uint8 *buffer = ReadFileFromImage(imgIdx, &size);
 	if(buffer == nil || *(uint32*)buffer != 0x79726E62){
-		log("SaveBinaryIpls: image %d is not a binary IPL\n", imgIdx & 0xFFFFFF);
+		log("SaveBinaryIpls: image %d (%s) is not a binary IPL\n",
+			imgIdx & 0xFFFFFF, imageName);
 		rememberBinaryImage(result->failedImages, &result->numFailedImages, imgIdx);
 		return false;
 	}
@@ -1338,14 +1352,18 @@ SaveBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDelete
 			if(!imageInsts[i]->m_isDeleted)
 				numAlive++;
 
+		log("SaveBinaryIpls: rebuilding image %d (%s): %d total inst(s), %d alive\n",
+			imgIdx & 0xFFFFFF, imageName, (int)imageInsts.size(), numAlive);
+
 		if(numAlive == 0){
-			log("SaveBinaryIpls: refusing to empty binary IPL image %d\n", imgIdx & 0xFFFFFF);
+			log("SaveBinaryIpls: refusing to empty binary IPL image %d (%s)\n",
+				imgIdx & 0xFFFFFF, imageName);
 			result->numBlockedEmptyDeletes++;
 			return false;
 		}
 		if((uint32)numAlive > maxInstCount){
-			log("SaveBinaryIpls: image %d needs %d inst(s), but only %u fit in section\n",
-				imgIdx & 0xFFFFFF, numAlive, maxInstCount);
+			log("SaveBinaryIpls: image %d (%s) needs %d inst(s), but only %u fit in section\n",
+				imgIdx & 0xFFFFFF, imageName, numAlive, maxInstCount);
 			rememberBinaryImage(result->failedImages, &result->numFailedImages, imgIdx);
 			return false;
 		}
@@ -1370,8 +1388,8 @@ SaveBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDelete
 				continue;
 			int idx = inst->m_binInstIndex;
 			if(idx < 0 || (uint32)idx >= hdr->numInst){
-				log("SaveBinaryIpls: invalid binary inst index %d for image %d\n",
-					idx, imgIdx & 0xFFFFFF);
+				log("SaveBinaryIpls: invalid binary inst index %d for image %d (%s)\n",
+					idx, imgIdx & 0xFFFFFF, imageName);
 				rememberBinaryImage(result->failedImages, &result->numFailedImages, imgIdx);
 				return false;
 			}
@@ -1389,6 +1407,8 @@ SaveBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDelete
 	uint8 *writeBuf = rwNewT(uint8, size, 0);
 	memcpy(writeBuf, buffer, size);
 	if(!WriteFileToImage(imgIdx, writeBuf, size)){
+		log("SaveBinaryIpls: WriteFileToImage failed for image %d (%s)\n",
+			imgIdx & 0xFFFFFF, imageName);
 		rememberBinaryImage(result->failedImages, &result->numFailedImages, imgIdx);
 		rwFree(writeBuf);
 		return false;
@@ -1401,7 +1421,7 @@ SaveBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDelete
 				imageInsts[i]->m_binInstIndex = rebuiltIndices[i];
 	}
 
-	log("Patched binary IPL (image %d)\n", imgIdx & 0xFFFFFF);
+	log("Patched binary IPL (image %d, %s)\n", imgIdx & 0xFFFFFF, imageName);
 	rememberBinaryImage(result->savedImages, &result->numSavedImages, imgIdx);
 	return true;
 }
