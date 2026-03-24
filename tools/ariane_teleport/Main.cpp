@@ -5,8 +5,10 @@
 #include <cstring>
 #include <cmath>
 #include <cstdarg>
+#include <vector>
 
 #if defined(GTASA)
+#include <common.h>
 #include <CGame.h>
 #include <CTimeCycle.h>
 #include <CColStore.h>
@@ -18,6 +20,8 @@
 #include <CObject.h>
 #include <CTheScripts.h>
 #include <CMatrix.h>
+#include <CBaseModelInfo.h>
+#include <CPool.h>
 
 enum {
 	ARIANE_STREAMING_MISSION_REQUIRED = 0x4,
@@ -41,6 +45,287 @@ LogHotReload(const char *fmt, ...)
 	va_end(args);
 	fputc('\n', f);
 	fclose(f);
+}
+
+static void
+TrimTrailingWhitespace(char *s)
+{
+	char *end;
+
+	if(!s || !*s)
+		return;
+	end = s + strlen(s) - 1;
+	while(end >= s && (*end == '\n' || *end == '\r' || *end == ' ' || *end == '\t'))
+		*end-- = '\0';
+}
+
+static bool
+BuildStreamingFamilyPrefix(const char *scenePath, char *prefix, size_t size)
+{
+	const char *filename, *ext, *s;
+	char *t;
+
+	if(scenePath == NULL || size == 0)
+		return false;
+
+	filename = strrchr(scenePath, '\\');
+	if(filename == NULL)
+		filename = strrchr(scenePath, '/');
+	if(filename == NULL)
+		filename = scenePath - 1;
+	ext = strchr(filename + 1, '.');
+	if(ext == NULL)
+		return false;
+
+	t = prefix;
+	for(s = filename + 1; s != ext && (size_t)(t - prefix) < size - 8; s++)
+		*t++ = *s;
+	*t = '\0';
+	strcat(prefix, "_stream");
+	return true;
+}
+
+static int
+CollectRelatedIplSlots(const char *scenePath, int *slots, int maxSlots, int *outStaticIdx)
+{
+	char prefix[64];
+	int prefixLen;
+	int numSlots = 0;
+
+	if(outStaticIdx)
+		*outStaticIdx = -1;
+	if(!BuildStreamingFamilyPrefix(scenePath, prefix, sizeof(prefix)))
+		return 0;
+
+	prefixLen = (int)strlen(prefix);
+	for(int slot = 0; slot < CIplStore::ms_pPool->m_nSize; slot++){
+		IplDef *def = CIplStore::ms_pPool->GetAt(slot);
+		if(def == NULL)
+			continue;
+		if(_strnicmp(def->m_szName, prefix, prefixLen) != 0)
+			continue;
+		if(numSlots < maxSlots)
+			slots[numSlots++] = slot;
+		if(outStaticIdx){
+			if(*outStaticIdx < 0)
+				*outStaticIdx = def->m_nRelatedIpl;
+			else if(def->m_nRelatedIpl != *outStaticIdx){
+				LogHotReload("F inconsistent staticIdx for %s: slot=%d staticIdx=%d expected=%d",
+					scenePath, slot, def->m_nRelatedIpl, *outStaticIdx);
+				return -1;
+			}
+		}
+	}
+	return numSlots;
+}
+
+static bool
+SanitizeIplLine(const char *src, char *dst, size_t size)
+{
+	size_t n = 0;
+	size_t start = 0;
+
+	if(size == 0)
+		return false;
+	for(; *src && n + 1 < size; src++){
+		unsigned char c = (unsigned char)*src;
+		dst[n++] = (c < ' ' || c == ',') ? ' ' : (char)c;
+	}
+	dst[n] = '\0';
+
+	while(dst[start] && dst[start] <= ' ')
+		start++;
+	if(start > 0)
+		memmove(dst, dst + start, strlen(dst + start) + 1);
+	TrimTrailingWhitespace(dst);
+	return dst[0] != '\0';
+}
+
+static void
+DestroyLoadedTextEntities(std::vector<CEntity*> &entities)
+{
+	for(size_t i = 0; i < entities.size(); i++)
+		if(entities[i])
+			delete entities[i];
+	entities.clear();
+}
+
+static bool
+LoadParentTextEntities(const char *scenePath, std::vector<CEntity*> &outEntities)
+{
+	FILE *f = fopen(scenePath, "rb");
+	if(!f){
+		LogHotReload("F failed to open parent text IPL %s", scenePath);
+		return false;
+	}
+
+	bool inInstSection = false;
+	char rawLine[1024];
+	char line[1024];
+	while(fgets(rawLine, sizeof(rawLine), f)){
+		if(!SanitizeIplLine(rawLine, line, sizeof(line)))
+			continue;
+		if(line[0] == '#')
+			continue;
+
+		if(!inInstSection){
+			if(_strnicmp(line, "inst", 4) == 0)
+				inInstSection = true;
+			continue;
+		}
+
+		if(_strnicmp(line, "end", 3) == 0)
+			break;
+
+		CEntity *entity = CFileLoader::LoadObjectInstance(line);
+		if(entity == NULL){
+			LogHotReload("F failed to load parent text entity from %s line=%s", scenePath, line);
+			fclose(f);
+			DestroyLoadedTextEntities(outEntities);
+			return false;
+		}
+		outEntities.push_back(entity);
+	}
+
+	fclose(f);
+	return true;
+}
+
+static void
+LinkAndAddParentTextEntities(std::vector<CEntity*> &entities)
+{
+	for(size_t i = 0; i < entities.size(); i++){
+		CEntity *entity = entities[i];
+		int lodIndex = entity->m_nLodIndex;
+		if(lodIndex < 0 || (size_t)lodIndex >= entities.size()){
+			entity->m_pLod = NULL;
+			entity->m_nLodIndex = -1;
+			continue;
+		}
+		entity->m_pLod = entities[lodIndex];
+		entity->m_pLod->m_nNumLodChildren++;
+	}
+
+	for(size_t i = 0; i < entities.size(); i++){
+		CEntity *entity = entities[i];
+		CBaseModelInfo *mi = CModelInfo::GetModelInfo(entity->m_nModelIndex);
+		if(mi && (entity->m_nNumLodChildren > 0 || mi->m_fDrawDistance > 300.0f))
+			entity->SetupBigBuilding();
+
+		CEntity *lod = entity->m_pLod;
+		if(lod == NULL)
+			continue;
+
+		CBaseModelInfo *lodMi = CModelInfo::GetModelInfo(lod->m_nModelIndex);
+		if(lodMi == NULL || mi == NULL)
+			continue;
+
+		if(lod->m_nNumLodChildren == 1){
+			lod->bUnderwater |= entity->bUnderwater;
+			if(mi->m_pColModel && lodMi->m_pColModel != mi->m_pColModel){
+				lodMi->DeleteCollisionModel();
+				lodMi->SetColModel(mi->m_pColModel, false);
+			}
+		}else if(mi->bDoWeOwnTheColModel){
+			mi->m_fDrawDistance = 400.0f;
+		}else{
+			if(lod->m_nNumLodChildren > 0)
+				lod->m_nNumLodChildren--;
+			entity->m_pLod = NULL;
+			entity->m_nLodIndex = -1;
+		}
+	}
+
+	for(size_t i = 0; i < entities.size(); i++)
+		entities[i]->Add();
+}
+
+static bool
+ReloadStreamingFamily(const char *scenePath, int oldActiveTextCount, int expectedNewActiveTextCount)
+{
+	int slots[256];
+	int staticIdx = -1;
+	int numSlots = CollectRelatedIplSlots(scenePath, slots, 256, &staticIdx);
+	if(numSlots <= 0 || staticIdx < 0){
+		LogHotReload("F no related streaming IPL slots found for %s (numSlots=%d staticIdx=%d)",
+			scenePath, numSlots, staticIdx);
+		return false;
+	}
+
+	std::vector<CEntity*> newEntities;
+	if(!LoadParentTextEntities(scenePath, newEntities))
+		return false;
+
+	if(expectedNewActiveTextCount >= 0 && (int)newEntities.size() != expectedNewActiveTextCount)
+		LogHotReload("F active-count mismatch for %s expected=%d loaded=%d",
+			scenePath, expectedNewActiveTextCount, (int)newEntities.size());
+
+	CVector reloadPos = FindPlayerPed() ? FindPlayerPed()->GetPosition() : CVector(0.0f, 0.0f, 0.0f);
+	for(int i = 0; i < numSlots; i++)
+		CIplStore::RemoveIplAndIgnore(slots[i]);
+
+	CEntity **oldArray = reinterpret_cast<CEntity**>(CIplStore::GetIplEntityIndexArray(staticIdx));
+	if(oldArray){
+		for(int i = 0; i < oldActiveTextCount; i++){
+			if(oldArray[i] == NULL)
+				continue;
+			CWorld::Remove(oldArray[i]);
+			delete oldArray[i];
+		}
+		delete[] oldArray;
+	}
+
+	CEntity **newArray = NULL;
+	if(!newEntities.empty()){
+		newArray = new CEntity*[newEntities.size()];
+		for(size_t i = 0; i < newEntities.size(); i++)
+			newArray[i] = newEntities[i];
+	}
+	IplEntityIndexArrays[staticIdx] = reinterpret_cast<int*>(newArray);
+
+	LinkAndAddParentTextEntities(newEntities);
+
+	for(int i = 0; i < numSlots; i++)
+		CIplStore::RequestIplAndIgnore(slots[i]);
+	CStreaming::LoadAllRequestedModels(false);
+	for(int i = 0; i < numSlots; i++)
+		CIplStore::RemoveIplWhenFarAway(slots[i]);
+	CColStore::EnsureCollisionIsInMemory(reloadPos);
+
+	LogHotReload("F reloaded family %s staticIdx=%d old=%d new=%d relatedSlots=%d",
+		scenePath, staticIdx, oldActiveTextCount, (int)newEntities.size(), numSlots);
+	return true;
+}
+
+static void
+ProcessFamilyReload(void)
+{
+	FILE *f = fopen("ariane_reload_families.txt", "r");
+	if(!f)
+		return;
+
+	char line[1400];
+	while(fgets(line, sizeof(line), f)){
+		TrimTrailingWhitespace(line);
+		if(line[0] != 'F' || line[1] != '\t')
+			continue;
+
+		char *path = line + 2;
+		char *tab = strchr(path, '\t');
+		if(!tab)
+			continue;
+		*tab++ = '\0';
+
+		int oldCount = 0;
+		int newCount = 0;
+		if(sscanf(tab, "%d\t%d", &oldCount, &newCount) != 2)
+			continue;
+
+		ReloadStreamingFamily(path, oldCount, newCount);
+	}
+
+	fclose(f);
+	remove("ariane_reload_families.txt");
 }
 
 struct DebugTrackedEntity {
@@ -417,7 +702,10 @@ public:
 			}
 
 #if defined(GTASA)
-			// --- Phase 2: hot reload streaming IPLs ---
+			// --- Phase 2: full hot reload of streaming families ---
+			ProcessFamilyReload();
+
+			// --- Phase 3: legacy hot reload of streaming IPLs ---
 			{
 				FILE *f = fopen("ariane_reload.txt", "r");
 				if(f){
@@ -450,7 +738,7 @@ public:
 				}
 			}
 
-			// --- Phase 3: hot reload text IPL entities ---
+			// --- Phase 4: legacy hot reload of text IPL entities ---
 			ProcessEntityReload();
 #endif
 		};

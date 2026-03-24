@@ -368,6 +368,158 @@ mergeBinarySaveResult(FileLoader::BinaryIplSaveResult *dst, const FileLoader::Bi
 	dst->numBlockedEmptyDeletes += src.numBlockedEmptyDeletes;
 }
 
+static bool
+buildStreamingFamilyPrefix(const char *scenePath, char *prefix, size_t size)
+{
+	const char *filename, *ext, *s;
+	char *t;
+
+	if(scenePath == nil || size == 0)
+		return false;
+
+	filename = strrchr(scenePath, '\\');
+	if(filename == nil)
+		filename = strrchr(scenePath, '/');
+	if(filename == nil)
+		filename = scenePath - 1;
+	ext = strchr(filename+1, '.');
+	if(ext == nil)
+		return false;
+
+	t = prefix;
+	for(s = filename+1; s != ext && (size_t)(t - prefix) < size - 8; s++)
+		*t++ = *s;
+	*t = '\0';
+	strcat(prefix, "_stream");
+	return true;
+}
+
+static bool
+sceneHasRelatedStreamingFamily(const char *scenePath)
+{
+	char prefix[256];
+	CPtrNode *p;
+
+	if(!isSA() || !buildStreamingFamilyPrefix(scenePath, prefix, sizeof(prefix)))
+		return false;
+
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst->m_imageIndex < 0 || inst->m_file == nil)
+			continue;
+		if(rw::strncmp_ci(inst->m_file->name, prefix, strlen(prefix)) == 0)
+			return true;
+	}
+	return false;
+}
+
+static bool
+instanceBelongsToStreamingFamily(ObjectInst *inst, const char *scenePath)
+{
+	char prefix[256];
+
+	if(inst == nil || inst->m_file == nil || scenePath == nil)
+		return false;
+
+	if(inst->m_imageIndex < 0)
+		return strcmp(inst->m_file->name, scenePath) == 0;
+
+	if(!buildStreamingFamilyPrefix(scenePath, prefix, sizeof(prefix)))
+		return false;
+	return rw::strncmp_ci(inst->m_file->name, prefix, strlen(prefix)) == 0;
+}
+
+static bool
+resolveSceneRealPathForHotReload(const char *filename, char *realpath, size_t realpathSize)
+{
+	CPtrNode *p;
+
+	if(realpathSize == 0)
+		return false;
+
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst->m_file == nil)
+			continue;
+		if(strcmp(inst->m_file->name, filename) != 0)
+			continue;
+
+		if(inst->m_file->sourcePath){
+			strncpy(realpath, inst->m_file->sourcePath, realpathSize);
+			realpath[realpathSize-1] = '\0';
+		}else{
+			strncpy(realpath, filename, realpathSize);
+			realpath[realpathSize-1] = '\0';
+			rw::makePath(realpath);
+		}
+		return true;
+	}
+
+	strncpy(realpath, filename, realpathSize);
+	realpath[realpathSize-1] = '\0';
+	rw::makePath(realpath);
+	return true;
+}
+
+static int
+countSavedActiveTextInstances(const char *scenePath)
+{
+	int count = 0;
+	CPtrNode *p;
+
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst->m_file == nil || inst->m_imageIndex >= 0)
+			continue;
+		if(strcmp(inst->m_file->name, scenePath) != 0)
+			continue;
+		if(inst->m_savedStateValid && !inst->m_wasSavedDeleted)
+			count++;
+	}
+	return count;
+}
+
+static int
+countLiveActiveTextInstances(const char *scenePath)
+{
+	int count = 0;
+	CPtrNode *p;
+
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst->m_file == nil || inst->m_imageIndex >= 0)
+			continue;
+		if(strcmp(inst->m_file->name, scenePath) != 0)
+			continue;
+		if(!inst->m_isDeleted)
+			count++;
+	}
+	return count;
+}
+
+static void
+markStreamingFamilySaved(const char *scenePath)
+{
+	CPtrNode *p;
+
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(!instanceBelongsToStreamingFamily(inst, scenePath))
+			continue;
+
+		if(!inst->m_isDeleted){
+			inst->m_savedTranslation = inst->m_translation;
+			inst->m_savedRotation = inst->m_rotation;
+			inst->m_origTranslation = inst->m_translation;
+			inst->m_origRotation = inst->m_rotation;
+		}
+		inst->m_wasSavedDeleted = inst->m_isDeleted;
+		inst->m_savedStateValid = true;
+		inst->m_isDirty = false;
+		inst->m_isAdded = false;
+	}
+}
+
 static void
 saveAllIpls(void)
 {
@@ -508,7 +660,9 @@ hotReloadIpls(void)
 	char rootDir[2048];
 	char reloadPath[2048];
 	char entityReloadPath[2048];
+	char familyReloadPath[2048];
 	if(!getEditorRootDirectory(rootDir, sizeof(rootDir)) ||
+	   !buildPath(familyReloadPath, sizeof(familyReloadPath), rootDir, "ariane_reload_families.txt") ||
 	   !buildPath(reloadPath, sizeof(reloadPath), rootDir, "ariane_reload.txt") ||
 	   !buildPath(entityReloadPath, sizeof(entityReloadPath), rootDir, "ariane_reload_entities.txt")){
 		Toast(TOAST_SAVE, "Hot Reload: failed to resolve game folder");
@@ -516,8 +670,17 @@ hotReloadIpls(void)
 	}
 
 	CPtrNode *p;
+	const char *excludedFamilyScenes[256];
+	int numExcludedFamilyScenes = 0;
+	const char *familyScenes[256];
+	char familyRealPaths[256][1024];
+	int familyOldCounts[256];
+	int familyNewCounts[256];
+	int numFamilyReloads = 0;
 	int numStreamingIpls = 0;
 	int numEntityCmds = 0;
+	int totalBlockedDeletes = 0;
+	int totalFailedImages = 0;
 	const auto GetAreaFlags = [](ObjectInst *inst) {
 		int area = inst->m_area;
 		if(inst->m_isUnimportant) area |= 0x100;
@@ -527,19 +690,80 @@ hotReloadIpls(void)
 		return area;
 	};
 
+	// --- Streaming families (text parent + related binary IPLs) ---
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst->m_file == nil || inst->m_imageIndex >= 0)
+			continue;
+		if(!sceneHasRelatedStreamingFamily(inst->m_file->name))
+			continue;
+
+		bool needsFamilySave =
+			inst->m_isDirty ||
+			inst->m_isAdded ||
+			!inst->m_savedStateValid ||
+			inst->m_isDeleted != inst->m_wasSavedDeleted;
+		if(!needsFamilySave)
+			continue;
+
+		bool found = false;
+		for(int i = 0; i < numExcludedFamilyScenes; i++)
+			if(strcmp(excludedFamilyScenes[i], inst->m_file->name) == 0){
+				found = true;
+				break;
+			}
+		if(found || numExcludedFamilyScenes >= 256 || numFamilyReloads >= 256)
+			continue;
+
+		excludedFamilyScenes[numExcludedFamilyScenes++] = inst->m_file->name;
+
+		familyOldCounts[numFamilyReloads] = countSavedActiveTextInstances(inst->m_file->name);
+		FileLoader::BinaryIplSaveResult familyResult = FileLoader::SaveScene(inst->m_file->name);
+		totalBlockedDeletes += familyResult.numBlockedEmptyDeletes;
+		totalFailedImages += familyResult.numFailedImages;
+		if(familyResult.numBlockedEmptyDeletes || familyResult.numFailedImages)
+			continue;
+
+		familyScenes[numFamilyReloads] = inst->m_file->name;
+		resolveSceneRealPathForHotReload(inst->m_file->name, familyRealPaths[numFamilyReloads], sizeof(familyRealPaths[numFamilyReloads]));
+		familyNewCounts[numFamilyReloads] = countLiveActiveTextInstances(inst->m_file->name);
+		markStreamingFamilySaved(inst->m_file->name);
+		numFamilyReloads++;
+	}
+
+	if(numFamilyReloads > 0){
+		FILE *ff = fopen(familyReloadPath, "w");
+		if(ff){
+			for(int i = 0; i < numFamilyReloads; i++)
+				fprintf(ff, "F\t%s\t%d\t%d\n",
+					familyRealPaths[i], familyOldCounts[i], familyNewCounts[i]);
+			fclose(ff);
+		}else{
+			Toast(TOAST_SAVE, "Hot Reload: failed to write family reload file");
+			return;
+		}
+	}else
+		remove(familyReloadPath);
+
 	// --- Streaming IPLs (binary, reloaded via CIplStore) ---
 	const char *iplNames[256];
 	int numNames = 0;
 	FileLoader::BinaryIplSaveResult binaryResult = FileLoader::SaveBinaryIpls();
-	if(binaryResult.numBlockedEmptyDeletes)
-		Toast(TOAST_SAVE, "Blocked %d binary delete(s): can't empty a streaming IPL", binaryResult.numBlockedEmptyDeletes);
-	else if(binaryResult.numFailedImages)
-		Toast(TOAST_SAVE, "Failed to save %d binary IPL(s)", binaryResult.numFailedImages);
+	totalBlockedDeletes += binaryResult.numBlockedEmptyDeletes;
+	totalFailedImages += binaryResult.numFailedImages;
 
 	for(p = instances.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
 		if(inst->m_imageIndex < 0) continue;
 		if(inst->m_file == nil) continue;
+		bool excludedByFamily = false;
+		for(int i = 0; i < numExcludedFamilyScenes; i++)
+			if(instanceBelongsToStreamingFamily(inst, excludedFamilyScenes[i])){
+				excludedByFamily = true;
+				break;
+			}
+		if(excludedByFamily)
+			continue;
 		if(!binaryImageWasSaved(binaryResult, inst->m_imageIndex))
 			continue;
 
@@ -573,6 +797,14 @@ hotReloadIpls(void)
 	if(fe){
 		for(p = instances.first; p; p = p->next){
 			ObjectInst *inst = (ObjectInst*)p->item;
+			bool excludedByFamily = false;
+			for(int i = 0; i < numExcludedFamilyScenes; i++)
+				if(instanceBelongsToStreamingFamily(inst, excludedFamilyScenes[i])){
+					excludedByFamily = true;
+					break;
+				}
+			if(excludedByFamily)
+				continue;
 			if(!inst->m_isDirty && !inst->m_isDeleted) continue;
 			if(inst->m_imageIndex >= 0 &&
 			   binaryImageWasSaved(binaryResult, inst->m_imageIndex))
@@ -647,12 +879,32 @@ hotReloadIpls(void)
 			remove(entityReloadPath);
 	}
 
-	if(numStreamingIpls == 0 && numEntityCmds == 0){
-		Toast(TOAST_SAVE, "Hot Reload: nothing to reload");
+	if(numFamilyReloads == 0 && numStreamingIpls == 0 && numEntityCmds == 0){
+		if(totalBlockedDeletes)
+			Toast(TOAST_SAVE, "Blocked %d binary delete(s): can't empty a streaming IPL", totalBlockedDeletes);
+		else if(totalFailedImages)
+			Toast(TOAST_SAVE, "Failed to save %d binary IPL(s)", totalFailedImages);
+		else
+			Toast(TOAST_SAVE, "Hot Reload: nothing to reload");
 		return;
 	}
 
-	if(numStreamingIpls > 0 && numEntityCmds > 0)
+	if(totalBlockedDeletes)
+		Toast(TOAST_SAVE, "Blocked %d binary delete(s): can't empty a streaming IPL", totalBlockedDeletes);
+	else if(totalFailedImages)
+		Toast(TOAST_SAVE, "Failed to save %d binary IPL(s)", totalFailedImages);
+	else if(numFamilyReloads > 0 && numStreamingIpls > 0 && numEntityCmds > 0)
+		Toast(TOAST_SAVE, "Hot Reload: %d family(s) + %d IPL(s) + %d entity(s)",
+			numFamilyReloads, numStreamingIpls, numEntityCmds);
+	else if(numFamilyReloads > 0 && numStreamingIpls > 0)
+		Toast(TOAST_SAVE, "Hot Reload: %d family(s) + %d IPL(s)",
+			numFamilyReloads, numStreamingIpls);
+	else if(numFamilyReloads > 0 && numEntityCmds > 0)
+		Toast(TOAST_SAVE, "Hot Reload: %d family(s) + %d entity(s)",
+			numFamilyReloads, numEntityCmds);
+	else if(numFamilyReloads > 0)
+		Toast(TOAST_SAVE, "Hot Reload: %d family(s)", numFamilyReloads);
+	else if(numStreamingIpls > 0 && numEntityCmds > 0)
 		Toast(TOAST_SAVE, "Hot Reload: %d IPL(s) + %d entity(s)", numStreamingIpls, numEntityCmds);
 	else if(numStreamingIpls > 0)
 		Toast(TOAST_SAVE, "Hot Reload: %d streaming IPL(s)", numStreamingIpls);
