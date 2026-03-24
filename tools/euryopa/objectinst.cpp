@@ -76,6 +76,7 @@ ObjectInst::Init(FileObjectInstance *fi)
 	m_savedRotation = fi->rotation;
 	m_savedStateValid = true;
 	m_wasSavedDeleted = false;
+	m_gameEntityExists = true;
 	m_lodId = fi->lod;
 	UpdateMatrix();
 }
@@ -432,6 +433,7 @@ createSpawnedInstance(int objectId, rw::V3d position, GameFile *file, int iplInd
 	inst->m_isDirty = true;
 	inst->m_savedStateValid = false;
 	inst->m_wasSavedDeleted = false;
+	inst->m_gameEntityExists = false;
 	StampChangeSeq(inst);
 
 	ObjectDef *obj = GetObjectDef(objectId);
@@ -1060,6 +1062,7 @@ cloneInstance(ObjectInst *src, GameFile *dstFile, int iplIndex, rw::V3d offset)
 	inst->m_isDirty = true;
 	inst->m_savedStateValid = false;
 	inst->m_wasSavedDeleted = false;
+	inst->m_gameEntityExists = false;
 	StampChangeSeq(inst);
 	inst->UpdateMatrix();
 	inst->CreateRwObject();

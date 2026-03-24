@@ -836,8 +836,6 @@ saveAllIpls(void)
 			inst->m_savedStateValid = true;
 			inst->m_isDirty = false;
 			inst->m_isAdded = false;
-			inst->m_origTranslation = inst->m_translation;
-			inst->m_origRotation = inst->m_rotation;
 		}else if(binaryImageWasSaved(binaryResult, inst->m_imageIndex)){
 			if(!inst->m_isDeleted){
 				inst->m_savedTranslation = inst->m_translation;
@@ -963,6 +961,16 @@ hotReloadIpls(void)
 	int numEntityCmds = 0;
 	int totalBlockedDeletes = 0;
 	int totalFailedImages = 0;
+	const auto NeedsTransformReload = [](ObjectInst *inst) {
+		float dist = length(sub(inst->m_translation, inst->m_origTranslation));
+		if(dist >= 0.001f)
+			return true;
+		float dot = fabsf(inst->m_rotation.x * inst->m_origRotation.x +
+		                   inst->m_rotation.y * inst->m_origRotation.y +
+		                   inst->m_rotation.z * inst->m_origRotation.z +
+		                   inst->m_rotation.w * inst->m_origRotation.w);
+		return dot < 0.9999f;
+	};
 	const auto GetAreaFlags = [](ObjectInst *inst) {
 		int area = inst->m_area;
 		if(inst->m_isUnimportant) area |= 0x100;
@@ -1016,14 +1024,19 @@ hotReloadIpls(void)
 	if(fe){
 		for(p = instances.first; p; p = p->next){
 			ObjectInst *inst = (ObjectInst*)p->item;
-			if(!inst->m_isDirty && !inst->m_isDeleted) continue;
 			if(inst->m_imageIndex >= 0 &&
 			   binaryImageWasSaved(binaryResult, inst->m_imageIndex))
 				continue;
 
-			if(inst->m_isAdded){
-				if(inst->m_isDeleted)
-					continue;
+			bool needsAdd = !inst->m_isDeleted && !inst->m_gameEntityExists;
+			bool needsDelete = inst->m_isDeleted && inst->m_gameEntityExists;
+			bool needsMove = !inst->m_isDeleted &&
+				inst->m_gameEntityExists &&
+				NeedsTransformReload(inst);
+			if(!needsAdd && !needsDelete && !needsMove)
+				continue;
+
+			if(needsAdd){
 				if(inst->m_imageIndex >= 0)
 					continue;
 
@@ -1050,13 +1063,14 @@ hotReloadIpls(void)
 					lodModelId,
 					lodX, lodY, lodZ);
 				numEntityCmds++;
+				inst->m_gameEntityExists = true;
 				inst->m_isAdded = false;
 				inst->m_origTranslation = inst->m_translation;
 				inst->m_origRotation = inst->m_rotation;
 				continue;
 			}
 
-			if(inst->m_isDeleted){
+			if(needsDelete){
 				// D modelId oldX oldY oldZ
 				fprintf(fe, "D %d %f %f %f\n",
 					inst->m_objectId,
@@ -1064,7 +1078,8 @@ hotReloadIpls(void)
 					inst->m_origTranslation.y,
 					inst->m_origTranslation.z);
 				numEntityCmds++;
-			}else if(inst->m_isDirty){
+				inst->m_gameEntityExists = false;
+			}else if(needsMove){
 				// M modelId oldX oldY oldZ newX newY newZ qx qy qz qw
 				fprintf(fe, "M %d %f %f %f %f %f %f %f %f %f %f\n",
 					inst->m_objectId,
