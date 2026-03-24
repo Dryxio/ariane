@@ -1196,18 +1196,7 @@ LoadGame(void)
 	if(ModloaderIsActive()){
 		ModloaderDatEntry entries[256];
 		int n = ModloaderGetAdditions(entries, 256);
-		for(int i = 0; i < n; i++){
-			if(strcmp(entries[i].type, "IDE") == 0){
-				FileLoader::currentFile = NewGameFile((char*)entries[i].logicalPath);
-				FileLoader::LoadObjectTypes(entries[i].logicalPath);
-			}
-		}
-		for(int i = 0; i < n; i++){
-			if(strcmp(entries[i].type, "COLFILE") == 0){
-				FileLoader::currentFile = NewGameFile((char*)entries[i].logicalPath);
-				FileLoader::LoadCollisionFile(entries[i].logicalPath);
-			}
-		}
+		RefreshCdImageMappings();
 		for(int i = 0; i < n; i++){
 			if(strcmp(entries[i].type, "IPL") == 0){
 				FileLoader::currentFile = NewGameFile((char*)entries[i].logicalPath);

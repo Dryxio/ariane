@@ -32,6 +32,88 @@ static std::vector<ModloaderDatEntry> additions; // final deduplicated additions
 static std::vector<char*> additionStrings;
 static bool active = false;
 
+static bool
+HasRedirectForLogicalPath(const char *logicalPath)
+{
+	for(size_t i = 0; i < pathRedirects.size(); i++)
+		if(strcmp(pathRedirects[i].logicalPath, logicalPath) == 0)
+			return true;
+	return false;
+}
+
+static void
+AddStockArchiveAliasRedirect(const char *stockLogicalPath, const char *aliasBasename,
+                             std::vector<ModFile> &allModFiles)
+{
+	if(HasRedirectForLogicalPath(stockLogicalPath))
+		return;
+
+	int bestIdx = -1;
+	for(size_t i = 0; i < allModFiles.size(); i++){
+		ModFile &mf = allModFiles[i];
+		if(strcmp(mf.basename, aliasBasename) != 0 || strcmp(mf.ext, "img") != 0)
+			continue;
+		if(bestIdx < 0 || mf.priority > allModFiles[bestIdx].priority)
+			bestIdx = (int)i;
+	}
+	if(bestIdx < 0)
+		return;
+
+	ModFile alias = allModFiles[bestIdx];
+	strncpy(alias.logicalPath, stockLogicalPath, sizeof(alias.logicalPath)-1);
+	alias.logicalPath[sizeof(alias.logicalPath)-1] = '\0';
+	pathRedirects.push_back(alias);
+}
+
+static bool
+IsRedirectExt(const char *ext)
+{
+	return strcmp(ext, "ide") == 0 || strcmp(ext, "ipl") == 0 ||
+	       strcmp(ext, "col") == 0 || strcmp(ext, "img") == 0 ||
+	       strcmp(ext, "dir") == 0;
+}
+
+static bool
+HasWrappedLogicalSuffix(const char *wrappedPath, const char *stockLogicalPath)
+{
+	size_t wrappedLen = strlen(wrappedPath);
+	size_t stockLen = strlen(stockLogicalPath);
+	if(wrappedLen <= stockLen)
+		return false;
+	if(strcmp(wrappedPath + wrappedLen - stockLen, stockLogicalPath) != 0)
+		return false;
+	return wrappedPath[wrappedLen - stockLen - 1] == '/';
+}
+
+static void
+AddWrappedStockPathRedirects(const std::vector<std::string> &basePaths,
+                             std::vector<ModFile> &allModFiles)
+{
+	for(size_t bi = 0; bi < basePaths.size(); bi++){
+		const char *stockLogicalPath = basePaths[bi].c_str();
+		if(HasRedirectForLogicalPath(stockLogicalPath))
+			continue;
+
+		int bestIdx = -1;
+		for(size_t fi = 0; fi < allModFiles.size(); fi++){
+			ModFile &mf = allModFiles[fi];
+			if(!IsRedirectExt(mf.ext))
+				continue;
+			if(!HasWrappedLogicalSuffix(mf.logicalPath, stockLogicalPath))
+				continue;
+			if(bestIdx < 0 || mf.priority > allModFiles[bestIdx].priority)
+				bestIdx = (int)fi;
+		}
+		if(bestIdx < 0)
+			continue;
+
+		ModFile redirectMf = allModFiles[bestIdx];
+		strncpy(redirectMf.logicalPath, stockLogicalPath, sizeof(redirectMf.logicalPath)-1);
+		redirectMf.logicalPath[sizeof(redirectMf.logicalPath)-1] = '\0';
+		pathRedirects.push_back(redirectMf);
+	}
+}
+
 // Normalize a path: lowercase, backslash to forward slash, strip leading ./
 static void
 NormalizePath(const char *in, char *out, int maxLen)
@@ -651,6 +733,13 @@ ModloaderInit(void)
 	}
 
 	// 4) For every IMG redirect/addition, also add a .dir companion redirect
+	// Synthesize wrapped stock-path redirects like Map/data/... -> data/...
+	AddWrappedStockPathRedirects(basePaths, allModFiles);
+
+	// Also synthesize root-level aliases for stock SA archives before .dir generation.
+	AddStockArchiveAliasRedirect("models/gta3.img", "gta3", allModFiles);
+	AddStockArchiveAliasRedirect("models/gta_int.img", "gta_int", allModFiles);
+
 	{
 		size_t n = pathRedirects.size();
 		for(size_t i = 0; i < n; i++){
@@ -665,12 +754,7 @@ ModloaderInit(void)
 			strcpy(dirMf.ext, "dir");
 
 			bool dup = false;
-			for(size_t k = 0; k < pathRedirects.size(); k++){
-				if(strcmp(pathRedirects[k].logicalPath, dirMf.logicalPath) == 0){
-					dup = true;
-					break;
-				}
-			}
+			dup = HasRedirectForLogicalPath(dirMf.logicalPath);
 			if(!dup)
 				pathRedirects.push_back(dirMf);
 		}

@@ -1,6 +1,7 @@
 #include "euryopa.h"
 
 static ObjectInst **instArrays[NUMSCENES];
+static int instArraySizes[NUMSCENES];
 static int numInstArrays;
 
 static IplDef ipllist[NUMIPLS];
@@ -15,6 +16,7 @@ AddInstArraySlot(int n)
 	}
 	ObjectInst **instArray = rwNewT(ObjectInst*, n, 0);
 	instArrays[numInstArrays++] = instArray;
+	instArraySizes[numInstArrays-1] = n;
 	return numInstArrays-1;
 }
 
@@ -22,6 +24,14 @@ ObjectInst**
 GetInstArray(int i)
 {
 	return instArrays[i];
+}
+
+int
+GetInstArraySize(int i)
+{
+	if(i < 0 || i >= numInstArrays)
+		return 0;
+	return instArraySizes[i];
 }
 
 // streaming
@@ -78,7 +88,12 @@ LoadIpl(int slot)
 	}
 
 	ObjectInst *lodinst;
-	ObjectInst **instArray = GetInstArray(ipl->instArraySlot);
+	ObjectInst **instArray = nil;
+	int instArraySize = 0;
+	if(ipl->instArraySlot >= 0){
+		instArray = GetInstArray(ipl->instArraySlot);
+		instArraySize = GetInstArraySize(ipl->instArraySlot);
+	}
 
 	buffer = ReadFileFromImage(ipl->imageIndex, &size);
 	file = GetGameFileFromImage(ipl->imageIndex);
@@ -109,6 +124,11 @@ LoadIpl(int slot)
 			if(inst->m_lodId < 0)
 				inst->m_lod = nil;
 			else{
+				if(instArray == nil || inst->m_lodId >= instArraySize){
+					inst->m_lod = nil;
+					insts++;
+					continue;
+				}
 				lodinst = instArray[inst->m_lodId];
 				if(lodinst == nil){
 					inst->m_lod = nil;	// LOD was deleted

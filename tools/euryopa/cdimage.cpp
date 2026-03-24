@@ -1,4 +1,5 @@
 #include "euryopa.h"
+#include "modloader.h"
 
 #include "minilzo/minilzo.h"
 
@@ -36,9 +37,10 @@ enum
 
 struct DirEntry
 {
-	// directly from directory file
 	uint32 position;
-	uint32 size;
+	uint32 archiveSize;
+	uint32 readableSize;
+	uint16 sizeInArchive;
 	char name[24];
 
 	// additional data
@@ -50,7 +52,8 @@ struct DirEntry
 
 struct CdImage
 {
-	char *name;
+	char *logicalName;
+	char *sourcePath;
 	int index;
 
 	DirEntry *directory;
@@ -83,7 +86,7 @@ uiShowCdImages(void)
 
 	for(i = 0; i < numCdImages; i++){
 		cdimg = &cdImages[i];
-		if(ImGui::TreeNode(cdimg->name)){
+		if(ImGui::TreeNode(cdimg->logicalName)){
 			for(j = 0; j < cdimg->directorySize; j++){
 				de = &cdimg->directory[j];
 
@@ -99,6 +102,21 @@ uiShowCdImages(void)
 		}
 	}
 }
+
+struct DirEntryV1Disk
+{
+	uint32 position;
+	uint32 size;
+	char name[24];
+};
+
+struct DirEntryV2Disk
+{
+	uint32 position;
+	uint16 streamingSize;
+	uint16 sizeInArchive;
+	char name[24];
+};
 
 static void
 AddDirEntry(CdImage *cdimg, DirEntry *de)
@@ -126,13 +144,15 @@ AddDirEntry(CdImage *cdimg, DirEntry *de)
 //		log("warning: unknown file extension: %s %s\n", ext, de->name);
 		return;
 	}
-	if(de->size > maxFileSize)
-		maxFileSize = de->size;
+	if(de->archiveSize > maxFileSize)
+		maxFileSize = de->archiveSize;
+	if(de->readableSize > maxFileSize)
+		maxFileSize = de->readableSize;
 	cdimg->directory[cdimg->directorySize++] = *de;
 }
 
 static void
-ReadDirectory(CdImage *cdimg, FILE *f, int n)
+ReadDirectory(CdImage *cdimg, FILE *f, int n, bool ver2)
 {
 	DirEntry de;
 	int i;
@@ -146,7 +166,28 @@ ReadDirectory(CdImage *cdimg, FILE *f, int n)
 		cdimg->directory = rwResizeT(DirEntry, cdimg->directory, cdimg->directoryLimit, 0);
 	}
 	for(i = 0 ; i < n; i++){
-		fread(&de, 1, 32, f);
+		memset(&de, 0, sizeof(de));
+		if(ver2){
+			DirEntryV2Disk raw;
+			fread(&raw, 1, sizeof(raw), f);
+			de.position = raw.position;
+			de.sizeInArchive = raw.sizeInArchive;
+			de.readableSize = raw.streamingSize;
+			de.archiveSize = raw.sizeInArchive != 0 ? raw.sizeInArchive : raw.streamingSize;
+			if(de.readableSize == 0)
+				de.readableSize = de.archiveSize;
+			strncpy(de.name, raw.name, sizeof(de.name));
+			de.name[sizeof(de.name)-1] = '\0';
+		}else{
+			DirEntryV1Disk raw;
+			fread(&raw, 1, sizeof(raw), f);
+			de.position = raw.position;
+			de.archiveSize = raw.size;
+			de.readableSize = raw.size;
+			de.sizeInArchive = 0;
+			strncpy(de.name, raw.name, sizeof(de.name));
+			de.name[sizeof(de.name)-1] = '\0';
+		}
 		de.filetype = 0;
 		de.overridden = 0;
 		AddDirEntry(cdimg, &de);
@@ -157,7 +198,10 @@ void
 AddCdImage(const char *path)
 {
 	FILE *img, *dir;
-	char *dirpath, *p;
+	char dirpath[1024];
+	char resolvedPath[1024];
+	char resolvedDirPath[1024];
+	char *p;
 	int fourcc, n;
 	int imgindex;
 	CdImage *cdimg;
@@ -170,30 +214,56 @@ AddCdImage(const char *path)
 		return;
 	}
 
-	img = fopen_ci(path, "rb");
+	const char *redirect = ModloaderRedirectPath(path);
+	if(redirect){
+		strncpy(resolvedPath, redirect, sizeof(resolvedPath)-1);
+		resolvedPath[sizeof(resolvedPath)-1] = '\0';
+	}else{
+		strncpy(resolvedPath, path, sizeof(resolvedPath)-1);
+		resolvedPath[sizeof(resolvedPath)-1] = '\0';
+		rw::makePath(resolvedPath);
+	}
+
+	img = fopen(resolvedPath, "rb");
 	if(img == nil){
 		log("warning: cdimage %s couldn't be opened\n", path);
 		numCdImages--;
 		return;
 	}
-	cdimg->name = strdup(path);
+	cdimg->logicalName = strdup(path);
+	cdimg->sourcePath = strdup(resolvedPath);
 	cdimg->file = img;
 	cdimg->index = imgindex;
+	cdimg->directory = nil;
+	cdimg->directorySize = 0;
+	cdimg->directoryLimit = 0;
 
 	fread(&fourcc, 1, 4, img);
 	if(fourcc == 0x32524556){	// VER2
 		// Found a VER2 image, read its directory
 		fread(&n, 1, 4, img);
-		ReadDirectory(cdimg, img, n);
+		ReadDirectory(cdimg, img, n, true);
 	}else{
-		dirpath = strdup(path);
+		strncpy(dirpath, path, sizeof(dirpath)-1);
+		dirpath[sizeof(dirpath)-1] = '\0';
 		p = strrchr(dirpath, '.');
 		strcpy(p+1, "dir");
-		dir = fopen_ci(dirpath, "rb");
+		redirect = ModloaderRedirectPath(dirpath);
+		if(redirect){
+			strncpy(resolvedDirPath, redirect, sizeof(resolvedDirPath)-1);
+			resolvedDirPath[sizeof(resolvedDirPath)-1] = '\0';
+		}else{
+			strncpy(resolvedDirPath, dirpath, sizeof(resolvedDirPath)-1);
+			resolvedDirPath[sizeof(resolvedDirPath)-1] = '\0';
+			rw::makePath(resolvedDirPath);
+		}
+		dir = fopen(resolvedDirPath, "rb");
 		if(dir == nil){
-			log("warning: directory %s couldn't be opened\n", dirpath);
+			log("warning: directory %s couldn't be opened for %s (%s)\n",
+			    resolvedDirPath, cdimg->logicalName, cdimg->sourcePath);
 			numCdImages--;
-			free(cdimg->name);
+			free(cdimg->logicalName);
+			free(cdimg->sourcePath);
 			fclose(img);
 			return;
 		}
@@ -201,12 +271,14 @@ AddCdImage(const char *path)
 		n = ftell(dir);
 		fseek(dir, 0, SEEK_SET);
 		n /= 32;
-		ReadDirectory(cdimg, dir, n);
+		ReadDirectory(cdimg, dir, n, false);
+		fclose(dir);
 	}
+	log("AddCdImage: opened %s from %s\n", cdimg->logicalName, cdimg->sourcePath);
 }
 
 static void
-InitCdImage(CdImage *cdimg)
+RegisterCdImageEntries(CdImage *cdimg, bool warnOnDuplicates)
 {
 	int i, slot;
 	int32 idx;
@@ -223,8 +295,10 @@ InitCdImage(CdImage *cdimg)
 			obj = GetObjectDef(de->name, nil);
 			if(obj){
 				if(obj->m_imageIndex >= 0){
-					log("warning: model %s appears multiple times\n", obj->m_name);
-					de->overridden = 1;
+					if(warnOnDuplicates){
+						log("warning: model %s appears multiple times\n", obj->m_name);
+						de->overridden = 1;
+					}
 				}else
 					obj->m_imageIndex = idx;
 			}
@@ -234,8 +308,10 @@ InitCdImage(CdImage *cdimg)
 			slot = AddTxdSlot(de->name);
 			txd = GetTxdDef(slot);
 			if(txd->imageIndex >= 0){
-				log("warning: txd %s appears multiple times\n", txd->name);
-				de->overridden = 1;
+				if(warnOnDuplicates){
+					log("warning: txd %s appears multiple times\n", txd->name);
+					de->overridden = 1;
+				}
 			}else
 				txd->imageIndex = idx;
 			break;
@@ -246,8 +322,10 @@ InitCdImage(CdImage *cdimg)
 			if(col == nil)
 				break;
 			if(col->imageIndex >= 0){
-				log("warning: col %s appears multiple times\n", col->name);
-				de->overridden = 1;
+				if(warnOnDuplicates){
+					log("warning: col %s appears multiple times\n", col->name);
+					de->overridden = 1;
+				}
 			}else
 				col->imageIndex = idx;
 			break;
@@ -256,14 +334,21 @@ InitCdImage(CdImage *cdimg)
 			slot = AddIplSlot(de->name);
 			ipl = GetIplDef(slot);
 			if(ipl->imageIndex >= 0){
-				log("warning: ipl %s appears multiple times\n", ipl->name);
-				de->overridden = 1;
+				if(warnOnDuplicates){
+					log("warning: ipl %s appears multiple times\n", ipl->name);
+					de->overridden = 1;
+				}
 			}else
 				ipl->imageIndex = idx;
 			break;
 		}
 	}
+}
 
+static void
+InitCdImage(CdImage *cdimg)
+{
+	RegisterCdImageEntries(cdimg, true);
 	if(lzo_init() != LZO_E_OK)
 		panic("LZO init failed");
 }
@@ -281,6 +366,18 @@ InitCdImages(void)
 	streamingBuffer = (uint8*)malloc(maxFileSize*2048);
 	compressionBufSize = maxFileSize*2048;
 	compressionBuf = (uint8*)malloc(compressionBufSize);
+}
+
+void
+RefreshCdImageMappings(void)
+{
+	int i;
+	if(isSA())
+		for(i = 0; i < numCdImages; i++)
+			RegisterCdImageEntries(&cdImages[i], false);
+	else
+		for(i = numCdImages-1; i >= 0; i--)
+			RegisterCdImageEntries(&cdImages[i], false);
 }
 
 //uint8 compressionbuf[4*1024*1024];
@@ -341,11 +438,11 @@ ReadFileFromImage(int i, int *size)
 	cdimg = &cdImages[img];
 	DirEntry *de = &cdimg->directory[i];
 	fseek(cdimg->file, de->position*2048, SEEK_SET);
-	fread(streamingBuffer, 1, de->size*2048, cdimg->file);
+	fread(streamingBuffer, 1, de->archiveSize*2048, cdimg->file);
 	if(*(uint32*)streamingBuffer == 0x67A3A1CE)
 		return DecompressFile(streamingBuffer, size);
 	if(size)
-		*size = de->size*2048;
+		*size = de->archiveSize*2048;
 	return streamingBuffer;
 }
 
@@ -359,20 +456,49 @@ WriteFileToImage(int i, uint8 *data, int size)
 	cdimg = &cdImages[img];
 	DirEntry *de = &cdimg->directory[i];
 
+	if(de->sizeInArchive != 0){
+		log("WriteFileToImage: refusing write to compressed entry %s in %s (source %s): sizeInArchive=%u\n",
+		    de->name, cdimg->logicalName, cdimg->sourcePath, de->sizeInArchive);
+		return false;
+	}
+
+	if(de->archiveSize == 0 || de->readableSize == 0 || de->archiveSize != de->readableSize){
+		log("WriteFileToImage: refusing write to %s in %s (source %s): inconsistent entry metadata (archive=%u readable=%u sizeInArchive=%u)\n",
+		    de->name, cdimg->logicalName, cdimg->sourcePath,
+		    de->archiveSize, de->readableSize, de->sizeInArchive);
+		return false;
+	}
+
+	int entryBytes = de->archiveSize*2048;
+	if(size > entryBytes){
+		log("WriteFileToImage: refusing write to %s in %s (source %s): %d bytes exceeds allocated span %d\n",
+		    de->name, cdimg->logicalName, cdimg->sourcePath, size, entryBytes);
+		return false;
+	}
+	if(size != entryBytes){
+		log("WriteFileToImage: refusing write to %s in %s (source %s): %d bytes does not match entry span %d\n",
+		    de->name, cdimg->logicalName, cdimg->sourcePath, size, entryBytes);
+		return false;
+	}
+
 	// Reopen in r+b mode for in-place writing
-	char path[1024];
-	strncpy(path, cdimg->name, sizeof(path));
-	rw::makePath(path);
-	FILE *f = fopen(path, "r+b");
+	FILE *f = fopen(cdimg->sourcePath, "r+b");
 	if(f == nil){
-		log("WriteFileToImage: can't open %s for writing\n", path);
+		log("WriteFileToImage: can't open %s (source %s) for writing\n",
+		    cdimg->logicalName, cdimg->sourcePath);
 		return false;
 	}
 	fseek(f, de->position*2048, SEEK_SET);
 	size_t written = fwrite(data, 1, size, f);
 	fclose(f);
-	log("WriteFileToImage: wrote %d/%d bytes at sector %d in %s\n",
-		(int)written, size, de->position, path);
+	if(written != (size_t)size){
+		log("WriteFileToImage: short write for %s in %s (source %s): wrote %d/%d bytes at sector %d\n",
+		    de->name, cdimg->logicalName, cdimg->sourcePath,
+		    (int)written, size, de->position);
+		return false;
+	}
+	log("WriteFileToImage: wrote %d/%d bytes for %s at sector %d in %s (source %s)\n",
+		(int)written, size, de->name, de->position, cdimg->logicalName, cdimg->sourcePath);
 
 	// Also update the in-memory cached file handle
 	// (re-read will pick up new data)

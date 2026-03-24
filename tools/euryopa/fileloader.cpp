@@ -594,9 +594,13 @@ SetupRelatedIPLs(const char *path, int instArraySlot)
 	IplDef *ipl;
 
 	filename = strrchr(path, '\\');
-	assert(filename);
-	ext = strchr(filename, '.');
-	assert(ext);
+	if(filename == nil)
+		filename = strrchr(path, '/');
+	if(filename == nil)
+		filename = path - 1;
+	ext = strchr(filename+1, '.');
+	if(ext == nil)
+		return;
 	t = scenename;
 	for(s = filename+1; s != ext; s++)
 		*t++ = *s;
@@ -777,6 +781,30 @@ LoadCollisionFile(const char *path)
 }
 
 static bool haveFinishedDefinitions;
+static bool haveLoadedModloaderDefinitionAdditions;
+
+static void
+LoadModloaderDefinitionAdditions(void)
+{
+	if(!ModloaderIsActive() || haveLoadedModloaderDefinitionAdditions)
+		return;
+
+	ModloaderDatEntry entries[256];
+	int n = ModloaderGetAdditions(entries, 256);
+	for(int i = 0; i < n; i++){
+		if(strcmp(entries[i].type, "IDE") == 0){
+			currentFile = NewGameFile((char*)entries[i].logicalPath);
+			LoadObjectTypes(entries[i].logicalPath);
+		}
+	}
+	for(int i = 0; i < n; i++){
+		if(strcmp(entries[i].type, "COLFILE") == 0){
+			currentFile = NewGameFile((char*)entries[i].logicalPath);
+			LoadCollisionFile(entries[i].logicalPath);
+		}
+	}
+	haveLoadedModloaderDefinitionAdditions = true;
+}
 
 void
 LoadLevel(const char *filename)
@@ -826,6 +854,7 @@ LoadLevel(const char *filename)
 			LoadObjectTypes(path);
 		}else if(strncmp(line, "IPL", 3) == 0){
 			if(!haveFinishedDefinitions){
+				LoadModloaderDefinitionAdditions();
 				InitCdImages();
 				LoadAllCollisions();
 				haveFinishedDefinitions = true;

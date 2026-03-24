@@ -416,6 +416,7 @@ extern rw::Texture *gPreviewTexture;
 
 void AddCdImage(const char *path);
 void InitCdImages(void);
+void RefreshCdImageMappings(void);
 uint8 *ReadFileFromImage(int i, int *size);
 GameFile *GetGameFileFromImage(int i);
 bool WriteFileToImage(int i, uint8 *data, int size);
@@ -801,6 +802,7 @@ struct IplDef
 };
 int AddInstArraySlot(int n);
 ObjectInst **GetInstArray(int i);
+int GetInstArraySize(int i);
 IplDef *GetIplDef(int i);
 int AddIplSlot(const char *name);
 void LoadIpl(int i);
