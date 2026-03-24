@@ -429,32 +429,6 @@ instanceBelongsToStreamingFamily(ObjectInst *inst, const char *scenePath)
 	return rw::strncmp_ci(inst->m_file->name, prefix, strlen(prefix)) == 0;
 }
 
-static const char*
-findStreamingFamilyParentScene(ObjectInst *inst)
-{
-	CPtrNode *p;
-
-	if(inst == nil || inst->m_file == nil || !isSA())
-		return nil;
-
-	if(inst->m_imageIndex < 0){
-		if(sceneHasRelatedStreamingFamily(inst->m_file->name))
-			return inst->m_file->name;
-		return nil;
-	}
-
-	for(p = instances.first; p; p = p->next){
-		ObjectInst *textInst = (ObjectInst*)p->item;
-		if(textInst->m_file == nil || textInst->m_imageIndex >= 0)
-			continue;
-		if(!sceneHasRelatedStreamingFamily(textInst->m_file->name))
-			continue;
-		if(instanceBelongsToStreamingFamily(inst, textInst->m_file->name))
-			return textInst->m_file->name;
-	}
-	return nil;
-}
-
 static bool
 resolveSceneRealPathForHotReload(const char *filename, char *realpath, size_t realpathSize)
 {
@@ -696,6 +670,8 @@ hotReloadIpls(void)
 	}
 
 	CPtrNode *p;
+	const char *knownFamilyScenes[256];
+	int numKnownFamilyScenes = 0;
 	const char *excludedFamilyScenes[256];
 	int numExcludedFamilyScenes = 0;
 	const char *familyScenes[256];
@@ -716,10 +692,45 @@ hotReloadIpls(void)
 		return area;
 	};
 
+	// Precompute text IPL parents that actually own a streaming family.
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst->m_file == nil || inst->m_imageIndex >= 0)
+			continue;
+
+		bool alreadyKnown = false;
+		for(int i = 0; i < numKnownFamilyScenes; i++)
+			if(strcmp(knownFamilyScenes[i], inst->m_file->name) == 0){
+				alreadyKnown = true;
+				break;
+			}
+		if(alreadyKnown)
+			continue;
+		if(!sceneHasRelatedStreamingFamily(inst->m_file->name))
+			continue;
+		if(numKnownFamilyScenes < 256)
+			knownFamilyScenes[numKnownFamilyScenes++] = inst->m_file->name;
+	}
+
 	// --- Streaming families (text parent + related binary IPLs) ---
 	for(p = instances.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
-		const char *parentScene = findStreamingFamilyParentScene(inst);
+		const char *parentScene = nil;
+		if(inst->m_file == nil)
+			continue;
+		if(inst->m_imageIndex < 0){
+			for(int i = 0; i < numKnownFamilyScenes; i++)
+				if(strcmp(knownFamilyScenes[i], inst->m_file->name) == 0){
+					parentScene = knownFamilyScenes[i];
+					break;
+				}
+		}else{
+			for(int i = 0; i < numKnownFamilyScenes; i++)
+				if(instanceBelongsToStreamingFamily(inst, knownFamilyScenes[i])){
+					parentScene = knownFamilyScenes[i];
+					break;
+				}
+		}
 		if(parentScene == nil)
 			continue;
 
