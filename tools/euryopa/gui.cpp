@@ -429,6 +429,32 @@ instanceBelongsToStreamingFamily(ObjectInst *inst, const char *scenePath)
 	return rw::strncmp_ci(inst->m_file->name, prefix, strlen(prefix)) == 0;
 }
 
+static const char*
+findStreamingFamilyParentScene(ObjectInst *inst)
+{
+	CPtrNode *p;
+
+	if(inst == nil || inst->m_file == nil || !isSA())
+		return nil;
+
+	if(inst->m_imageIndex < 0){
+		if(sceneHasRelatedStreamingFamily(inst->m_file->name))
+			return inst->m_file->name;
+		return nil;
+	}
+
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *textInst = (ObjectInst*)p->item;
+		if(textInst->m_file == nil || textInst->m_imageIndex >= 0)
+			continue;
+		if(!sceneHasRelatedStreamingFamily(textInst->m_file->name))
+			continue;
+		if(instanceBelongsToStreamingFamily(inst, textInst->m_file->name))
+			return textInst->m_file->name;
+	}
+	return nil;
+}
+
 static bool
 resolveSceneRealPathForHotReload(const char *filename, char *realpath, size_t realpathSize)
 {
@@ -693,9 +719,8 @@ hotReloadIpls(void)
 	// --- Streaming families (text parent + related binary IPLs) ---
 	for(p = instances.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
-		if(inst->m_file == nil || inst->m_imageIndex >= 0)
-			continue;
-		if(!sceneHasRelatedStreamingFamily(inst->m_file->name))
+		const char *parentScene = findStreamingFamilyParentScene(inst);
+		if(parentScene == nil)
 			continue;
 
 		bool needsFamilySave =
@@ -708,26 +733,26 @@ hotReloadIpls(void)
 
 		bool found = false;
 		for(int i = 0; i < numExcludedFamilyScenes; i++)
-			if(strcmp(excludedFamilyScenes[i], inst->m_file->name) == 0){
+			if(strcmp(excludedFamilyScenes[i], parentScene) == 0){
 				found = true;
 				break;
 			}
 		if(found || numExcludedFamilyScenes >= 256 || numFamilyReloads >= 256)
 			continue;
 
-		excludedFamilyScenes[numExcludedFamilyScenes++] = inst->m_file->name;
+		excludedFamilyScenes[numExcludedFamilyScenes++] = parentScene;
 
-		familyOldCounts[numFamilyReloads] = countSavedActiveTextInstances(inst->m_file->name);
-		FileLoader::BinaryIplSaveResult familyResult = FileLoader::SaveScene(inst->m_file->name);
+		familyOldCounts[numFamilyReloads] = countSavedActiveTextInstances(parentScene);
+		FileLoader::BinaryIplSaveResult familyResult = FileLoader::SaveScene(parentScene);
 		totalBlockedDeletes += familyResult.numBlockedEmptyDeletes;
 		totalFailedImages += familyResult.numFailedImages;
 		if(familyResult.numBlockedEmptyDeletes || familyResult.numFailedImages)
 			continue;
 
-		familyScenes[numFamilyReloads] = inst->m_file->name;
-		resolveSceneRealPathForHotReload(inst->m_file->name, familyRealPaths[numFamilyReloads], sizeof(familyRealPaths[numFamilyReloads]));
-		familyNewCounts[numFamilyReloads] = countLiveActiveTextInstances(inst->m_file->name);
-		markStreamingFamilySaved(inst->m_file->name);
+		familyScenes[numFamilyReloads] = parentScene;
+		resolveSceneRealPathForHotReload(parentScene, familyRealPaths[numFamilyReloads], sizeof(familyRealPaths[numFamilyReloads]));
+		familyNewCounts[numFamilyReloads] = countLiveActiveTextInstances(parentScene);
+		markStreamingFamilySaved(parentScene);
 		numFamilyReloads++;
 	}
 
