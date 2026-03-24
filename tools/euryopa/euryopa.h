@@ -837,7 +837,7 @@ void LoadObjectTypes(const char *filename);
 void LoadScene(const char *filename);
 void LoadCollisionFile(const char *path);
 rw::TexDictionary *LoadTexDictionary(const char *path);
-void SaveScene(const char *filename);
+BinaryIplSaveResult SaveScene(const char *filename);
 BinaryIplSaveResult SaveBinaryIpls(void);
 }
 

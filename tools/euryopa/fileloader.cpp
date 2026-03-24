@@ -880,6 +880,164 @@ LoadLevel(const char *filename)
 	fclose(file);
 }
 
+static void rememberBinaryImage(int32 *images, int *numImages, int32 imageIndex);
+static bool SaveBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDeleted, int *numMoved);
+static void WriteInstLine(FILE *f, ObjectInst *inst, int lodIdx, bool deleted);
+
+static int
+CollectRelatedStreamingImages(const char *path, int32 *images, int maxImages)
+{
+	const char *filename, *ext, *s;
+	char *t, scenename[256];
+	int len;
+	int numImages = 0;
+
+	if(path == nil || !isSA())
+		return 0;
+
+	filename = strrchr(path, '\\');
+	if(filename == nil)
+		filename = strrchr(path, '/');
+	if(filename == nil)
+		filename = path - 1;
+	ext = strchr(filename+1, '.');
+	if(ext == nil)
+		return 0;
+
+	t = scenename;
+	for(s = filename+1; s != ext && (t - scenename) < (int)sizeof(scenename)-8; s++)
+		*t++ = *s;
+	*t = '\0';
+	strcat(scenename, "_stream");
+	len = strlen(scenename);
+
+	for(int i = 0; i < NUMIPLS; i++){
+		IplDef *ipl = GetIplDef(i);
+		if(ipl == nil || ipl->imageIndex < 0)
+			continue;
+		if(rw::strncmp_ci(scenename, ipl->name, len) != 0)
+			continue;
+		if(numImages < maxImages)
+			rememberBinaryImage(images, &numImages, ipl->imageIndex);
+	}
+	return numImages;
+}
+
+static bool
+IsImageInList(int32 imageIndex, int32 *images, int numImages)
+{
+	for(int i = 0; i < numImages; i++)
+		if(images[i] == imageIndex)
+			return true;
+	return false;
+}
+
+static bool
+ResolveSceneRealPath(const char *filename, char *realpath, size_t realpathSize)
+{
+	CPtrNode *p;
+	const char *srcPath = nil;
+
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst->m_file == nil)
+			continue;
+		if(strcmp(inst->m_file->name, filename) == 0){
+			srcPath = inst->m_file->sourcePath;
+			break;
+		}
+	}
+
+	if(srcPath){
+		strncpy(realpath, srcPath, realpathSize);
+		realpath[realpathSize-1] = '\0';
+	}else{
+		strncpy(realpath, filename, realpathSize);
+		realpath[realpathSize-1] = '\0';
+		rw::makePath(realpath);
+	}
+	return true;
+}
+
+static bool
+WriteSceneFileInternal(const char *filename, ObjectInst **insts, int numInsts, bool compactDeletes)
+{
+	FILE *fin, *fout;
+	ObjectInst *inst;
+	char tmppath[1024];
+	char realpath[1024];
+
+	ResolveSceneRealPath(filename, realpath, sizeof(realpath));
+
+	snprintf(tmppath, sizeof(tmppath), "%s.tmp", realpath);
+	fin = fopen(realpath, "rb");
+	fout = fopen(tmppath, "w");
+	if(fout == nil){
+		log("SaveScene: can't create temp file %s\n", tmppath);
+		if(fin) fclose(fin);
+		return false;
+	}
+
+	if(fin){
+		char linebuf[1024];
+		bool inInstSection = false;
+		bool instWritten = false;
+
+		while(fgets(linebuf, sizeof(linebuf), fin)){
+			char *s = linebuf;
+			while(*s && isspace((unsigned char)*s)) s++;
+
+			if(!inInstSection){
+				if(strncmp(s, "inst", 4) == 0 && (s[4] == '\0' || s[4] == '\n' || s[4] == '\r')){
+					inInstSection = true;
+					fprintf(fout, "inst\n");
+					for(int i = 0; i < numInsts; i++){
+						inst = insts[i];
+						if(compactDeletes && inst->m_isDeleted)
+							continue;
+						WriteInstLine(fout, inst, inst->m_lodId, !compactDeletes && inst->m_isDeleted);
+					}
+					instWritten = true;
+				}else{
+					fputs(linebuf, fout);
+				}
+			}else{
+				if(strncmp(s, "end", 3) == 0 && (s[3] == '\0' || s[3] == '\n' || s[3] == '\r')){
+					fprintf(fout, "end\n");
+					inInstSection = false;
+				}
+			}
+		}
+		fclose(fin);
+
+		if(!instWritten){
+			fprintf(fout, "inst\n");
+			for(int i = 0; i < numInsts; i++){
+				inst = insts[i];
+				if(compactDeletes && inst->m_isDeleted)
+					continue;
+				WriteInstLine(fout, inst, inst->m_lodId, !compactDeletes && inst->m_isDeleted);
+			}
+			fprintf(fout, "end\n");
+		}
+	}else{
+		fprintf(fout, "inst\n");
+		for(int i = 0; i < numInsts; i++){
+			inst = insts[i];
+			if(compactDeletes && inst->m_isDeleted)
+				continue;
+			WriteInstLine(fout, inst, inst->m_lodId, !compactDeletes && inst->m_isDeleted);
+		}
+		fprintf(fout, "end\n");
+	}
+
+	fclose(fout);
+
+	remove(realpath);
+	rename(tmppath, realpath);
+	return true;
+}
+
 
 // Write one instance line to file
 static void
@@ -915,16 +1073,15 @@ WriteInstLine(FILE *f, ObjectInst *inst, int lodIdx, bool deleted)
 }
 
 // Save all instances that belong to a given IPL file
-// Deleted instances are commented out with #, but stay at their original
-// position to preserve LOD index compatibility with binary streaming IPLs.
-// On reload, the loader creates nil placeholders for # lines.
-void
+// Text-only IPLs keep the historical "commented delete" behaviour.
+// For SA families with related streaming IPLs, the text file is compacted
+// and all related binary LOD indices are remapped before save.
+BinaryIplSaveResult
 SaveScene(const char *filename)
 {
-	FILE *fin, *fout;
 	CPtrNode *p;
 	ObjectInst *inst;
-	char tmppath[1024];
+	BinaryIplSaveResult result = {};
 
 	// Collect all instances belonging to this file
 	int numInsts = 0;
@@ -937,7 +1094,7 @@ SaveScene(const char *filename)
 
 	if(numInsts == 0){
 		log("SaveScene: no instances found for %s\n", filename);
-		return;
+		return result;
 	}
 
 	// Sort by original m_iplIndex
@@ -949,91 +1106,128 @@ SaveScene(const char *filename)
 				fileInsts[j] = tmp;
 			}
 
-	// Resolve the real OS path — prefer sourcePath from mod files
-	char realpath[1024];
-	const char *srcPath = nil;
-	for(p = instances.first; p; p = p->next){
-		inst = (ObjectInst*)p->item;
-		if(strcmp(inst->m_file->name, filename) == 0){
-			srcPath = inst->m_file->sourcePath;
-			break;
-		}
-	}
-	if(srcPath){
-		strncpy(realpath, srcPath, sizeof(realpath));
-	}else{
-		strncpy(realpath, filename, sizeof(realpath));
-		rw::makePath(realpath);
-	}
+	int32 relatedImages[256];
+	int numRelatedImages = CollectRelatedStreamingImages(filename, relatedImages, 256);
 
-	snprintf(tmppath, sizeof(tmppath), "%s.tmp", realpath);
-	fin = fopen(realpath, "rb");
-	fout = fopen(tmppath, "w");
-	if(fout == nil){
-		log("SaveScene: can't create temp file %s\n", tmppath);
-		if(fin) fclose(fin);
-		return;
-	}
+	if(numRelatedImages > 0){
+		struct SavedTextState
+		{
+			ObjectInst *inst;
+			int oldIplIndex;
+			int oldLodId;
+			ObjectInst *oldLod;
+		};
+		struct SavedBinaryState
+		{
+			ObjectInst *inst;
+			int oldLodId;
+			ObjectInst *oldLod;
+			bool oldDirty;
+		};
 
-	if(fin){
-		// Parse original file, replace inst section, copy everything else
-		char linebuf[1024];
-		bool inInstSection = false;
-		bool instWritten = false;
+		int maxOldIndex = -1;
+		for(int i = 0; i < numInsts; i++)
+			if(fileInsts[i]->m_iplIndex > maxOldIndex)
+				maxOldIndex = fileInsts[i]->m_iplIndex;
 
-		while(fgets(linebuf, sizeof(linebuf), fin)){
-			char *s = linebuf;
-			while(*s && isspace((unsigned char)*s)) s++;
+		std::vector<int> oldToNew(maxOldIndex+1, -1);
+		std::vector<ObjectInst*> oldTextInsts(maxOldIndex+1, nil);
+		std::vector<SavedTextState> textStates;
+		std::vector<SavedBinaryState> binaryStates;
 
-			if(!inInstSection){
-				if(strncmp(s, "inst", 4) == 0 && (s[4] == '\0' || s[4] == '\n' || s[4] == '\r')){
-					inInstSection = true;
-					fprintf(fout, "inst\n");
-					// Write all instances at their original positions
-					// Use m_lodId directly - no remapping needed
-					for(int i = 0; i < numInsts; i++){
-						inst = fileInsts[i];
-						WriteInstLine(fout, inst, inst->m_lodId, inst->m_isDeleted);
-					}
-					instWritten = true;
-				}else{
-					fputs(linebuf, fout);
-				}
-			}else{
-				if(strncmp(s, "end", 3) == 0 && (s[3] == '\0' || s[3] == '\n' || s[3] == '\r')){
-					fprintf(fout, "end\n");
-					inInstSection = false;
-				}
-			}
-		}
-		fclose(fin);
+		ObjectInst *activeTextInsts[8096];
+		int numActiveTextInsts = 0;
 
-		if(!instWritten){
-			fprintf(fout, "inst\n");
-			for(int i = 0; i < numInsts; i++){
-				inst = fileInsts[i];
-				WriteInstLine(fout, inst, inst->m_lodId, inst->m_isDeleted);
-			}
-			fprintf(fout, "end\n");
-		}
-	}else{
-		fprintf(fout, "inst\n");
 		for(int i = 0; i < numInsts; i++){
 			inst = fileInsts[i];
-			WriteInstLine(fout, inst, inst->m_lodId, inst->m_isDeleted);
+			if(inst->m_iplIndex >= 0 && inst->m_iplIndex <= maxOldIndex)
+				oldTextInsts[inst->m_iplIndex] = inst;
+			if(inst->m_isDeleted)
+				continue;
+			oldToNew[inst->m_iplIndex] = numActiveTextInsts;
+			activeTextInsts[numActiveTextInsts++] = inst;
 		}
-		fprintf(fout, "end\n");
-	}
 
-	fclose(fout);
+		for(int i = 0; i < numActiveTextInsts; i++){
+			inst = activeTextInsts[i];
+			textStates.push_back({ inst, inst->m_iplIndex, inst->m_lodId, inst->m_lod });
 
-	remove(realpath);
-	rename(tmppath, realpath);
+			int oldLodId = inst->m_lodId;
+			if(oldLodId >= 0 &&
+			   oldLodId <= maxOldIndex &&
+			   oldTextInsts[oldLodId] &&
+			   !oldTextInsts[oldLodId]->m_isDeleted){
+				inst->m_lod = oldTextInsts[oldLodId];
+				inst->m_lodId = oldToNew[oldLodId];
+			}else{
+				inst->m_lod = nil;
+				inst->m_lodId = -1;
+			}
+		}
+
+		for(p = instances.first; p; p = p->next){
+			inst = (ObjectInst*)p->item;
+			if(inst->m_imageIndex < 0)
+				continue;
+			if(!IsImageInList(inst->m_imageIndex, relatedImages, numRelatedImages))
+				continue;
+
+			binaryStates.push_back({ inst, inst->m_lodId, inst->m_lod, inst->m_isDirty });
+
+			int oldLodId = inst->m_lodId;
+			if(oldLodId >= 0 &&
+			   oldLodId <= maxOldIndex &&
+			   oldTextInsts[oldLodId] &&
+			   !oldTextInsts[oldLodId]->m_isDeleted){
+				inst->m_lod = oldTextInsts[oldLodId];
+				inst->m_lodId = oldToNew[oldLodId];
+			}else{
+				inst->m_lod = nil;
+				inst->m_lodId = -1;
+			}
+
+			if(inst->m_lodId != oldLodId)
+				inst->m_isDirty = true;
+		}
+
+		int numDeleted = 0;
+		int numMoved = 0;
+		bool binarySaveFailed = false;
+		for(int i = 0; i < numRelatedImages; i++)
+			if(!SaveBinaryImageByIndex(relatedImages[i], &result, &numDeleted, &numMoved)){
+				binarySaveFailed = true;
+				break;
+			}
+
+		if(!binarySaveFailed){
+			if(!WriteSceneFileInternal(filename, fileInsts, numInsts, true))
+				binarySaveFailed = true;
+		}
+
+		if(binarySaveFailed){
+			for(size_t i = 0; i < textStates.size(); i++){
+				textStates[i].inst->m_iplIndex = textStates[i].oldIplIndex;
+				textStates[i].inst->m_lodId = textStates[i].oldLodId;
+				textStates[i].inst->m_lod = textStates[i].oldLod;
+			}
+			for(size_t i = 0; i < binaryStates.size(); i++){
+				binaryStates[i].inst->m_lodId = binaryStates[i].oldLodId;
+				binaryStates[i].inst->m_lod = binaryStates[i].oldLod;
+				binaryStates[i].inst->m_isDirty = binaryStates[i].oldDirty;
+			}
+			return result;
+		}
+
+		for(int i = 0; i < numActiveTextInsts; i++)
+			activeTextInsts[i]->m_iplIndex = i;
+	}else if(!WriteSceneFileInternal(filename, fileInsts, numInsts, false))
+		return result;
 
 	int numActive = 0;
 	for(int i = 0; i < numInsts; i++)
 		if(!fileInsts[i]->m_isDeleted) numActive++;
 	log("Saved IPL: %s (%d instances, %d active)\n", filename, numInsts, numActive);
+	return result;
 }
 
 // Save modified instances in binary streaming IPLs by patching
@@ -1082,34 +1276,144 @@ rememberBinaryImage(int32 *images, int *numImages, int32 imageIndex)
 struct BinaryIplHeader
 {
 	uint32 fourcc;
-	uint32 numInst;
-	uint32 numUnk1;
-	uint32 numUnk2;
-	uint32 numUnk3;
-	uint32 numCarGens;
-	uint32 numUnk4;
+	uint16 numInst;
+	uint8 pad06[14];
+	uint16 numCarGens;
+	uint8 pad16[6];
 	uint32 offsetInst;
-	uint32 sizeInst;
-	uint32 offsetUnk1;
-	uint32 sizeUnk1;
-	uint32 offsetUnk2;
-	uint32 sizeUnk2;
-	uint32 offsetUnk3;
-	uint32 sizeUnk3;
+	uint8 pad20[28];
 	uint32 offsetCarGens;
-	uint32 sizeCarGens;
-	uint32 offsetUnk4;
-	uint32 sizeUnk4;
+	uint8 pad40[12];
 };
+static_assert(sizeof(BinaryIplHeader) == 0x4C, "BinaryIplHeader size mismatch");
+
+static bool
+SaveBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDeleted, int *numMoved)
+{
+	CPtrNode *p;
+	int size;
+	uint8 *buffer = ReadFileFromImage(imgIdx, &size);
+	if(buffer == nil || *(uint32*)buffer != 0x79726E62){
+		log("SaveBinaryIpls: image %d is not a binary IPL\n", imgIdx & 0xFFFFFF);
+		rememberBinaryImage(result->failedImages, &result->numFailedImages, imgIdx);
+		return false;
+	}
+
+	BinaryIplHeader *hdr = (BinaryIplHeader*)buffer;
+	FileObjectInstance *instData = (FileObjectInstance*)(buffer + hdr->offsetInst);
+
+	std::vector<ObjectInst*> imageInsts;
+	imageInsts.reserve(128);
+	bool rebuild = false;
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst->m_imageIndex != imgIdx)
+			continue;
+		imageInsts.push_back(inst);
+		if(inst->m_isDeleted != inst->m_wasSavedDeleted)
+			rebuild = true;
+	}
+
+	if(imageInsts.empty())
+		return true;
+
+	std::sort(imageInsts.begin(), imageInsts.end(),
+		[](ObjectInst *a, ObjectInst *b) {
+			if(a->m_binInstIndex != b->m_binInstIndex)
+				return a->m_binInstIndex < b->m_binInstIndex;
+			return a->m_id < b->m_id;
+		});
+
+	uint32 nextOffset = (uint32)size;
+	if(hdr->offsetCarGens > hdr->offsetInst && hdr->offsetCarGens < nextOffset)
+		nextOffset = hdr->offsetCarGens;
+	uint32 maxInstBytes = nextOffset > hdr->offsetInst ? nextOffset - hdr->offsetInst : 0;
+	uint32 maxInstCount = maxInstBytes / sizeof(FileObjectInstance);
+
+	bool modified = false;
+	std::vector<int> rebuiltIndices;
+	if(rebuild){
+		int numAlive = 0;
+		for(size_t i = 0; i < imageInsts.size(); i++)
+			if(!imageInsts[i]->m_isDeleted)
+				numAlive++;
+
+		if(numAlive == 0){
+			log("SaveBinaryIpls: refusing to empty binary IPL image %d\n", imgIdx & 0xFFFFFF);
+			result->numBlockedEmptyDeletes++;
+			return false;
+		}
+		if((uint32)numAlive > maxInstCount){
+			log("SaveBinaryIpls: image %d needs %d inst(s), but only %u fit in section\n",
+				imgIdx & 0xFFFFFF, numAlive, maxInstCount);
+			rememberBinaryImage(result->failedImages, &result->numFailedImages, imgIdx);
+			return false;
+		}
+
+		int nextIdx = 0;
+		rebuiltIndices.assign(imageInsts.size(), -1);
+		for(size_t i = 0; i < imageInsts.size(); i++){
+			ObjectInst *inst = imageInsts[i];
+			if(inst->m_isDeleted){
+				(*numDeleted)++;
+				continue;
+			}
+			fillBinaryInstData(&instData[nextIdx], inst);
+			rebuiltIndices[i] = nextIdx++;
+		}
+		hdr->numInst = numAlive;
+		modified = true;
+	}else{
+		for(size_t i = 0; i < imageInsts.size(); i++){
+			ObjectInst *inst = imageInsts[i];
+			if(!inst->m_isDirty)
+				continue;
+			int idx = inst->m_binInstIndex;
+			if(idx < 0 || (uint32)idx >= hdr->numInst){
+				log("SaveBinaryIpls: invalid binary inst index %d for image %d\n",
+					idx, imgIdx & 0xFFFFFF);
+				rememberBinaryImage(result->failedImages, &result->numFailedImages, imgIdx);
+				return false;
+			}
+			fillBinaryInstData(&instData[idx], inst);
+			(*numMoved)++;
+			modified = true;
+		}
+	}
+
+	if(!modified)
+		return true;
+
+	memset(hdr->pad20, 0, sizeof(hdr->pad20));
+
+	uint8 *writeBuf = rwNewT(uint8, size, 0);
+	memcpy(writeBuf, buffer, size);
+	if(!WriteFileToImage(imgIdx, writeBuf, size)){
+		rememberBinaryImage(result->failedImages, &result->numFailedImages, imgIdx);
+		rwFree(writeBuf);
+		return false;
+	}
+	rwFree(writeBuf);
+
+	if(rebuild){
+		for(size_t i = 0; i < imageInsts.size(); i++)
+			if(rebuiltIndices[i] >= 0)
+				imageInsts[i]->m_binInstIndex = rebuiltIndices[i];
+	}
+
+	log("Patched binary IPL (image %d)\n", imgIdx & 0xFFFFFF);
+	rememberBinaryImage(result->savedImages, &result->numSavedImages, imgIdx);
+	return true;
+}
 
 BinaryIplSaveResult
 SaveBinaryIpls(void)
 {
 	BinaryIplSaveResult result = {};
-	CPtrNode *p;
 	int numDeleted = 0, numMoved = 0;
 	int32 imagesToProcess[256];
 	int numImagesToProcess = 0;
+	CPtrNode *p;
 
 	for(p = instances.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
@@ -1122,141 +1426,8 @@ SaveBinaryIpls(void)
 	if(numImagesToProcess == 0)
 		return result;
 
-	for(int ii = 0; ii < numImagesToProcess; ii++){
-		int32 imgIdx = imagesToProcess[ii];
-
-		// Read the binary IPL
-		int size;
-		uint8 *buffer = ReadFileFromImage(imgIdx, &size);
-		if(buffer == nil || *(uint32*)buffer != 0x79726E62){
-			log("SaveBinaryIpls: image %d is not a binary IPL\n", imgIdx & 0xFFFFFF);
-			rememberBinaryImage(result.failedImages, &result.numFailedImages, imgIdx);
-			continue;
-		}
-
-		BinaryIplHeader *hdr = (BinaryIplHeader*)buffer;
-		FileObjectInstance *instData = (FileObjectInstance*)(buffer + hdr->offsetInst);
-
-		std::vector<ObjectInst*> imageInsts;
-		imageInsts.reserve(128);
-		bool rebuild = false;
-		for(p = instances.first; p; p = p->next){
-			ObjectInst *inst = (ObjectInst*)p->item;
-			if(inst->m_imageIndex != imgIdx)
-				continue;
-			imageInsts.push_back(inst);
-			if(inst->m_isDeleted != inst->m_wasSavedDeleted)
-				rebuild = true;
-		}
-
-		if(imageInsts.empty())
-			continue;
-
-		std::sort(imageInsts.begin(), imageInsts.end(),
-			[](ObjectInst *a, ObjectInst *b) {
-				if(a->m_binInstIndex != b->m_binInstIndex)
-					return a->m_binInstIndex < b->m_binInstIndex;
-				return a->m_id < b->m_id;
-			});
-
-		// Determine the maximum space the inst section can occupy inside this entry.
-		uint32 nextOffset = (uint32)size;
-		const uint32 sectionOffsets[] = {
-			hdr->offsetUnk1, hdr->offsetUnk2, hdr->offsetUnk3,
-			hdr->offsetCarGens, hdr->offsetUnk4
-		};
-		const uint32 sectionSizes[] = {
-			hdr->sizeUnk1, hdr->sizeUnk2, hdr->sizeUnk3,
-			hdr->sizeCarGens, hdr->sizeUnk4
-		};
-		for(int si = 0; si < 5; si++){
-			if(sectionSizes[si] == 0)
-				continue;
-			if(sectionOffsets[si] > hdr->offsetInst && sectionOffsets[si] < nextOffset)
-				nextOffset = sectionOffsets[si];
-		}
-		uint32 maxInstBytes = nextOffset > hdr->offsetInst ? nextOffset - hdr->offsetInst : 0;
-		uint32 maxInstCount = maxInstBytes / sizeof(FileObjectInstance);
-
-		bool modified = false;
-		std::vector<int> rebuiltIndices;
-		if(rebuild){
-			int numAlive = 0;
-			for(size_t i = 0; i < imageInsts.size(); i++)
-				if(!imageInsts[i]->m_isDeleted)
-					numAlive++;
-
-			if(numAlive == 0){
-				log("SaveBinaryIpls: refusing to empty binary IPL image %d\n", imgIdx & 0xFFFFFF);
-				result.numBlockedEmptyDeletes++;
-				continue;
-			}
-			if((uint32)numAlive > maxInstCount){
-				log("SaveBinaryIpls: image %d needs %d inst(s), but only %u fit in section\n",
-					imgIdx & 0xFFFFFF, numAlive, maxInstCount);
-				rememberBinaryImage(result.failedImages, &result.numFailedImages, imgIdx);
-				continue;
-			}
-
-			int nextIdx = 0;
-			rebuiltIndices.assign(imageInsts.size(), -1);
-			for(size_t i = 0; i < imageInsts.size(); i++){
-				ObjectInst *inst = imageInsts[i];
-				if(inst->m_isDeleted){
-					numDeleted++;
-					continue;
-				}
-				fillBinaryInstData(&instData[nextIdx], inst);
-				rebuiltIndices[i] = nextIdx++;
-			}
-			hdr->numInst = numAlive;
-			hdr->sizeInst = numAlive * sizeof(FileObjectInstance);
-			modified = true;
-		}else{
-			bool validPatch = true;
-			for(size_t i = 0; i < imageInsts.size(); i++){
-				ObjectInst *inst = imageInsts[i];
-				if(!inst->m_isDirty)
-					continue;
-				int idx = inst->m_binInstIndex;
-				if(idx < 0 || (uint32)idx >= hdr->numInst){
-					log("SaveBinaryIpls: invalid binary inst index %d for image %d\n",
-						idx, imgIdx & 0xFFFFFF);
-					modified = false;
-					rememberBinaryImage(result.failedImages, &result.numFailedImages, imgIdx);
-					validPatch = false;
-					break;
-				}
-				fillBinaryInstData(&instData[idx], inst);
-				numMoved++;
-				modified = true;
-			}
-			if(!validPatch)
-				continue;
-		}
-
-		if(!modified)
-			continue;
-
-		// Write the modified buffer back to the IMG
-		uint8 *writeBuf = rwNewT(uint8, size, 0);
-		memcpy(writeBuf, buffer, size);
-		if(!WriteFileToImage(imgIdx, writeBuf, size)){
-			rememberBinaryImage(result.failedImages, &result.numFailedImages, imgIdx);
-			rwFree(writeBuf);
-			continue;
-		}
-		rwFree(writeBuf);
-
-		if(rebuild){
-			for(size_t i = 0; i < imageInsts.size(); i++)
-				if(rebuiltIndices[i] >= 0)
-					imageInsts[i]->m_binInstIndex = rebuiltIndices[i];
-		}
-
-		log("Patched binary IPL (image %d)\n", imgIdx & 0xFFFFFF);
-		rememberBinaryImage(result.savedImages, &result.numSavedImages, imgIdx);
-	}
+	for(int ii = 0; ii < numImagesToProcess; ii++)
+		SaveBinaryImageByIndex(imagesToProcess[ii], &result, &numDeleted, &numMoved);
 
 	if(numDeleted)
 		log("Binary IPLs: %d delete(s) persisted\n", numDeleted);

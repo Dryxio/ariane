@@ -341,12 +341,41 @@ binaryImageWasSaved(const FileLoader::BinaryIplSaveResult &result, int32 imageIn
 }
 
 static void
+mergeBinarySaveResult(FileLoader::BinaryIplSaveResult *dst, const FileLoader::BinaryIplSaveResult &src)
+{
+	for(int i = 0; i < src.numSavedImages; i++){
+		bool found = false;
+		for(int j = 0; j < dst->numSavedImages; j++)
+			if(dst->savedImages[j] == src.savedImages[i]){
+				found = true;
+				break;
+			}
+		if(!found && dst->numSavedImages < 256)
+			dst->savedImages[dst->numSavedImages++] = src.savedImages[i];
+	}
+
+	for(int i = 0; i < src.numFailedImages; i++){
+		bool found = false;
+		for(int j = 0; j < dst->numFailedImages; j++)
+			if(dst->failedImages[j] == src.failedImages[i]){
+				found = true;
+				break;
+			}
+		if(!found && dst->numFailedImages < 256)
+			dst->failedImages[dst->numFailedImages++] = src.failedImages[i];
+	}
+
+	dst->numBlockedEmptyDeletes += src.numBlockedEmptyDeletes;
+}
+
+static void
 saveAllIpls(void)
 {
 	// Collect unique IPL filenames from all instances
 	CPtrNode *p;
 	const char *saved[512];
 	int numSaved = 0;
+	FileLoader::BinaryIplSaveResult binaryResult = {};
 
 	for(p = instances.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
@@ -363,13 +392,11 @@ saveAllIpls(void)
 				break;
 			}
 		if(!found && numSaved < 512){
-			FileLoader::SaveScene(inst->m_file->name);
+			mergeBinarySaveResult(&binaryResult, FileLoader::SaveScene(inst->m_file->name));
 			saved[numSaved++] = inst->m_file->name;
 		}
 	}
 
-	// Also patch binary IPLs in IMG for streaming instances
-	FileLoader::BinaryIplSaveResult binaryResult = FileLoader::SaveBinaryIpls();
 	if(binaryResult.numBlockedEmptyDeletes)
 		Toast(TOAST_SAVE, "Blocked %d binary delete(s): can't empty a streaming IPL", binaryResult.numBlockedEmptyDeletes);
 	else if(binaryResult.numFailedImages)

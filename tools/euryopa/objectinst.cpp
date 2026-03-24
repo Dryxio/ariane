@@ -5,6 +5,25 @@
 CPtrList instances;
 CPtrList selection;
 
+static int
+countLiveLodChildren(ObjectInst *lodInst, ObjectInst *ignoreInst)
+{
+	int count = 0;
+	CPtrNode *p;
+
+	if(lodInst == nil)
+		return 0;
+
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *other = (ObjectInst*)p->item;
+		if(other == ignoreInst || other->m_isDeleted)
+			continue;
+		if(other->m_lod == lodInst)
+			count++;
+	}
+	return count;
+}
+
 void
 ObjectInst::UpdateMatrix(void)
 {
@@ -186,8 +205,9 @@ ObjectInst::Delete(void)
 	StampChangeSeq(this);
 	Deselect();
 
-	// If this HD building has a LOD, delete it too
-	if(m_lod && !m_lod->m_isDeleted)
+	// If this HD building was the last live child of its LOD, delete the LOD too.
+	if(m_lod && !m_lod->m_isDeleted &&
+	   countLiveLodChildren(m_lod, this) == 0)
 		m_lod->Delete();
 
 	// If this IS a LOD, delete all HD buildings that reference it
