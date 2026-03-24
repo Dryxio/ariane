@@ -535,6 +535,27 @@ sceneWouldTouchStreamingBinaryOnSave(const char *scenePath)
 }
 
 static bool
+sceneNeedsSave(const char *scenePath)
+{
+	CPtrNode *p;
+
+	if(scenePath == nil)
+		return false;
+
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst == nil || inst->m_file == nil || inst->m_imageIndex >= 0)
+			continue;
+		if(strcmp(inst->m_file->name, scenePath) != 0)
+			continue;
+		if(textInstNeedsSave(inst))
+			return true;
+	}
+
+	return sceneWouldTouchStreamingBinaryOnSave(scenePath);
+}
+
+static bool
 saveWouldNeedStreamingBinaryDiskWrite(void)
 {
 	CPtrNode *p;
@@ -787,7 +808,7 @@ saveAllIpls(void)
 				found = true;
 				break;
 			}
-		if(!found && numSaved < 512){
+		if(!found && numSaved < 512 && sceneNeedsSave(inst->m_file->name)){
 			mergeBinarySaveResult(&binaryResult, FileLoader::SaveScene(inst->m_file->name));
 			saved[numSaved++] = inst->m_file->name;
 		}
