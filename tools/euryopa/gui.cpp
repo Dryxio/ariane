@@ -724,21 +724,40 @@ warnStreamingBinarySaveBlockedByRunningGame(const char *actionName)
 
 #ifdef _WIN32
 	char message[1400];
-	snprintf(message, sizeof(message),
-		"%s can't continue while GTA San Andreas is running.\n\n"
-		"%s\n\n"
-		"These changes are stored in streamed map data inside gta3.img.\n"
-		"GTA keeps that file in use while the game is open, so Ariane can't update it safely.\n\n"
-		"Close the game, then try %s again.",
-		actionName,
-		details[0] ? details : "One or more streamed objects were modified",
-		actionName);
+	if(strcmp(actionName, "Hot Reload") == 0){
+		snprintf(message, sizeof(message),
+			"%s can't apply these changes while GTA San Andreas is running.\n\n"
+			"%s\n\n"
+			"These objects come from streamed map data stored inside gta3.img.\n"
+			"For this case, Ariane's current Hot Reload path would need to update gta3.img, and GTA keeps that file in use while the game is open.\n\n"
+			"This type of streamed-binary change is not supported by Hot Reload yet.\n"
+			"To keep the change, close the game and use Save.",
+			actionName,
+			details[0] ? details : "One or more streamed objects were modified");
+	}else{
+		snprintf(message, sizeof(message),
+			"%s can't continue while GTA San Andreas is running.\n\n"
+			"%s\n\n"
+			"These changes are stored in streamed map data inside gta3.img.\n"
+			"GTA keeps that file in use while the game is open, so Ariane can't update it safely.\n\n"
+			"Close the game, then try %s again.",
+			actionName,
+			details[0] ? details : "One or more streamed objects were modified",
+			actionName);
+	}
 	MessageBoxA(nil, message, "Ariane", MB_OK | MB_ICONWARNING);
 #endif
-	if(details[0])
-		Toast(TOAST_SAVE, "%s blocked: %s Close the game to update gta3.img.", actionName, details);
-	else
-		Toast(TOAST_SAVE, "%s blocked: streamed binary map data is in gta3.img. Close the game first.", actionName);
+	if(strcmp(actionName, "Hot Reload") == 0){
+		if(details[0])
+			Toast(TOAST_SAVE, "%s blocked: %s This streamed-binary change is not supported by Hot Reload yet.", actionName, details);
+		else
+			Toast(TOAST_SAVE, "%s blocked: streamed binary map data is not supported by Hot Reload yet.", actionName);
+	}else{
+		if(details[0])
+			Toast(TOAST_SAVE, "%s blocked: %s Close the game to update gta3.img.", actionName, details);
+		else
+			Toast(TOAST_SAVE, "%s blocked: streamed binary map data is in gta3.img. Close the game first.", actionName);
+	}
 	return true;
 }
 
@@ -788,6 +807,10 @@ saveAllIpls(void)
 			inst->m_savedRotation = inst->m_rotation;
 			inst->m_wasSavedDeleted = inst->m_isDeleted;
 			inst->m_savedStateValid = true;
+			inst->m_isDirty = false;
+			inst->m_isAdded = false;
+			inst->m_origTranslation = inst->m_translation;
+			inst->m_origRotation = inst->m_rotation;
 		}else if(binaryImageWasSaved(binaryResult, inst->m_imageIndex)){
 			if(!inst->m_isDeleted){
 				inst->m_savedTranslation = inst->m_translation;
@@ -795,6 +818,9 @@ saveAllIpls(void)
 			}
 			inst->m_wasSavedDeleted = inst->m_isDeleted;
 			inst->m_savedStateValid = true;
+			inst->m_isDirty = false;
+			inst->m_origTranslation = inst->m_translation;
+			inst->m_origRotation = inst->m_rotation;
 		}
 	}
 
