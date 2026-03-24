@@ -61,6 +61,7 @@ struct CdImage
 	int directoryLimit;
 
 	FILE *file;
+	bool writable;
 };
 static CdImage cdImages[NUMCDIMAGES];
 static int numCdImages;
@@ -224,7 +225,10 @@ AddCdImage(const char *path)
 		rw::makePath(resolvedPath);
 	}
 
-	img = fopen(resolvedPath, "rb");
+	img = fopen(resolvedPath, "r+b");
+	bool writable = img != nil;
+	if(img == nil)
+		img = fopen(resolvedPath, "rb");
 	if(img == nil){
 		log("warning: cdimage %s couldn't be opened\n", path);
 		numCdImages--;
@@ -237,6 +241,7 @@ AddCdImage(const char *path)
 	cdimg->directory = nil;
 	cdimg->directorySize = 0;
 	cdimg->directoryLimit = 0;
+	cdimg->writable = writable;
 
 	fread(&fourcc, 1, 4, img);
 	if(fourcc == 0x32524556){	// VER2
@@ -490,8 +495,17 @@ WriteFileToImage(int i, uint8 *data, int size)
 		return false;
 	}
 
-	// Reopen in r+b mode for in-place writing
-	FILE *f = fopen(cdimg->sourcePath, "r+b");
+	FILE *f = cdimg->file;
+	if(!cdimg->writable){
+		if(cdimg->file){
+			fclose(cdimg->file);
+			cdimg->file = nil;
+		}
+		cdimg->file = fopen(cdimg->sourcePath, "r+b");
+		if(cdimg->file)
+			cdimg->writable = true;
+		f = cdimg->file;
+	}
 	if(f == nil){
 		log("WriteFileToImage: can't open %s (source %s) for writing\n",
 		    cdimg->logicalName, cdimg->sourcePath);
@@ -501,7 +515,7 @@ WriteFileToImage(int i, uint8 *data, int size)
 	}
 	fseek(f, de->position*2048, SEEK_SET);
 	size_t written = fwrite(data, 1, size, f);
-	fclose(f);
+	fflush(f);
 	if(written != (size_t)size){
 		log("WriteFileToImage: short write for %s in %s (source %s): wrote %d/%d bytes at sector %d\n",
 		    de->name, cdimg->logicalName, cdimg->sourcePath,
