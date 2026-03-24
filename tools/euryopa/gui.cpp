@@ -791,7 +791,9 @@ saveAllIpls(void)
 	// Collect unique IPL filenames from all instances
 	CPtrNode *p;
 	const char *saved[512];
+	const char *checked[512];
 	int numSaved = 0;
+	int numChecked = 0;
 	FileLoader::BinaryIplSaveResult binaryResult = {};
 
 	for(p = instances.first; p; p = p->next){
@@ -803,12 +805,16 @@ saveAllIpls(void)
 			continue;
 		// Check if we already saved this file
 		bool found = false;
-		for(int i = 0; i < numSaved; i++)
-			if(strcmp(saved[i], inst->m_file->name) == 0){
+		for(int i = 0; i < numChecked; i++)
+			if(strcmp(checked[i], inst->m_file->name) == 0){
 				found = true;
 				break;
 			}
-		if(!found && numSaved < 512 && sceneNeedsSave(inst->m_file->name)){
+		if(found)
+			continue;
+		if(numChecked < 512)
+			checked[numChecked++] = inst->m_file->name;
+		if(sceneNeedsSave(inst->m_file->name) && numSaved < 512){
 			mergeBinarySaveResult(&binaryResult, FileLoader::SaveScene(inst->m_file->name));
 			saved[numSaved++] = inst->m_file->name;
 		}
