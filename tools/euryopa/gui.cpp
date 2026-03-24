@@ -3,6 +3,10 @@
 #include "object_categories.h"
 #include "updater.h"
 
+#ifdef _WIN32
+#include <TlHelp32.h>
+#endif
+
 static bool showDemoWindow;
 static bool showEditorWindow;
 static bool showInstanceWindow;
@@ -129,6 +133,54 @@ warnMissingTeleportAsi(const char *actionName)
 	return false;
 #else
 	return true;
+#endif
+}
+
+static const char*
+getCurrentGameExecutableName(void)
+{
+	if(isIII()) return "gta3.exe";
+	if(isVC()) return "gta-vc.exe";
+	if(isSA()) return "gta_sa.exe";
+	return nil;
+}
+
+#ifdef _WIN32
+static bool
+isProcessRunningByName(const char *exeName)
+{
+	if(exeName == nil || exeName[0] == '\0')
+		return false;
+
+	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if(snapshot == INVALID_HANDLE_VALUE)
+		return false;
+
+	PROCESSENTRY32A entry;
+	entry.dwSize = sizeof(entry);
+	bool found = false;
+	if(Process32FirstA(snapshot, &entry)){
+		do{
+			if(_stricmp(entry.szExeFile, exeName) == 0){
+				found = true;
+				break;
+			}
+		}while(Process32NextA(snapshot, &entry));
+	}
+
+	CloseHandle(snapshot);
+	return found;
+}
+#endif
+
+static bool
+isCurrentGameRunning(void)
+{
+#ifdef _WIN32
+	const char *exeName = getCurrentGameExecutableName();
+	return exeName && isProcessRunningByName(exeName);
+#else
+	return false;
 #endif
 }
 
@@ -461,6 +513,253 @@ resolveSceneRealPathForHotReload(const char *filename, char *realpath, size_t re
 	return true;
 }
 
+static bool
+textInstNeedsSave(ObjectInst *inst)
+{
+	return inst &&
+		(inst->m_isDirty ||
+		 inst->m_isAdded ||
+		 !inst->m_savedStateValid ||
+		 inst->m_isDeleted != inst->m_wasSavedDeleted);
+}
+
+static bool
+binaryInstNeedsDiskSave(ObjectInst *inst)
+{
+	return inst &&
+		inst->m_imageIndex >= 0 &&
+		(inst->m_isDirty || inst->m_isDeleted != inst->m_wasSavedDeleted);
+}
+
+static bool
+sceneWouldTouchStreamingBinaryOnSave(const char *scenePath)
+{
+	CPtrNode *p;
+
+	if(scenePath == nil || !sceneHasRelatedStreamingFamily(scenePath))
+		return false;
+
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(!instanceBelongsToStreamingFamily(inst, scenePath))
+			continue;
+		if(inst->m_imageIndex >= 0){
+			if(binaryInstNeedsDiskSave(inst))
+				return true;
+		}else if(textInstNeedsSave(inst))
+			return true;
+	}
+	return false;
+}
+
+static bool
+saveWouldNeedStreamingBinaryDiskWrite(void)
+{
+	CPtrNode *p;
+	const char *checkedScenes[512];
+	int numCheckedScenes = 0;
+
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst->m_file == nil)
+			continue;
+
+		if(inst->m_imageIndex >= 0){
+			if(binaryInstNeedsDiskSave(inst))
+				return true;
+			continue;
+		}
+
+		bool alreadyChecked = false;
+		for(int i = 0; i < numCheckedScenes; i++)
+			if(strcmp(checkedScenes[i], inst->m_file->name) == 0){
+				alreadyChecked = true;
+				break;
+			}
+		if(alreadyChecked)
+			continue;
+		if(numCheckedScenes < 512)
+			checkedScenes[numCheckedScenes++] = inst->m_file->name;
+
+		if(sceneWouldTouchStreamingBinaryOnSave(inst->m_file->name))
+			return true;
+	}
+	return false;
+}
+
+struct StreamingBinarySaveSummary
+{
+	int numTouchedInstances;
+	int numFamilies;
+	int numBinaryIpls;
+	const char *sampleObjects[3];
+	int numSampleObjects;
+	const char *sampleBinaryIpls[2];
+	int numSampleBinaryIpls;
+};
+
+static void
+addSummaryObjectName(StreamingBinarySaveSummary *summary, ObjectInst *inst)
+{
+	if(summary == nil || inst == nil || summary->numSampleObjects >= 3)
+		return;
+
+	const char *name = nil;
+	ObjectDef *obj = GetObjectDef(inst->m_objectId);
+	if(obj && obj->m_name[0] != '\0')
+		name = obj->m_name;
+	if(name == nil)
+		return;
+
+	for(int i = 0; i < summary->numSampleObjects; i++)
+		if(strcmp(summary->sampleObjects[i], name) == 0)
+			return;
+	summary->sampleObjects[summary->numSampleObjects++] = name;
+}
+
+static void
+addSummaryBinaryIplName(StreamingBinarySaveSummary *summary, ObjectInst *inst)
+{
+	if(summary == nil || inst == nil || inst->m_file == nil || summary->numSampleBinaryIpls >= 2)
+		return;
+
+	const char *name = inst->m_file->name;
+	if(name == nil || name[0] == '\0')
+		return;
+
+	for(int i = 0; i < summary->numSampleBinaryIpls; i++)
+		if(strcmp(summary->sampleBinaryIpls[i], name) == 0)
+			return;
+	summary->sampleBinaryIpls[summary->numSampleBinaryIpls++] = name;
+}
+
+static bool
+buildStreamingBinarySaveSummary(StreamingBinarySaveSummary *summary)
+{
+	CPtrNode *p;
+	const char *checkedScenes[512];
+	int numCheckedScenes = 0;
+	bool needsDiskWrite = false;
+
+	if(summary == nil)
+		return false;
+	memset(summary, 0, sizeof(*summary));
+
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst == nil || inst->m_file == nil)
+			continue;
+
+		if(inst->m_imageIndex >= 0){
+			if(!binaryInstNeedsDiskSave(inst))
+				continue;
+			needsDiskWrite = true;
+			summary->numTouchedInstances++;
+			addSummaryObjectName(summary, inst);
+			addSummaryBinaryIplName(summary, inst);
+			continue;
+		}
+
+		bool alreadyChecked = false;
+		for(int i = 0; i < numCheckedScenes; i++)
+			if(strcmp(checkedScenes[i], inst->m_file->name) == 0){
+				alreadyChecked = true;
+				break;
+			}
+		if(alreadyChecked)
+			continue;
+		if(numCheckedScenes < 512)
+			checkedScenes[numCheckedScenes++] = inst->m_file->name;
+
+		if(!sceneWouldTouchStreamingBinaryOnSave(inst->m_file->name))
+			continue;
+
+		needsDiskWrite = true;
+		summary->numFamilies++;
+		for(CPtrNode *q = instances.first; q; q = q->next){
+			ObjectInst *familyInst = (ObjectInst*)q->item;
+			if(!instanceBelongsToStreamingFamily(familyInst, inst->m_file->name))
+				continue;
+			if(familyInst->m_imageIndex >= 0){
+				if(binaryInstNeedsDiskSave(familyInst)){
+					summary->numTouchedInstances++;
+					addSummaryObjectName(summary, familyInst);
+					addSummaryBinaryIplName(summary, familyInst);
+				}
+			}else if(textInstNeedsSave(familyInst)){
+				summary->numTouchedInstances++;
+				addSummaryObjectName(summary, familyInst);
+			}
+		}
+	}
+
+	summary->numBinaryIpls = summary->numSampleBinaryIpls;
+	return needsDiskWrite;
+}
+
+static void
+buildStreamingBinarySaveBlockedDetails(const StreamingBinarySaveSummary *summary, char *dst, size_t size)
+{
+	if(size == 0)
+		return;
+
+	dst[0] = '\0';
+	if(summary == nil || summary->numTouchedInstances <= 0)
+		return;
+
+	char objectPart[256] = "";
+	if(summary->numSampleObjects == 1)
+		snprintf(objectPart, sizeof(objectPart), "%s", summary->sampleObjects[0]);
+	else if(summary->numSampleObjects == 2)
+		snprintf(objectPart, sizeof(objectPart), "%s, %s",
+			summary->sampleObjects[0], summary->sampleObjects[1]);
+	else if(summary->numSampleObjects >= 3)
+		snprintf(objectPart, sizeof(objectPart), "%s, %s, %s",
+			summary->sampleObjects[0], summary->sampleObjects[1], summary->sampleObjects[2]);
+
+	if(summary->numTouchedInstances == 1 && summary->numSampleObjects >= 1)
+		snprintf(dst, size, "Modified object: %s.", objectPart);
+	else if(summary->numTouchedInstances > summary->numSampleObjects && summary->numSampleObjects >= 1)
+		snprintf(dst, size, "Modified objects include %s and %d more.",
+			objectPart, summary->numTouchedInstances - summary->numSampleObjects);
+	else if(summary->numSampleObjects >= 1)
+		snprintf(dst, size, "Modified objects: %s.", objectPart);
+	else
+		snprintf(dst, size, "%d streamed object change(s) are affected.", summary->numTouchedInstances);
+}
+
+static bool
+warnStreamingBinarySaveBlockedByRunningGame(const char *actionName)
+{
+	StreamingBinarySaveSummary summary;
+	if(!isCurrentGameRunning())
+		return false;
+	if(!buildStreamingBinarySaveSummary(&summary))
+		return false;
+
+	char details[256];
+	buildStreamingBinarySaveBlockedDetails(&summary, details, sizeof(details));
+
+#ifdef _WIN32
+	char message[1400];
+	snprintf(message, sizeof(message),
+		"%s can't continue while GTA San Andreas is running.\n\n"
+		"%s\n\n"
+		"These changes are stored in streamed map data inside gta3.img.\n"
+		"GTA keeps that file in use while the game is open, so Ariane can't update it safely.\n\n"
+		"Close the game, then try %s again.",
+		actionName,
+		details[0] ? details : "One or more streamed objects were modified",
+		actionName);
+	MessageBoxA(nil, message, "Ariane", MB_OK | MB_ICONWARNING);
+#endif
+	if(details[0])
+		Toast(TOAST_SAVE, "%s blocked: %s Close the game to update gta3.img.", actionName, details);
+	else
+		Toast(TOAST_SAVE, "%s blocked: streamed binary map data is in gta3.img. Close the game first.", actionName);
+	return true;
+}
+
 static int
 countSavedActiveTextInstances(const char *scenePath)
 {
@@ -520,9 +819,12 @@ markStreamingFamilySaved(const char *scenePath)
 	}
 }
 
-static void
+static bool
 saveAllIpls(void)
 {
+	if(warnStreamingBinarySaveBlockedByRunningGame("Save"))
+		return false;
+
 	// Collect unique IPL filenames from all instances
 	CPtrNode *p;
 	const char *saved[512];
@@ -572,6 +874,8 @@ saveAllIpls(void)
 			inst->m_savedStateValid = true;
 		}
 	}
+
+	return binaryResult.numBlockedEmptyDeletes == 0 && binaryResult.numFailedImages == 0;
 }
 
 static void
@@ -586,7 +890,8 @@ testInGame(void)
 		return;
 
 	// Save all IPLs first
-	saveAllIpls();
+	if(!saveAllIpls())
+		return;
 	Toast(TOAST_SAVE, "Saved all IPL files");
 
 	// Camera position -> snap to ground
@@ -654,6 +959,8 @@ hotReloadIpls(void)
 		Toast(TOAST_SAVE, "Hot Reload: only supported for SA");
 		return;
 	}
+	if(warnStreamingBinarySaveBlockedByRunningGame("Hot Reload"))
+		return;
 	if(!warnMissingTeleportAsi("Hot Reload"))
 		return;
 
@@ -979,8 +1286,8 @@ uiMainmenu(void)
 	if(ImGui::BeginMainMenuBar()){
 		if(ImGui::BeginMenu("File")){
 			if(ImGui::MenuItem("Save All IPLs", "Ctrl+S")){
-				saveAllIpls();
-				Toast(TOAST_SAVE, "Saved all IPL files");
+				if(saveAllIpls())
+					Toast(TOAST_SAVE, "Saved all IPL files");
 			}
 			if(ImGui::MenuItem("Test in Game", "Ctrl+G")){
 				testInGame();
@@ -2698,8 +3005,8 @@ gui(void)
 
 	// Ctrl+S to save all IPLs
 	if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('S')){
-		saveAllIpls();
-		Toast(TOAST_SAVE, "Saved all IPL files");
+		if(saveAllIpls())
+			Toast(TOAST_SAVE, "Saved all IPL files");
 	}
 
 	// Ctrl+G to test in game
