@@ -1408,20 +1408,37 @@ dogizmo(void)
 			// Compute total delta from leader's start position (avoids frame-by-frame drift)
 			rw::V3d totalDelta = sub(newLeaderPos, dragStartLeaderPos);
 
-			// Apply delta to all affected objects from snapshot
+			// Pass 1: compute new positions and rotations from snapshot
+			// (don't update matrices yet, so raycasts see old collision state)
 			for(int i = 0; i < dragNumTransforms; i++){
 				ObjectInst *obj = dragTransforms[i].inst;
-				obj->m_translation = add(dragTransforms[i].oldPos, totalDelta);
+				rw::V3d newPos = add(dragTransforms[i].oldPos, totalDelta);
+				obj->m_rotation = dragTransforms[i].oldRot;
+
+				if(dragStartFollowGround && obj != inst){
+					// Per-object ground follow: each object individually snaps to terrain
+					rw::V3d groundHit, groundNormal;
+					if(GetGroundPlacementSurface(newPos, &groundHit, &groundNormal, true)){
+						rw::Quat rot = dragTransforms[i].oldRot;
+						if(dragStartAlignToSurface)
+							rot = BuildGroundAlignedRotationFromRotation(dragTransforms[i].oldRot, groundNormal);
+						newPos.z = groundHit.z - GetMinZOffsetForRotation(obj, rot);
+						obj->m_rotation = rot;
+					}
+				}
+
+				obj->m_translation = newPos;
 				obj->m_isDirty = true;
-				obj->UpdateMatrix();
-				updateRwFrame(obj);
 			}
 
-			// Apply leader-specific align-to-surface rotation
-			if(dragStartAlignToSurface){
+			// Leader align-to-surface (uses its own ground-followed rotation)
+			if(dragStartAlignToSurface)
 				inst->m_rotation = newLeaderRot;
-				inst->UpdateMatrix();
-				updateRwFrame(inst);
+
+			// Pass 2: update all matrices and frames at once
+			for(int i = 0; i < dragNumTransforms; i++){
+				dragTransforms[i].inst->UpdateMatrix();
+				updateRwFrame(dragTransforms[i].inst);
 			}
 		}else if(gGizmoMode == GIZMO_ROTATE){
 			// Extract leader's new rotation from gizmo result
