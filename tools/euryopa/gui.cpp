@@ -21,6 +21,9 @@ static bool showRenderingWindow;
 static bool showBrowserWindow;
 static bool showDiffWindow;
 
+static void loadSaveSettings(void);
+static void saveSaveSettings(void);
+
 static bool
 getEditorRootDirectory(char *dir, size_t size)
 {
@@ -1233,9 +1236,11 @@ uiMainmenu(void)
 				testInGame();
 			}
 			if(ImGui::MenuItem("Save to Modloader", nil,
-			                   gSaveDestination == SAVE_DESTINATION_MODLOADER))
+			                   gSaveDestination == SAVE_DESTINATION_MODLOADER)){
 				gSaveDestination = gSaveDestination == SAVE_DESTINATION_MODLOADER ?
 					SAVE_DESTINATION_ORIGINAL_FILES : SAVE_DESTINATION_MODLOADER;
+				saveSaveSettings();
+			}
 			if(ImGui::MenuItem("Hot Reload", "Ctrl+R")){
 				hotReloadIpls();
 			}
@@ -2126,6 +2131,32 @@ loadCamSettings(void)
 }
 
 static void
+loadSaveSettings(void)
+{
+	FILE *f;
+	char line[256];
+	char key[128];
+	int value;
+
+	f = fopen("savesettings.txt", "r");
+	if(f == nil)
+		return;
+
+	while(fgets(line, sizeof(line), f)){
+		if(sscanf(line, "%127s %d", key, &value) != 2)
+			continue;
+		if(strcmp(key, "save_destination") != 0)
+			continue;
+		if(value == SAVE_DESTINATION_MODLOADER)
+			gSaveDestination = SAVE_DESTINATION_MODLOADER;
+		else
+			gSaveDestination = SAVE_DESTINATION_ORIGINAL_FILES;
+	}
+
+	fclose(f);
+}
+
+static void
 saveCamSettings(void)
 {
 	FILE *f;
@@ -2145,6 +2176,19 @@ saveCamSettings(void)
 			cam->area);
 	}
 
+	fclose(f);
+}
+
+static void
+saveSaveSettings(void)
+{
+	FILE *f;
+
+	f = fopen("savesettings.txt", "w");
+	if(f == nil)
+		return;
+
+	fprintf(f, "save_destination %d\n", (int)gSaveDestination);
 	fclose(f);
 }
 
@@ -2895,6 +2939,7 @@ gui(void)
 
 	if(!camloaded){
 		loadCamSettings();
+		loadSaveSettings();
 		camloaded = true;
 	}
 
