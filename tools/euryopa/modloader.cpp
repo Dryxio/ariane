@@ -999,12 +999,24 @@ const char*
 ModloaderGetSourcePath(const char *logicalPath)
 {
 	if(!active) return nil;
-	// Check both redirect map and override map
+	// Check both redirect map and archive-entry override map.
 	char normalized[256];
 	NormalizePath(logicalPath, normalized, sizeof(normalized));
 	for(size_t i = 0; i < pathRedirects.size(); i++){
 		if(strcmp(pathRedirects[i].logicalPath, normalized) == 0)
 			return pathRedirects[i].physicalPath;
+	}
+
+	char archiveLogicalPath[256];
+	char entryFilename[32];
+	if(ExtractImageEntryOverrideKey(normalized,
+	                                archiveLogicalPath, sizeof(archiveLogicalPath),
+	                                entryFilename, sizeof(entryFilename))){
+		for(size_t i = 0; i < imageEntryOverrides.size(); i++){
+			if(strcmp(imageEntryOverrides[i].archiveLogicalPath, archiveLogicalPath) == 0 &&
+			   strcmp(imageEntryOverrides[i].entryFilename, entryFilename) == 0)
+				return imageEntryOverrides[i].physicalPath;
+		}
 	}
 	return nil;
 }

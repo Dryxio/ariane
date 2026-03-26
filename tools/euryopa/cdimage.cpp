@@ -96,6 +96,35 @@ BuildDirEntryFilename(const DirEntry *de, char *dst, size_t size)
 	return written >= 0 && (size_t)written < size;
 }
 
+static bool
+BuildDirEntryLogicalPath(const CdImage *cdimg, const DirEntry *de, char *dst, size_t size)
+{
+	char entryFilename[32];
+	size_t len;
+#ifdef _WIN32
+	const char *sep = "\\";
+#else
+	const char *sep = "/";
+#endif
+
+	if(cdimg == nil || de == nil || dst == nil || size == 0)
+		return false;
+	if(cdimg->logicalName == nil || !BuildDirEntryFilename(de, entryFilename, sizeof(entryFilename)))
+		return false;
+
+	len = strlen(cdimg->logicalName);
+#ifdef _WIN32
+	if(len > 0 && (cdimg->logicalName[len-1] == '\\' || cdimg->logicalName[len-1] == '/'))
+		sep = "";
+#else
+	if(len > 0 && cdimg->logicalName[len-1] == '/')
+		sep = "";
+#endif
+
+	int written = snprintf(dst, size, "%s%s%s", cdimg->logicalName, sep, entryFilename);
+	return written >= 0 && (size_t)written < size;
+}
+
 static uint8*
 ReadLooseOverrideBuffer(const char *path, int *size)
 {
@@ -160,6 +189,8 @@ static void
 AddDirEntry(CdImage *cdimg, DirEntry *de)
 {
 	char *ext;
+	char logicalPath[512];
+	const char *srcPath;
 	ext = strrchr(de->name, '.');
 	if(ext == nil){
 		log("warning: no file extension: %s\n", de->name);
@@ -186,6 +217,15 @@ AddDirEntry(CdImage *cdimg, DirEntry *de)
 		maxFileSize = de->archiveSize;
 	if(de->readableSize > maxFileSize)
 		maxFileSize = de->readableSize;
+
+	if(de->file && BuildDirEntryLogicalPath(cdimg, de, logicalPath, sizeof(logicalPath))){
+		srcPath = ModloaderGetSourcePath(logicalPath);
+		if(srcPath){
+			free(de->file->sourcePath);
+			de->file->sourcePath = strdup(srcPath);
+		}
+	}
+
 	cdimg->directory[cdimg->directorySize++] = *de;
 }
 
@@ -482,6 +522,18 @@ ReadFileFromImage(int i, int *size)
 	i = i & 0xFFFFFF;
 	cdimg = &cdImages[img];
 	DirEntry *de = &cdimg->directory[i];
+
+	// When the directory entry already resolved to a loose override during
+	// modloader scanning, prefer that exact physical file over reconstructing
+	// the lookup key again here.
+	if(de->file && de->file->sourcePath){
+		uint8 *overrideBuffer = ReadLooseOverrideBuffer(de->file->sourcePath, size);
+		if(overrideBuffer){
+			de->overridden = 1;
+			return overrideBuffer;
+		}
+	}
+
 	char entryFilename[32];
 	if(BuildDirEntryFilename(de, entryFilename, sizeof(entryFilename))){
 		const char *overridePath = ModloaderFindImageEntryOverride(cdimg->logicalName, entryFilename);
