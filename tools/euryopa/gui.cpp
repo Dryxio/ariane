@@ -1223,6 +1223,9 @@ hotReloadIpls(void)
 		Toast(TOAST_SAVE, "Hot Reload: %d entity(s)", numEntityCmds);
 }
 
+static bool gOpenExportPrefab = false;
+static void uiExportPrefabPopup(void);
+
 static void
 uiMainmenu(void)
 {
@@ -1243,6 +1246,10 @@ uiMainmenu(void)
 			}
 			if(ImGui::MenuItem("Hot Reload", "Ctrl+R")){
 				hotReloadIpls();
+			}
+			ImGui::Separator();
+			if(ImGui::MenuItem("Export Prefab...", "Ctrl+Shift+E", false, selection.first != nil)){
+				gOpenExportPrefab = true;
 			}
 			ImGui::Separator();
 			if(ImGui::MenuItem("Exit", "Alt+F4")) sk::globals.quit = 1;
@@ -1294,6 +1301,41 @@ uiMainmenu(void)
 		ImGui::Separator();
 		ImGui::Text("%.3f ms/frame %.1f FPS", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);
 		ImGui::EndMainMenuBar();
+	}
+	uiExportPrefabPopup();
+}
+
+static void
+uiExportPrefabPopup(void)
+{
+	static char prefabName[128] = "";
+
+	if(gOpenExportPrefab){
+		ImGui::OpenPopup("Export Prefab");
+		gOpenExportPrefab = false;
+		prefabName[0] = '\0';
+	}
+
+	if(ImGui::BeginPopupModal("Export Prefab", nil, ImGuiWindowFlags_AlwaysAutoResize)){
+		ImGui::Text("Save selection as prefab");
+		ImGui::InputText("Name", prefabName, sizeof(prefabName));
+
+		bool validName = prefabName[0] != '\0';
+		if(ImGui::Button("Export", ImVec2(120, 0)) && validName){
+			char path[512];
+			snprintf(path, sizeof(path), "prefabs/%s.ariane", prefabName);
+			int exported = ExportPrefab(path);
+			if(exported > 0)
+				Toast(TOAST_SAVE, "Exported %d instance(s) to %s", exported, path);
+			else
+				Toast(TOAST_SAVE, "Failed to export prefab");
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if(ImGui::Button("Cancel", ImVec2(120, 0)))
+			ImGui::CloseCurrentPopup();
+
+		ImGui::EndPopup();
 	}
 }
 
@@ -2968,6 +3010,12 @@ gui(void)
 
 	if(!CPad::IsCtrlDown() && CPad::IsKeyJustDown('C')) gUseViewerCam = !gUseViewerCam;
 
+	// Export Prefab
+	if(CPad::IsCtrlDown() && CPad::IsShiftDown() && CPad::IsKeyJustDown('E')){
+		if(selection.first)
+			gOpenExportPrefab = true;
+	}
+
 	// Gizmo mode shortcuts
 	if(CPad::IsKeyJustDown('W')) gGizmoMode = GIZMO_TRANSLATE;
 	if(CPad::IsKeyJustDown('Q')) gGizmoMode = GIZMO_ROTATE;
@@ -3035,7 +3083,7 @@ gui(void)
 	if(CPad::IsKeyJustDown('I')) showInstanceWindow ^= 1;
 	if(showInstanceWindow) uiInstWindow();
 
-	if(CPad::IsKeyJustDown('E')) showEditorWindow ^= 1;
+	if(!CPad::IsCtrlDown() && !CPad::IsShiftDown() && CPad::IsKeyJustDown('E')) showEditorWindow ^= 1;
 	if(showEditorWindow) uiEditorWindow();
 
 	if(!CPad::IsCtrlDown() && CPad::IsKeyJustDown('F')) showDiffWindow ^= 1;

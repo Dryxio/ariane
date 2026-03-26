@@ -373,6 +373,9 @@ void Redo(void);
 void CopySelected(void);
 void PasteClipboard(void);
 
+// Prefabs
+int ExportPrefab(const char *path);
+
 // Toast notifications
 enum ToastCategory {
 	TOAST_UNDO_REDO,

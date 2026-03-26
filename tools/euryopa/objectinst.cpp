@@ -2,6 +2,12 @@
 #include "lod_associations.h"
 #include "object_categories.h"
 
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
+
 CPtrList instances;
 CPtrList selection;
 
@@ -1155,8 +1161,126 @@ PasteClipboard(void)
 	}
 }
 
+int
+ExportPrefab(const char *path)
+{
+	// Collect selected non-deleted instances + their LODs
+	ObjectInst *insts[256];
+	int numInsts = 0;
+	bool overflow = false;
 
+	for(CPtrNode *p = selection.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst->m_isDeleted)
+			continue;
+		if(numInsts >= 256){ overflow = true; break; }
+		insts[numInsts++] = inst;
+	}
 
+	// Auto-include linked LODs that weren't explicitly selected
+	int numExplicit = numInsts;
+	for(int i = 0; i < numExplicit; i++){
+		ObjectInst *lod = insts[i]->m_lod;
+		if(lod == nil || lod->m_isDeleted)
+			continue;
+		// Check if LOD is already in the list
+		bool found = false;
+		for(int j = 0; j < numInsts; j++){
+			if(insts[j] == lod){ found = true; break; }
+		}
+		if(!found){
+			if(numInsts >= 256){ overflow = true; break; }
+			insts[numInsts++] = lod;
+		}
+	}
+
+	if(numInsts == 0)
+		return 0;
+	if(overflow)
+		Toast(TOAST_SAVE, "Prefab truncated at 256 instances (selection too large)");
+
+	// Compute centroid
+	rw::V3d centroid = {0.0f, 0.0f, 0.0f};
+	for(int i = 0; i < numInsts; i++){
+		centroid.x += insts[i]->m_translation.x;
+		centroid.y += insts[i]->m_translation.y;
+		centroid.z += insts[i]->m_translation.z;
+	}
+	float invCount = 1.0f / (float)numInsts;
+	centroid.x *= invCount;
+	centroid.y *= invCount;
+	centroid.z *= invCount;
+
+	// Build local index map for LOD references within the prefab
+	// insts[i] -> local index i, so we can resolve m_lod pointers
+	// Ensure parent directory exists
+	{
+		char dir[512];
+		strncpy(dir, path, sizeof(dir)-1);
+		dir[sizeof(dir)-1] = '\0';
+		char *slash = strrchr(dir, '/');
+#ifdef _WIN32
+		char *bslash = strrchr(dir, '\\');
+		if(bslash && (slash == nil || bslash > slash)) slash = bslash;
+#endif
+		if(slash){
+			*slash = '\0';
+#ifdef _WIN32
+			_mkdir(dir);
+#else
+			mkdir(dir, 0777);
+#endif
+		}
+	}
+
+	FILE *f = fopen(path, "w");
+	if(f == nil){
+		log("ExportPrefab: failed to open %s for writing\n", path);
+		return 0;
+	}
+
+	fprintf(f, "ARIANE_PREFAB 1\n");
+	fprintf(f, "game %d\n", (int)params.map);
+	fprintf(f, "count %d\n", numInsts);
+
+	for(int i = 0; i < numInsts; i++){
+		ObjectInst *inst = insts[i];
+		ObjectDef *obj = GetObjectDef(inst->m_objectId);
+
+		// Resolve LOD reference as local index within this prefab
+		int lodRef = -1;
+		if(inst->m_lod){
+			for(int j = 0; j < numInsts; j++){
+				if(insts[j] == inst->m_lod){
+					lodRef = j;
+					break;
+				}
+			}
+		}
+
+		int area = inst->m_area;
+		if(isSA()){
+			if(inst->m_isUnimportant) area |= 0x100;
+			if(inst->m_isUnderWater) area |= 0x400;
+			if(inst->m_isTunnel) area |= 0x800;
+			if(inst->m_isTunnelTransition) area |= 0x1000;
+		}
+
+		rw::V3d rel = sub(inst->m_translation, centroid);
+
+		// objectId, modelName, relX, relY, relZ, rotX, rotY, rotZ, rotW, area, lodRef
+		fprintf(f, "%d, %s, %f, %f, %f, %f, %f, %f, %f, %d, %d\n",
+			inst->m_objectId,
+			obj ? obj->m_name : "unknown",
+			rel.x, rel.y, rel.z,
+			inst->m_rotation.x, inst->m_rotation.y, inst->m_rotation.z, inst->m_rotation.w,
+			area, lodRef);
+	}
+
+	fclose(f);
+	log("ExportPrefab: wrote %d instance(s) to %s\n", numInsts, path);
+	return numInsts;
+}
 
 
 int numSectorsX, numSectorsY;
