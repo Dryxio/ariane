@@ -1272,14 +1272,15 @@ dogizmo(void)
 		return;
 
 	static bool wasDragging = false;
-	static rw::V3d dragStartPos;
-	static rw::Quat dragStartRot;
-	static rw::V3d dragStartLodPos;
-	static ObjectInst *dragLodInst;
+	static rw::V3d dragStartLeaderPos;
+	static rw::Quat dragStartLeaderRot;
 	static bool dragStartFollowGround;
 	static bool dragStartAlignToSurface;
 	static float dragGroundOffset;
 	static rw::Quat dragGroundBaseRot;
+	// Snapshot of all affected objects for multi-select translate
+	static UndoTransform dragTransforms[64];
+	static int dragNumTransforms;
 
 	rw::Camera *cam;
 	rw::RawMatrix gizobj;
@@ -1319,113 +1320,107 @@ dogizmo(void)
 
 	// Capture start state when drag begins
 	if(isUsing && !wasDragging){
-		dragStartPos = inst->m_translation;
-		dragStartRot = inst->m_rotation;
-		dragLodInst = inst->m_lod;
+		dragStartLeaderPos = inst->m_translation;
+		dragStartLeaderRot = inst->m_rotation;
 		dragStartFollowGround = gGizmoMode == GIZMO_TRANSLATE && gDragFollowGround;
 		dragStartAlignToSurface = dragStartFollowGround && gDragAlignToSurface;
 		dragGroundBaseRot = inst->m_rotation;
 		dragGroundOffset = 0.0f;
-		if(dragLodInst)
-			dragStartLodPos = dragLodInst->m_translation;
 		if(dragStartFollowGround){
 			rw::V3d hitPos, hitNormal;
 			if(GetGroundPlacementSurface(inst->m_translation, &hitPos, &hitNormal, true))
 				dragGroundOffset = inst->m_translation.z - (hitPos.z - GetMinZOffsetForRotation(inst, inst->m_rotation));
 		}
+
+		// Build deduplicated snapshot of all affected objects for translate
+		dragNumTransforms = 0;
+		if(gGizmoMode == GIZMO_TRANSLATE){
+			for(CPtrNode *p = selection.first; p; p = p->next){
+				ObjectInst *sel = (ObjectInst*)p->item;
+				if(sel->m_isDeleted)
+					continue;
+				FindOrAddTransform(dragTransforms, &dragNumTransforms, sel);
+				// Include LOD if this object has one
+				if(sel->m_lod && !sel->m_lod->m_isDeleted)
+					FindOrAddTransform(dragTransforms, &dragNumTransforms, sel->m_lod);
+				// If this IS a LOD, include its HD children
+				for(CPtrNode *q = instances.first; q; q = q->next){
+					ObjectInst *child = (ObjectInst*)q->item;
+					if(child != sel && child->m_lod == sel && !child->m_isDeleted)
+						FindOrAddTransform(dragTransforms, &dragNumTransforms, child);
+				}
+			}
+		}
 	}
 	// Record undo when drag ends
 	if(!isUsing && wasDragging){
-		StampChangeSeq(inst);
-		if(dragLodInst)
-			StampChangeSeq(dragLodInst);
 		if(gGizmoMode == GIZMO_TRANSLATE){
-			if(dragStartAlignToSurface){
-				UndoTransform transforms[2];
-				int numTransforms = 0;
-
-				if(length(sub(inst->m_translation, dragStartPos)) >= 0.0001f ||
-				   memcmp(&inst->m_rotation, &dragStartRot, sizeof(inst->m_rotation)) != 0){
-					memset(&transforms[numTransforms], 0, sizeof(transforms[numTransforms]));
-					transforms[numTransforms].inst = inst;
-					transforms[numTransforms].oldPos = dragStartPos;
-					transforms[numTransforms].newPos = inst->m_translation;
-					transforms[numTransforms].oldRot = dragStartRot;
-					transforms[numTransforms].newRot = inst->m_rotation;
-					transforms[numTransforms].flags = UNDO_TRANSFORM_POS | UNDO_TRANSFORM_ROT;
-					numTransforms++;
+			UndoTransform finalTransforms[64];
+			int numFinal = 0;
+			for(int i = 0; i < dragNumTransforms; i++){
+				ObjectInst *obj = dragTransforms[i].inst;
+				uint8 flags = 0;
+				if(length(sub(obj->m_translation, dragTransforms[i].oldPos)) >= 0.0001f)
+					flags |= UNDO_TRANSFORM_POS;
+				if(memcmp(&obj->m_rotation, &dragTransforms[i].oldRot, sizeof(rw::Quat)) != 0)
+					flags |= UNDO_TRANSFORM_ROT;
+				if(flags != 0){
+					StampChangeSeq(obj);
+					UndoTransform &t = finalTransforms[numFinal++];
+					t.inst = obj;
+					t.oldPos = dragTransforms[i].oldPos;
+					t.newPos = obj->m_translation;
+					t.oldRot = dragTransforms[i].oldRot;
+					t.newRot = obj->m_rotation;
+					t.flags = flags;
 				}
-
-				if(dragLodInst && length(sub(dragLodInst->m_translation, dragStartLodPos)) >= 0.0001f){
-					memset(&transforms[numTransforms], 0, sizeof(transforms[numTransforms]));
-					transforms[numTransforms].inst = dragLodInst;
-					transforms[numTransforms].oldPos = dragStartLodPos;
-					transforms[numTransforms].newPos = dragLodInst->m_translation;
-					transforms[numTransforms].oldRot = dragLodInst->m_rotation;
-					transforms[numTransforms].newRot = dragLodInst->m_rotation;
-					transforms[numTransforms].flags = UNDO_TRANSFORM_POS;
-					numTransforms++;
-				}
-
-				if(numTransforms > 0)
-					UndoRecordTransformBatch(transforms, numTransforms);
-			}else
-				UndoRecordMove(inst, dragStartPos, dragLodInst, dragStartLodPos);
+			}
+			if(numFinal > 0)
+				UndoRecordTransformBatch(finalTransforms, numFinal);
 		}
 		else if(gGizmoMode == GIZMO_ROTATE)
-			UndoRecordRotate(inst, dragStartRot);
+			UndoRecordRotate(inst, dragStartLeaderRot);
 	}
 	wasDragging = isUsing;
 
 	if(isUsing){
-		// Extract translation from the gizmo result
-		rw::V3d newPos;
-		newPos.x = gizobj.pos.x;
-		newPos.y = gizobj.pos.y;
-		newPos.z = gizobj.pos.z;
+		// Extract position from the gizmo result
+		rw::V3d newLeaderPos;
+		newLeaderPos.x = gizobj.pos.x;
+		newLeaderPos.y = gizobj.pos.y;
+		newLeaderPos.z = gizobj.pos.z;
 
 		if(gGizmoMode == GIZMO_TRANSLATE){
-			rw::Quat newRot = inst->m_rotation;
+			rw::Quat newLeaderRot = inst->m_rotation;
 			if(dragStartFollowGround){
 				rw::V3d groundHit, groundNormal;
-				if(GetGroundPlacementSurface(newPos, &groundHit, &groundNormal, true)){
+				if(GetGroundPlacementSurface(newLeaderPos, &groundHit, &groundNormal, true)){
 					if(dragStartAlignToSurface)
-						newRot = BuildGroundAlignedRotationFromRotation(dragGroundBaseRot, groundNormal);
-					newPos.z = groundHit.z - GetMinZOffsetForRotation(inst, newRot) + dragGroundOffset;
+						newLeaderRot = BuildGroundAlignedRotationFromRotation(dragGroundBaseRot, groundNormal);
+					newLeaderPos.z = groundHit.z - GetMinZOffsetForRotation(inst, newLeaderRot) + dragGroundOffset;
 				}
 			}
 
-			// Compute delta
-			rw::V3d delta = sub(newPos, inst->m_translation);
+			// Compute total delta from leader's start position (avoids frame-by-frame drift)
+			rw::V3d totalDelta = sub(newLeaderPos, dragStartLeaderPos);
 
-			inst->m_translation = newPos;
-			if(dragStartAlignToSurface)
-				inst->m_rotation = newRot;
-			inst->m_isDirty = true;
-			inst->UpdateMatrix();
-			updateRwFrame(inst);
-
-			// Also move the LOD if this instance has one
-			if(inst->m_lod && !inst->m_lod->m_isDeleted){
-				inst->m_lod->m_translation = add(inst->m_lod->m_translation, delta);
-				inst->m_lod->m_isDirty = true;
-				inst->m_lod->UpdateMatrix();
-				updateRwFrame(inst->m_lod);
+			// Apply delta to all affected objects from snapshot
+			for(int i = 0; i < dragNumTransforms; i++){
+				ObjectInst *obj = dragTransforms[i].inst;
+				obj->m_translation = add(dragTransforms[i].oldPos, totalDelta);
+				obj->m_isDirty = true;
+				obj->UpdateMatrix();
+				updateRwFrame(obj);
 			}
-			// If this IS a LOD, move all HD children that reference it
-			CPtrNode *p;
-			for(p = instances.first; p; p = p->next){
-				ObjectInst *other = (ObjectInst*)p->item;
-				if(other != inst && other->m_lod == inst && !other->m_isDeleted){
-					other->m_translation = add(other->m_translation, delta);
-					other->m_isDirty = true;
-					other->UpdateMatrix();
-					updateRwFrame(other);
-				}
+
+			// Apply leader-specific align-to-surface rotation
+			if(dragStartAlignToSurface){
+				inst->m_rotation = newLeaderRot;
+				inst->UpdateMatrix();
+				updateRwFrame(inst);
 			}
 		}else if(gGizmoMode == GIZMO_ROTATE){
-			// Extract rotation from the RawMatrix gizmo result
-			// Copy rotation part, keep same translation
+			// Rotation: single object only (unchanged)
 			inst->m_matrix.right.x = gizobj.right.x;
 			inst->m_matrix.right.y = gizobj.right.y;
 			inst->m_matrix.right.z = gizobj.right.z;
@@ -1435,16 +1430,11 @@ dogizmo(void)
 			inst->m_matrix.at.x = gizobj.at.x;
 			inst->m_matrix.at.y = gizobj.at.y;
 			inst->m_matrix.at.z = gizobj.at.z;
-			// pos stays the same
 
-			// Extract quaternion from the rotation matrix
-			// Matrix was built with conj(m_rotation), so we extract
-			// the quat from the matrix and conjugate it (negate x,y,z)
 			inst->m_rotation = QuatFromMatrix(inst->m_matrix);
 			inst->m_isDirty = true;
 		}
 
-		// Update the rw object frame for rotation case
 		if(gGizmoMode == GIZMO_ROTATE)
 			updateRwFrame(inst);
 	}
