@@ -1332,54 +1332,58 @@ dogizmo(void)
 				dragGroundOffset = inst->m_translation.z - (hitPos.z - GetMinZOffsetForRotation(inst, inst->m_rotation));
 		}
 
-		// Build deduplicated snapshot of all affected objects for translate
+		// Build deduplicated snapshot of all affected objects
 		dragNumTransforms = 0;
-		if(gGizmoMode == GIZMO_TRANSLATE){
-			for(CPtrNode *p = selection.first; p; p = p->next){
-				ObjectInst *sel = (ObjectInst*)p->item;
-				if(sel->m_isDeleted)
-					continue;
-				FindOrAddTransform(dragTransforms, &dragNumTransforms, sel);
-				// Include LOD if this object has one
-				if(sel->m_lod && !sel->m_lod->m_isDeleted)
-					FindOrAddTransform(dragTransforms, &dragNumTransforms, sel->m_lod);
-				// If this IS a LOD, include its HD children
-				for(CPtrNode *q = instances.first; q; q = q->next){
-					ObjectInst *child = (ObjectInst*)q->item;
-					if(child != sel && child->m_lod == sel && !child->m_isDeleted)
-						FindOrAddTransform(dragTransforms, &dragNumTransforms, child);
-				}
+		bool dragOverflow = false;
+		for(CPtrNode *p = selection.first; p; p = p->next){
+			ObjectInst *sel = (ObjectInst*)p->item;
+			if(sel->m_isDeleted)
+				continue;
+			if(FindOrAddTransform(dragTransforms, &dragNumTransforms, sel) == nil)
+				dragOverflow = true;
+			// Include LOD if this object has one
+			if(sel->m_lod && !sel->m_lod->m_isDeleted)
+				if(FindOrAddTransform(dragTransforms, &dragNumTransforms, sel->m_lod) == nil)
+					dragOverflow = true;
+			// If this IS a LOD, include its HD children
+			for(CPtrNode *q = instances.first; q; q = q->next){
+				ObjectInst *child = (ObjectInst*)q->item;
+				if(child != sel && child->m_lod == sel && !child->m_isDeleted)
+					if(FindOrAddTransform(dragTransforms, &dragNumTransforms, child) == nil)
+						dragOverflow = true;
 			}
 		}
+		if(dragOverflow)
+			Toast(TOAST_SELECTION, "Selection too large: some objects won't move (max 64)");
 	}
 	// Record undo when drag ends
 	if(!isUsing && wasDragging){
-		if(gGizmoMode == GIZMO_TRANSLATE){
-			UndoTransform finalTransforms[64];
-			int numFinal = 0;
-			for(int i = 0; i < dragNumTransforms; i++){
-				ObjectInst *obj = dragTransforms[i].inst;
-				uint8 flags = 0;
-				if(length(sub(obj->m_translation, dragTransforms[i].oldPos)) >= 0.0001f)
-					flags |= UNDO_TRANSFORM_POS;
-				if(memcmp(&obj->m_rotation, &dragTransforms[i].oldRot, sizeof(rw::Quat)) != 0)
-					flags |= UNDO_TRANSFORM_ROT;
-				if(flags != 0){
-					StampChangeSeq(obj);
-					UndoTransform &t = finalTransforms[numFinal++];
-					t.inst = obj;
-					t.oldPos = dragTransforms[i].oldPos;
-					t.newPos = obj->m_translation;
-					t.oldRot = dragTransforms[i].oldRot;
-					t.newRot = obj->m_rotation;
-					t.flags = flags;
+		UndoTransform finalTransforms[64];
+		int numFinal = 0;
+		for(int i = 0; i < dragNumTransforms; i++){
+			ObjectInst *obj = dragTransforms[i].inst;
+			uint8 flags = 0;
+			if(length(sub(obj->m_translation, dragTransforms[i].oldPos)) >= 0.0001f)
+				flags |= UNDO_TRANSFORM_POS;
+			if(memcmp(&obj->m_rotation, &dragTransforms[i].oldRot, sizeof(rw::Quat)) != 0)
+				flags |= UNDO_TRANSFORM_ROT;
+			if(flags != 0){
+				if(flags & UNDO_TRANSFORM_POS){
+					RemoveInstFromSectors(obj);
+					InsertInstIntoSectors(obj);
 				}
+				StampChangeSeq(obj);
+				UndoTransform &t = finalTransforms[numFinal++];
+				t.inst = obj;
+				t.oldPos = dragTransforms[i].oldPos;
+				t.newPos = obj->m_translation;
+				t.oldRot = dragTransforms[i].oldRot;
+				t.newRot = obj->m_rotation;
+				t.flags = flags;
 			}
-			if(numFinal > 0)
-				UndoRecordTransformBatch(finalTransforms, numFinal);
 		}
-		else if(gGizmoMode == GIZMO_ROTATE)
-			UndoRecordRotate(inst, dragStartLeaderRot);
+		if(numFinal > 0)
+			UndoRecordTransformBatch(finalTransforms, numFinal);
 	}
 	wasDragging = isUsing;
 
@@ -1420,7 +1424,7 @@ dogizmo(void)
 				updateRwFrame(inst);
 			}
 		}else if(gGizmoMode == GIZMO_ROTATE){
-			// Rotation: single object only (unchanged)
+			// Extract leader's new rotation from gizmo result
 			inst->m_matrix.right.x = gizobj.right.x;
 			inst->m_matrix.right.y = gizobj.right.y;
 			inst->m_matrix.right.z = gizobj.right.z;
@@ -1430,13 +1434,26 @@ dogizmo(void)
 			inst->m_matrix.at.x = gizobj.at.x;
 			inst->m_matrix.at.y = gizobj.at.y;
 			inst->m_matrix.at.z = gizobj.at.z;
+			rw::Quat newLeaderRot = QuatFromMatrix(inst->m_matrix);
 
-			inst->m_rotation = QuatFromMatrix(inst->m_matrix);
-			inst->m_isDirty = true;
+			// Compute rotation delta: the rotation that transforms startRot into newRot
+			rw::Quat deltaQ = rw::mult(newLeaderRot, rw::conj(dragStartLeaderRot));
+
+			// Apply to all affected objects: orbit positions around leader, compose rotations.
+			// conj(deltaQ) converts from stored-quaternion space to world space;
+			// right-multiplying oldRot by deltaQ applies the delta on the world side
+			// of this codebase's conj(m_rotation) matrix convention.
+			rw::Quat worldQ = rw::conj(deltaQ);
+			for(int i = 0; i < dragNumTransforms; i++){
+				ObjectInst *obj = dragTransforms[i].inst;
+				rw::V3d offset = sub(dragTransforms[i].oldPos, dragStartLeaderPos);
+				obj->m_translation = add(dragStartLeaderPos, rw::rotate(offset, worldQ));
+				obj->m_rotation = rw::mult(dragTransforms[i].oldRot, deltaQ);
+				obj->m_isDirty = true;
+				obj->UpdateMatrix();
+				updateRwFrame(obj);
+			}
 		}
-
-		if(gGizmoMode == GIZMO_ROTATE)
-			updateRwFrame(inst);
 	}
 }
 
