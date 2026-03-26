@@ -505,6 +505,18 @@ AppEventHandler(sk::Event e, void *param)
 			TheCamera.m_aspectRatio = (float)r->w/r->h;
 		}
 		break;
+	case FILEDROP: {
+		const char *path = (const char*)param;
+		size_t len = strlen(path);
+		if(len > 7 && strcmp(path + len - 7, ".ariane") == 0){
+			int imported = ImportPrefab(path);
+			if(imported > 0)
+				Toast(TOAST_SPAWN, "Imported %d instance(s) from prefab", imported);
+			else
+				Toast(TOAST_SPAWN, "Failed to import prefab");
+		}
+		return EVENTPROCESSED;
+	}
 	case IDLE:
 		SyncEditorInputState();
 		timeStep = *(float*)param;

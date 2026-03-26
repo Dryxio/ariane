@@ -22,6 +22,7 @@ static bool showViewWindow;
 static bool showRenderingWindow;
 static bool showBrowserWindow;
 static bool showDiffWindow;
+static bool showToolsWindow = true;
 
 static void loadSaveSettings(void);
 static void saveSaveSettings(void);
@@ -1266,6 +1267,7 @@ uiMainmenu(void)
 			if(ImGui::MenuItem("Time & Weather", "T", showTimeWeatherWindow)) { showTimeWeatherWindow ^= 1; }
 			if(ImGui::MenuItem("View", "V", showViewWindow)) { showViewWindow ^= 1; }
 			if(ImGui::MenuItem("Rendering", "R", showRenderingWindow)) { showRenderingWindow ^= 1; }
+			if(ImGui::MenuItem("Tools", "X", showToolsWindow)) { showToolsWindow ^= 1; }
 			if(ImGui::MenuItem("Object Info", "I", showInstanceWindow)) { showInstanceWindow ^= 1; }
 			if(ImGui::MenuItem("Editor", "E", showEditorWindow)) { showEditorWindow ^= 1; }
 			if(ImGui::MenuItem("Object Browser", "B", showBrowserWindow)) { showBrowserWindow ^= 1; }
@@ -2423,14 +2425,6 @@ uiEditorWindow(void)
 		ImGui::TreePop();
 	}
 
-	if(ImGui::TreeNode("Placement")){
-		ImGui::Checkbox("Snap to clicked object", &gPlaceSnapToObjects);
-		ImGui::Checkbox("Snap to ground below", &gPlaceSnapToGround);
-		ImGui::TextDisabled("Object snap uses the clicked collision surface.");
-		ImGui::TextDisabled("Ground snap drops the placement point vertically as fallback.");
-		ImGui::TreePop();
-	}
-
 	if(ImGui::TreeNode("Selection")){
 		for(p = selection.first; p; p = p->next){
 			inst = (ObjectInst*)p->item;
@@ -2546,11 +2540,11 @@ uiEditorWindow(void)
 }
 
 static void
-uiInstWindow(void)
+uiToolsWindow(void)
 {
-	ImGui::Begin("Object Info", &showInstanceWindow);
+	ImGui::Begin("Tools", &showToolsWindow);
 
-	// Gizmo toolbar
+	// Gizmo
 	ImGui::Checkbox("Gizmo", &gGizmoEnabled);
 	if(gGizmoEnabled){
 		ImGui::SameLine();
@@ -2559,7 +2553,8 @@ uiInstWindow(void)
 		ImGui::SameLine();
 		if(ImGui::RadioButton("Rotate (Q)", gGizmoMode == GIZMO_ROTATE))
 			gGizmoMode = GIZMO_ROTATE;
-		ImGui::Checkbox("Snap", &gGizmoSnap);
+
+		ImGui::Checkbox("Grid Snap", &gGizmoSnap);
 		if(gGizmoSnap){
 			char buf[32];
 			ImGui::SameLine();
@@ -2595,16 +2590,34 @@ uiInstWindow(void)
 				}
 			}
 		}
-		if(gGizmoMode == GIZMO_TRANSLATE){
-			ImGui::Checkbox("Ground Follow While Dragging", &gDragFollowGround);
-			ImGui::BeginDisabled(!gDragFollowGround);
-			ImGui::Indent();
-			ImGui::Checkbox("Align To Surface While Dragging", &gDragAlignToSurface);
-			ImGui::Unindent();
-			ImGui::EndDisabled();
-		}
 	}
+
 	ImGui::Separator();
+
+	// Placement
+	ImGui::Text("Placement");
+	ImGui::Checkbox("Snap to object", &gPlaceSnapToObjects);
+	ImGui::Checkbox("Snap to ground", &gPlaceSnapToGround);
+
+	ImGui::Separator();
+
+	// Dragging
+	ImGui::Text("Dragging");
+	ImGui::Checkbox("Follow ground", &gDragFollowGround);
+	ImGui::BeginDisabled(!gDragFollowGround);
+	ImGui::Indent();
+	ImGui::Checkbox("Align to surface", &gDragAlignToSurface);
+	ImGui::Unindent();
+	ImGui::EndDisabled();
+
+	ImGui::End();
+}
+
+static void
+uiInstWindow(void)
+{
+	ImGui::Begin("Object Info", &showInstanceWindow);
+
 
 	if(selection.first){
 		ObjectInst *inst = (ObjectInst*)selection.first->item;
@@ -3185,6 +3198,9 @@ gui(void)
 		uiRendering();
 		ImGui::End();
 	}
+
+	if(CPad::IsKeyJustDown('X')) showToolsWindow ^= 1;
+	if(showToolsWindow) uiToolsWindow();
 
 	if(!CPad::IsCtrlDown() && !CPad::IsShiftDown() && CPad::IsKeyJustDown('I')) showInstanceWindow ^= 1;
 	if(showInstanceWindow) uiInstWindow();
