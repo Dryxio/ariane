@@ -7,6 +7,8 @@
 #ifdef _WIN32
 #include <Psapi.h>
 #pragma comment(lib, "Psapi.lib")
+#else
+#include <dirent.h>
 #endif
 
 static bool showDemoWindow;
@@ -1224,7 +1226,9 @@ hotReloadIpls(void)
 }
 
 static bool gOpenExportPrefab = false;
+static bool gOpenImportPrefab = false;
 static void uiExportPrefabPopup(void);
+static void uiImportPrefabPopup(void);
 
 static void
 uiMainmenu(void)
@@ -1250,6 +1254,9 @@ uiMainmenu(void)
 			ImGui::Separator();
 			if(ImGui::MenuItem("Export Prefab...", "Ctrl+Shift+E", false, selection.first != nil)){
 				gOpenExportPrefab = true;
+			}
+			if(ImGui::MenuItem("Import Prefab...", "Ctrl+Shift+I")){
+				gOpenImportPrefab = true;
 			}
 			ImGui::Separator();
 			if(ImGui::MenuItem("Exit", "Alt+F4")) sk::globals.quit = 1;
@@ -1303,6 +1310,7 @@ uiMainmenu(void)
 		ImGui::EndMainMenuBar();
 	}
 	uiExportPrefabPopup();
+	uiImportPrefabPopup();
 }
 
 static void
@@ -1329,6 +1337,101 @@ uiExportPrefabPopup(void)
 				Toast(TOAST_SAVE, "Exported %d instance(s) to %s", exported, path);
 			else
 				Toast(TOAST_SAVE, "Failed to export prefab");
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if(ImGui::Button("Cancel", ImVec2(120, 0)))
+			ImGui::CloseCurrentPopup();
+
+		ImGui::EndPopup();
+	}
+}
+
+static void
+scanPrefabDir(const char *dir, char files[][256], int *numFiles, int maxFiles)
+{
+	*numFiles = 0;
+#ifdef _WIN32
+	char pattern[512];
+	snprintf(pattern, sizeof(pattern), "%s\\*.ariane", dir);
+	WIN32_FIND_DATAA fd;
+	HANDLE h = FindFirstFileA(pattern, &fd);
+	if(h == INVALID_HANDLE_VALUE) return;
+	do {
+		if(!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && *numFiles < maxFiles){
+			strncpy(files[*numFiles], fd.cFileName, 255);
+			files[*numFiles][255] = '\0';
+			(*numFiles)++;
+		}
+	} while(FindNextFileA(h, &fd));
+	FindClose(h);
+#else
+	DIR *d = opendir(dir);
+	if(!d) return;
+	struct dirent *ent;
+	while((ent = readdir(d)) != nil){
+		if(ent->d_name[0] == '.') continue;
+		size_t len = strlen(ent->d_name);
+		if(len > 7 && strcmp(ent->d_name + len - 7, ".ariane") == 0){
+			if(*numFiles < maxFiles){
+				strncpy(files[*numFiles], ent->d_name, 255);
+				files[*numFiles][255] = '\0';
+				(*numFiles)++;
+			}
+		}
+	}
+	closedir(d);
+#endif
+}
+
+static void
+uiImportPrefabPopup(void)
+{
+	static char prefabFiles[128][256];
+	static int numPrefabFiles = 0;
+	static char manualPath[512] = "";
+	static int selectedFile = -1;
+
+	if(gOpenImportPrefab){
+		ImGui::OpenPopup("Import Prefab");
+		gOpenImportPrefab = false;
+		manualPath[0] = '\0';
+		selectedFile = -1;
+		scanPrefabDir("prefabs", prefabFiles, &numPrefabFiles, 128);
+	}
+
+	if(ImGui::BeginPopupModal("Import Prefab", nil, ImGuiWindowFlags_AlwaysAutoResize)){
+		ImGui::Text("Load prefab in front of camera");
+
+		if(numPrefabFiles > 0){
+			ImGui::Text("Available prefabs:");
+			ImGui::BeginChild("PrefabList", ImVec2(350, 150), true);
+			for(int i = 0; i < numPrefabFiles; i++){
+				if(ImGui::Selectable(prefabFiles[i], selectedFile == i))
+					selectedFile = i;
+			}
+			ImGui::EndChild();
+		}else{
+			ImGui::TextDisabled("No .ariane files found in prefabs/");
+		}
+
+		ImGui::Separator();
+		ImGui::InputText("Or path", manualPath, sizeof(manualPath));
+
+		bool canImport = selectedFile >= 0 || manualPath[0] != '\0';
+		if(ImGui::Button("Import", ImVec2(120, 0)) && canImport){
+			char path[512];
+			if(manualPath[0] != '\0')
+				strncpy(path, manualPath, sizeof(path));
+			else
+				snprintf(path, sizeof(path), "prefabs/%s", prefabFiles[selectedFile]);
+			path[sizeof(path)-1] = '\0';
+
+			int imported = ImportPrefab(path);
+			if(imported > 0)
+				Toast(TOAST_SPAWN, "Imported %d instance(s) from prefab", imported);
+			else
+				Toast(TOAST_SPAWN, "Failed to import prefab");
 			ImGui::CloseCurrentPopup();
 		}
 		ImGui::SameLine();
@@ -3010,10 +3113,13 @@ gui(void)
 
 	if(!CPad::IsCtrlDown() && CPad::IsKeyJustDown('C')) gUseViewerCam = !gUseViewerCam;
 
-	// Export Prefab
+	// Prefabs
 	if(CPad::IsCtrlDown() && CPad::IsShiftDown() && CPad::IsKeyJustDown('E')){
 		if(selection.first)
 			gOpenExportPrefab = true;
+	}
+	if(CPad::IsCtrlDown() && CPad::IsShiftDown() && CPad::IsKeyJustDown('I')){
+		gOpenImportPrefab = true;
 	}
 
 	// Gizmo mode shortcuts
@@ -3080,7 +3186,7 @@ gui(void)
 		ImGui::End();
 	}
 
-	if(CPad::IsKeyJustDown('I')) showInstanceWindow ^= 1;
+	if(!CPad::IsCtrlDown() && !CPad::IsShiftDown() && CPad::IsKeyJustDown('I')) showInstanceWindow ^= 1;
 	if(showInstanceWindow) uiInstWindow();
 
 	if(!CPad::IsCtrlDown() && !CPad::IsShiftDown() && CPad::IsKeyJustDown('E')) showEditorWindow ^= 1;

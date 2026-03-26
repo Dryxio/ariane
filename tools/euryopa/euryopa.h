@@ -375,6 +375,7 @@ void PasteClipboard(void);
 
 // Prefabs
 int ExportPrefab(const char *path);
+int ImportPrefab(const char *path);
 
 // Toast notifications
 enum ToastCategory {

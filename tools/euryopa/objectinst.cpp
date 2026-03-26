@@ -1282,6 +1282,184 @@ ExportPrefab(const char *path)
 	return numInsts;
 }
 
+struct PrefabEntry {
+	int objectId;
+	char modelName[MODELNAMELEN];
+	float relX, relY, relZ;
+	float rotX, rotY, rotZ, rotW;
+	int area;
+	int lodRef;
+};
+
+int
+ImportPrefab(const char *path)
+{
+	FILE *f = fopen(path, "r");
+	if(f == nil){
+		log("ImportPrefab: failed to open %s\n", path);
+		return 0;
+	}
+
+	char line[512];
+	int version = 0, game = -1, count = 0;
+
+	// Parse header
+	while(fgets(line, sizeof(line), f)){
+		if(strncmp(line, "ARIANE_PREFAB", 13) == 0){
+			sscanf(line, "ARIANE_PREFAB %d", &version);
+		}else if(strncmp(line, "game", 4) == 0){
+			sscanf(line, "game %d", &game);
+		}else if(strncmp(line, "count", 5) == 0){
+			sscanf(line, "count %d", &count);
+			break;
+		}
+	}
+
+	if(version < 1 || count <= 0){
+		fclose(f);
+		log("ImportPrefab: invalid prefab header in %s\n", path);
+		return 0;
+	}
+
+	if(game >= 0 && game != (int)params.map){
+		fclose(f);
+		Toast(TOAST_SPAWN, "Prefab is for a different game");
+		return 0;
+	}
+
+	if(count > 256){
+		Toast(TOAST_SPAWN, "Prefab too large (%d instances, max 256)", count);
+		count = 256;
+	}
+
+	// Parse entries
+	PrefabEntry *entries = new PrefabEntry[count];
+	int numEntries = 0;
+
+	while(numEntries < count && fgets(line, sizeof(line), f)){
+		PrefabEntry *e = &entries[numEntries];
+		int n = sscanf(line, "%d , %29s %f , %f , %f , %f , %f , %f , %f , %d , %d",
+			&e->objectId, e->modelName, &e->relX, &e->relY, &e->relZ,
+			&e->rotX, &e->rotY, &e->rotZ, &e->rotW,
+			&e->area, &e->lodRef);
+		if(n >= 9){
+			// Strip trailing comma from modelName if present
+			char *comma = strchr(e->modelName, ',');
+			if(comma) *comma = '\0';
+			if(n < 11) e->lodRef = -1;
+			numEntries++;
+		}
+	}
+	fclose(f);
+
+	if(numEntries == 0){
+		delete[] entries;
+		return 0;
+	}
+
+	// Spawn position: in front of camera
+	rw::V3d spawnPos = add(TheCamera.m_position, scale(TheCamera.m_at, 50.0f));
+
+	GameFile *file = GetOrCreateCustomIplFile();
+	int maxIdx = GetMaxIplIndexForFile(file);
+
+	// Pass 1: create all instances
+	ObjectInst *created[256];
+	ObjectInst *pasted[256];
+	int numCreated = 0;
+	int numPasted = 0;
+
+	for(int i = 0; i < numEntries; i++){
+		PrefabEntry *e = &entries[i];
+
+		ObjectDef *obj = GetObjectDef(e->objectId);
+		if(obj == nil){
+			log("ImportPrefab: skipping unknown objectId %d (%s)\n", e->objectId, e->modelName);
+			created[i] = nil;
+			continue;
+		}
+
+		ObjectInst *inst = AddInstance();
+		inst->m_objectId = e->objectId;
+		inst->m_area = e->area & 0xFF;
+		if(isSA()){
+			if(e->area & 0x100) inst->m_isUnimportant = true;
+			if(e->area & 0x400) inst->m_isUnderWater = true;
+			if(e->area & 0x800) inst->m_isTunnel = true;
+			if(e->area & 0x1000) inst->m_isTunnelTransition = true;
+		}
+		inst->m_rotation.x = e->rotX;
+		inst->m_rotation.y = e->rotY;
+		inst->m_rotation.z = e->rotZ;
+		inst->m_rotation.w = e->rotW;
+		inst->m_translation.x = spawnPos.x + e->relX;
+		inst->m_translation.y = spawnPos.y + e->relY;
+		inst->m_translation.z = spawnPos.z + e->relZ;
+		inst->m_lodId = -1;
+		inst->m_lod = nil;
+		inst->m_numChildren = 0;
+		inst->m_file = file;
+		inst->m_imageIndex = -1;
+		inst->m_binInstIndex = -1;
+		inst->m_iplIndex = ++maxIdx;
+		inst->m_isAdded = true;
+		inst->m_isDirty = true;
+		inst->m_savedStateValid = false;
+		inst->m_wasSavedDeleted = false;
+		inst->m_gameEntityExists = false;
+		StampChangeSeq(inst);
+
+		if(obj->m_isBigBuilding)
+			inst->SetupBigBuilding();
+
+		inst->UpdateMatrix();
+
+		if(!obj->IsLoaded()){
+			RequestObject(e->objectId);
+			LoadAllRequestedObjects();
+		}
+
+		inst->CreateRwObject();
+
+		if(obj->m_colModel)
+			InsertInstIntoSectors(inst);
+		else{
+			CPtrList *list = inst->m_isBigBuilding
+				? &outOfBoundsSector.bigbuildings : &outOfBoundsSector.buildings;
+			list->InsertItem(inst);
+		}
+
+		created[i] = inst;
+		if(numPasted < 256)
+			pasted[numPasted++] = inst;
+	}
+
+	// Pass 2: link LODs
+	for(int i = 0; i < numEntries; i++){
+		if(created[i] == nil)
+			continue;
+		int lr = entries[i].lodRef;
+		if(lr >= 0 && lr < numEntries && created[lr] != nil)
+			finalizeLinkedLod(created[i], created[lr]);
+	}
+
+	// Select all spawned instances
+	ClearSelection();
+	for(int i = 0; i < numEntries; i++){
+		if(created[i] != nil)
+			created[i]->Select();
+	}
+
+	if(numPasted > 0){
+		if(numPasted > 64)
+			Toast(TOAST_SPAWN, "Undo limited to first 64 of %d instances", numPasted);
+		UndoRecordPaste(pasted, numPasted > 64 ? 64 : numPasted);
+	}
+
+	delete[] entries;
+	log("ImportPrefab: placed %d instance(s) from %s\n", numPasted, path);
+	return numPasted;
+}
 
 int numSectorsX, numSectorsY;
 CRect worldBounds;
