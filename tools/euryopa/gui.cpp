@@ -2,6 +2,7 @@
 #include "modloader.h"
 #include "imgui/imgui_internal.h"
 #include "object_categories.h"
+#include "telemetry.h"
 #include "updater.h"
 
 #ifdef _WIN32
@@ -1248,6 +1249,16 @@ uiMainmenu(void)
 				gSaveDestination = gSaveDestination == SAVE_DESTINATION_MODLOADER ?
 					SAVE_DESTINATION_ORIGINAL_FILES : SAVE_DESTINATION_MODLOADER;
 				saveSaveSettings();
+			}
+			bool telemetryEnabled = TelemetryIsEnabled();
+			if(ImGui::MenuItem("Anonymous Telemetry", nil, telemetryEnabled)){
+				telemetryEnabled = !telemetryEnabled;
+				TelemetrySetEnabled(telemetryEnabled);
+				if(telemetryEnabled){
+					TelemetrySendPing();
+					Toast(TOAST_SAVE, "Anonymous telemetry enabled");
+				}else
+					Toast(TOAST_SAVE, "Anonymous telemetry disabled");
 			}
 			if(ImGui::MenuItem("Hot Reload", "Ctrl+R")){
 				hotReloadIpls();

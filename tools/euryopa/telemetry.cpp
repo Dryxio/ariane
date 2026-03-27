@@ -14,6 +14,78 @@
 #define TELEMETRY_HOST L"gtastuff.namecdsl.xyz"
 #define TELEMETRY_PATH L"/ariane/telemetry/ping"
 
+static bool gTelemetryEnabled = true;
+static bool gTelemetrySettingsLoaded = false;
+
+static bool
+GetTelemetryDir(char *out, int size)
+{
+	char appdata[MAX_PATH] = {};
+	if(SHGetFolderPathA(nil, CSIDL_LOCAL_APPDATA, nil, 0, appdata) != S_OK)
+		return false;
+	snprintf(out, size, "%s\\Ariane", appdata);
+	CreateDirectoryA(out, nil);
+	return true;
+}
+
+static bool
+GetTelemetrySettingsPath(char *out, int size)
+{
+	char dir[MAX_PATH] = {};
+	if(!GetTelemetryDir(dir, sizeof(dir)))
+		return false;
+	snprintf(out, size, "%s\\telemetry.txt", dir);
+	return true;
+}
+
+static bool
+LoadTelemetrySettings(void)
+{
+	if(gTelemetrySettingsLoaded)
+		return true;
+
+	char path[MAX_PATH] = {};
+	char line[64];
+	char key[32];
+	int value;
+
+	gTelemetrySettingsLoaded = true;
+	gTelemetryEnabled = true;
+
+	if(!GetTelemetrySettingsPath(path, sizeof(path)))
+		return false;
+
+	FILE *f = fopen(path, "r");
+	if(!f)
+		return false;
+
+	while(fgets(line, sizeof(line), f)){
+		if(sscanf(line, "%31s %d", key, &value) != 2)
+			continue;
+		if(strcmp(key, "enabled") == 0)
+			gTelemetryEnabled = value != 0;
+	}
+
+	fclose(f);
+	return true;
+}
+
+static bool
+SaveTelemetrySettings(void)
+{
+	char path[MAX_PATH] = {};
+	if(!GetTelemetrySettingsPath(path, sizeof(path)))
+		return false;
+
+	FILE *f = fopen(path, "w");
+	if(!f)
+		return false;
+
+	fprintf(f, "enabled %d\n", gTelemetryEnabled ? 1 : 0);
+	fclose(f);
+	return true;
+}
+
 // ---- Machine UID ----
 // Generates a random UID on first launch and persists it to a file.
 // No hardware fingerprinting — just a random identifier for dedup.
@@ -21,12 +93,10 @@
 static bool
 GetUidPath(char *out, int size)
 {
-	char appdata[MAX_PATH] = {};
-	if(SHGetFolderPathA(nil, CSIDL_LOCAL_APPDATA, nil, 0, appdata) != S_OK)
+	char dir[MAX_PATH] = {};
+	if(!GetTelemetryDir(dir, sizeof(dir)))
 		return false;
-	snprintf(out, size, "%s\\Ariane", appdata);
-	CreateDirectoryA(out, nil);
-	snprintf(out, size, "%s\\Ariane\\uid.txt", appdata);
+	snprintf(out, size, "%s\\uid.txt", dir);
 	return true;
 }
 
@@ -92,6 +162,14 @@ GetOrCreateUid(char *out, int size)
 	return true;
 }
 
+static void
+DeleteUid(void)
+{
+	char path[MAX_PATH] = {};
+	if(GetUidPath(path, sizeof(path)))
+		DeleteFileA(path);
+}
+
 // ---- HTTP POST ----
 
 static bool
@@ -148,14 +226,35 @@ TelemetryThread(void *arg)
 	return 0;
 }
 
+bool
+TelemetryIsEnabled(void)
+{
+	LoadTelemetrySettings();
+	return gTelemetryEnabled;
+}
+
+void
+TelemetrySetEnabled(bool enabled)
+{
+	LoadTelemetrySettings();
+	gTelemetryEnabled = enabled;
+	SaveTelemetrySettings();
+	if(!enabled)
+		DeleteUid();
+}
+
 void
 TelemetrySendPing(void)
 {
+	if(!TelemetryIsEnabled())
+		return;
 	HANDLE h = (HANDLE)_beginthreadex(nil, 0, TelemetryThread, nil, 0, nil);
 	if(h) CloseHandle(h);
 }
 
 #else
 // Non-Windows stub
+bool TelemetryIsEnabled(void) { return false; }
+void TelemetrySetEnabled(bool enabled) { (void)enabled; }
 void TelemetrySendPing(void) {}
 #endif
