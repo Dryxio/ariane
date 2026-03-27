@@ -594,7 +594,7 @@ LoadObjectTypes(const char *filename)
 		firstID = 0;
 		lastID = NUMOBJECTDEFS;
 	}
-	for(i = firstID; i < lastID; i++)
+	for(i = firstID; i <= lastID; i++)
 		if(GetObjectDef(i))
 			GetObjectDef(i)->SetupBigBuilding(firstID, lastID);
 }
