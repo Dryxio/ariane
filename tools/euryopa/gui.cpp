@@ -25,6 +25,16 @@ static bool showBrowserWindow;
 static bool showDiffWindow;
 static bool showToolsWindow = true;
 
+static bool gAutomaticBackupsEnabled = true;
+static int gAutomaticBackupIntervalSeconds = 300;
+static int gAutomaticBackupKeepCount = 10;
+static const float gAutomaticBackupIdleSeconds = 5.0f;
+static float gAutomaticBackupSecondsSinceLastRun = 0.0f;
+static float gAutomaticBackupSecondsSinceLastChange = 0.0f;
+static uint32 gAutomaticBackupLastSeenSeq = 0;
+static uint32 gAutomaticBackupLastHandledSeq = 0;
+static char gAutomaticBackupLastSnapshot[1024];
+
 static void loadSaveSettings(void);
 static void saveSaveSettings(void);
 
@@ -69,6 +79,93 @@ buildPath(char *dst, size_t size, const char *dir, const char *name)
 	const char *sep = (dir[len-1] == '/') ? "" : "/";
 #endif
 	return snprintf(dst, size, "%s%s%s", dir, sep, name) < (int)size;
+}
+
+static void
+sanitizeAutomaticBackupSettings(void)
+{
+	if(gAutomaticBackupIntervalSeconds < 10)
+		gAutomaticBackupIntervalSeconds = 10;
+	if(gAutomaticBackupIntervalSeconds > 24*60*60)
+		gAutomaticBackupIntervalSeconds = 24*60*60;
+	if(gAutomaticBackupKeepCount < 1)
+		gAutomaticBackupKeepCount = 1;
+	if(gAutomaticBackupKeepCount > 100)
+		gAutomaticBackupKeepCount = 100;
+}
+
+static bool
+runAutomaticBackup(bool manual)
+{
+	char rootDir[2048];
+	char backupRoot[2048];
+	FileLoader::AutomaticBackupResult result;
+	uint32 latestSeq = GetLatestChangeSeq();
+
+	sanitizeAutomaticBackupSettings();
+	if(!getEditorRootDirectory(rootDir, sizeof(rootDir)) ||
+	   !buildPath(backupRoot, sizeof(backupRoot), rootDir, "automatic_backups")){
+		if(manual)
+			Toast(TOAST_SAVE, "Automatic Backup: failed to resolve backup folder");
+		return false;
+	}
+
+	result = FileLoader::CreateAutomaticBackup(backupRoot, gAutomaticBackupKeepCount);
+	gAutomaticBackupSecondsSinceLastRun = 0.0f;
+
+	if(result.createdSnapshot){
+		if(!result.hadWarnings)
+			gAutomaticBackupLastHandledSeq = latestSeq;
+		strncpy(gAutomaticBackupLastSnapshot, result.snapshotPath, sizeof(gAutomaticBackupLastSnapshot));
+		gAutomaticBackupLastSnapshot[sizeof(gAutomaticBackupLastSnapshot)-1] = '\0';
+		if(manual)
+			Toast(TOAST_SAVE, "Automatic Backup: %d text + %d streamed file(s)",
+			      result.numTextFiles, result.numBinaryFiles);
+		else
+			log("Automatic Backup: created %s (%d text, %d streamed, %d warning(s))\n",
+			    result.snapshotPath, result.numTextFiles, result.numBinaryFiles, result.numErrors);
+		if(!manual && result.hadWarnings)
+			Toast(TOAST_SAVE, "Automatic Backup: created with %d warning(s)", result.numErrors);
+		return true;
+	}
+
+	if(result.numErrors > 0){
+		Toast(TOAST_SAVE, "Automatic Backup: failed with %d warning(s)", result.numErrors);
+		return false;
+	}
+
+	gAutomaticBackupLastHandledSeq = latestSeq;
+	if(manual)
+		Toast(TOAST_SAVE, "Automatic Backup: nothing to back up");
+	return false;
+}
+
+static void
+automaticBackupTick(void)
+{
+	float dt = ImGui::GetIO().DeltaTime;
+	uint32 latestSeq = GetLatestChangeSeq();
+
+	if(latestSeq != gAutomaticBackupLastSeenSeq){
+		gAutomaticBackupLastSeenSeq = latestSeq;
+		gAutomaticBackupSecondsSinceLastChange = 0.0f;
+	}else
+		gAutomaticBackupSecondsSinceLastChange += dt;
+
+	gAutomaticBackupSecondsSinceLastRun += dt;
+
+	if(!gAutomaticBackupsEnabled)
+		return;
+	if(latestSeq == gAutomaticBackupLastHandledSeq)
+		return;
+	if(gAutomaticBackupSecondsSinceLastRun < (float)gAutomaticBackupIntervalSeconds)
+		return;
+	if(gAutomaticBackupSecondsSinceLastChange < gAutomaticBackupIdleSeconds)
+		return;
+	if(gGizmoUsing)
+		return;
+
+	runAutomaticBackup(false);
 }
 
 #ifdef _WIN32
@@ -1263,6 +1360,9 @@ uiMainmenu(void)
 			if(ImGui::MenuItem("Hot Reload", "Ctrl+R")){
 				hotReloadIpls();
 			}
+			if(ImGui::MenuItem("Create Backup Now")){
+				runAutomaticBackup(true);
+			}
 			ImGui::Separator();
 			if(ImGui::MenuItem("Export Prefab...", "Ctrl+Shift+E", false, selection.first != nil)){
 				gOpenExportPrefab = true;
@@ -2094,6 +2194,7 @@ uiInstInfo(ObjectInst *inst)
 		inst->m_rotation.z,
 		inst->m_rotation.w);
 	if(changed){
+		StampChangeSeq(inst);
 		inst->m_isDirty = true;
 		inst->UpdateMatrix();
 		if(inst->m_rwObject){
@@ -2296,6 +2397,11 @@ loadSaveSettings(void)
 	char key[128];
 	int value;
 
+	sanitizeAutomaticBackupSettings();
+	gAutomaticBackupLastSeenSeq = GetLatestChangeSeq();
+	gAutomaticBackupLastHandledSeq = gAutomaticBackupLastSeenSeq;
+	gAutomaticBackupLastSnapshot[0] = '\0';
+
 	f = fopen("savesettings.txt", "r");
 	if(f == nil)
 		return;
@@ -2303,14 +2409,20 @@ loadSaveSettings(void)
 	while(fgets(line, sizeof(line), f)){
 		if(sscanf(line, "%127s %d", key, &value) != 2)
 			continue;
-		if(strcmp(key, "save_destination") != 0)
-			continue;
-		if(value == SAVE_DESTINATION_MODLOADER)
-			gSaveDestination = SAVE_DESTINATION_MODLOADER;
-		else
-			gSaveDestination = SAVE_DESTINATION_ORIGINAL_FILES;
+		if(strcmp(key, "save_destination") == 0){
+			if(value == SAVE_DESTINATION_MODLOADER)
+				gSaveDestination = SAVE_DESTINATION_MODLOADER;
+			else
+				gSaveDestination = SAVE_DESTINATION_ORIGINAL_FILES;
+		}else if(strcmp(key, "automatic_backups") == 0)
+			gAutomaticBackupsEnabled = value != 0;
+		else if(strcmp(key, "automatic_backup_interval") == 0)
+			gAutomaticBackupIntervalSeconds = value;
+		else if(strcmp(key, "automatic_backup_keep") == 0)
+			gAutomaticBackupKeepCount = value;
 	}
 
+	sanitizeAutomaticBackupSettings();
 	fclose(f);
 }
 
@@ -2342,11 +2454,15 @@ saveSaveSettings(void)
 {
 	FILE *f;
 
+	sanitizeAutomaticBackupSettings();
 	f = fopen("savesettings.txt", "w");
 	if(f == nil)
 		return;
 
 	fprintf(f, "save_destination %d\n", (int)gSaveDestination);
+	fprintf(f, "automatic_backups %d\n", gAutomaticBackupsEnabled ? 1 : 0);
+	fprintf(f, "automatic_backup_interval %d\n", gAutomaticBackupIntervalSeconds);
+	fprintf(f, "automatic_backup_keep %d\n", gAutomaticBackupKeepCount);
 	fclose(f);
 }
 
@@ -2620,6 +2736,26 @@ uiToolsWindow(void)
 	ImGui::Checkbox("Align to surface", &gDragAlignToSurface);
 	ImGui::Unindent();
 	ImGui::EndDisabled();
+
+	ImGui::Separator();
+
+	// Automatic backups
+	ImGui::Text("Automatic Backups");
+	bool backupSettingsChanged = false;
+	if(ImGui::Checkbox("Enabled", &gAutomaticBackupsEnabled))
+		backupSettingsChanged = true;
+	if(ImGui::InputInt("Interval (sec)", &gAutomaticBackupIntervalSeconds))
+		backupSettingsChanged = true;
+	if(ImGui::InputInt("Keep snapshots", &gAutomaticBackupKeepCount))
+		backupSettingsChanged = true;
+	sanitizeAutomaticBackupSettings();
+	if(backupSettingsChanged)
+		saveSaveSettings();
+	ImGui::TextDisabled("Idle debounce: %.0f sec", gAutomaticBackupIdleSeconds);
+	if(gAutomaticBackupLastSnapshot[0])
+		ImGui::TextWrapped("Last snapshot: %s", gAutomaticBackupLastSnapshot);
+	if(ImGui::Button("Create Backup Now"))
+		runAutomaticBackup(true);
 
 	ImGui::End();
 }
@@ -3115,6 +3251,7 @@ gui(void)
 	Path::guiHoveredNode = nil;
 	uiMainmenu();
 	UpdaterDrawGui();
+	automaticBackupTick();
 
 	// Copy/Paste
 	if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('C')){

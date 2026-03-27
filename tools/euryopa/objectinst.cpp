@@ -615,6 +615,12 @@ StampChangeSeq(ObjectInst *inst)
 	inst->m_changeSeq = ++gChangeSeqCounter;
 }
 
+uint32
+GetLatestChangeSeq(void)
+{
+	return gChangeSeqCounter;
+}
+
 // Diff viewer — compute bitmask of changes since last save
 int
 GetInstanceDiffFlags(ObjectInst *inst)
@@ -833,6 +839,7 @@ applyUndoTransform(const UndoTransform &t, bool useNewState)
 	if(t.flags & UNDO_TRANSFORM_ROT)
 		inst->m_rotation = useNewState ? t.newRot : t.oldRot;
 
+	StampChangeSeq(inst);
 	inst->m_isDirty = true;
 	inst->UpdateMatrix();
 	updateRwFrameForInst(inst);

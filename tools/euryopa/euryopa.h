@@ -399,6 +399,7 @@ enum DiffFlags {
 };
 int GetInstanceDiffFlags(ObjectInst *inst);
 void StampChangeSeq(ObjectInst *inst);
+uint32 GetLatestChangeSeq(void);
 
 // Object Spawner
 extern bool gPlaceMode;
@@ -433,6 +434,7 @@ void RefreshCdImageMappings(void);
 uint8 *ReadFileFromImage(int i, int *size);
 GameFile *GetGameFileFromImage(int i);
 const char *GetCdImageLogicalName(int i);
+const char *GetCdImageSourcePath(int i);
 bool WriteFileToImage(int i, uint8 *data, int size);
 bool BuildModloaderImageEntryExportPath(int i, char *dst, size_t size);
 void RequestObject(int id);
@@ -838,6 +840,16 @@ struct BinaryIplSaveResult
 	int numFailedFiles;
 };
 
+struct AutomaticBackupResult
+{
+	bool createdSnapshot;
+	bool hadWarnings;
+	int numTextFiles;
+	int numBinaryFiles;
+	int numErrors;
+	char snapshotPath[1024];
+};
+
 extern GameFile *currentFile;
 
 struct DatDesc
@@ -856,6 +868,7 @@ void LoadCollisionFile(const char *path);
 rw::TexDictionary *LoadTexDictionary(const char *path);
 BinaryIplSaveResult SaveScene(const char *filename);
 BinaryIplSaveResult SaveBinaryIpls(void);
+AutomaticBackupResult CreateAutomaticBackup(const char *rootDir, int keepCount);
 }
 
 // Rendering

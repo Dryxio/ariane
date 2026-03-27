@@ -513,6 +513,13 @@ GetCdImageLogicalName(int i)
 	return cdImages[img].logicalName;
 }
 
+const char*
+GetCdImageSourcePath(int i)
+{
+	int img = i>>24 & 0xFF;
+	return cdImages[img].sourcePath;
+}
+
 uint8*
 ReadFileFromImage(int i, int *size)
 {

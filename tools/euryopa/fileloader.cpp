@@ -1,14 +1,20 @@
 #include "euryopa.h"
 #include "modloader.h"
 #include <algorithm>
+#include <ctime>
+#include <functional>
 #include <string>
 #include <utility>
 #include <vector>
 
 #ifdef _WIN32
 #include <direct.h>
-#else
 #include <sys/stat.h>
+#include <windows.h>
+#else
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 GameFile*
@@ -1573,9 +1579,10 @@ struct BinaryIplHeader
 static_assert(sizeof(BinaryIplHeader) == 0x4C, "BinaryIplHeader size mismatch");
 
 static bool
-BuildBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDeleted, int *numMoved,
-                        std::vector<uint8> *outBuffer,
-                        std::vector<std::pair<ObjectInst*, int>> *rebuiltIndexUpdates)
+BuildBinaryImageByIndexInternal(int32 imgIdx, BinaryIplSaveResult *result, int *numDeleted, int *numMoved,
+                                std::vector<uint8> *outBuffer,
+                                std::vector<std::pair<ObjectInst*, int>> *rebuiltIndexUpdates,
+                                bool allowStandaloneResize)
 {
 	CPtrNode *p;
 	int size;
@@ -1591,8 +1598,9 @@ BuildBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDelet
 		return false;
 	}
 
-	BinaryIplHeader *hdr = (BinaryIplHeader*)buffer;
-	FileObjectInstance *instData = (FileObjectInstance*)(buffer + hdr->offsetInst);
+	std::vector<uint8> writeBuf(buffer, buffer + size);
+	BinaryIplHeader *hdr = (BinaryIplHeader*)&writeBuf[0];
+	FileObjectInstance *instData = (FileObjectInstance*)(&writeBuf[0] + hdr->offsetInst);
 
 	std::vector<ObjectInst*> imageInsts;
 	imageInsts.reserve(128);
@@ -1619,7 +1627,8 @@ BuildBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDelet
 	uint32 nextOffset = (uint32)size;
 	if(hdr->offsetCarGens > hdr->offsetInst && hdr->offsetCarGens < nextOffset)
 		nextOffset = hdr->offsetCarGens;
-	uint32 maxInstBytes = nextOffset > hdr->offsetInst ? nextOffset - hdr->offsetInst : 0;
+	uint32 oldInstBytes = nextOffset > hdr->offsetInst ? nextOffset - hdr->offsetInst : 0;
+	uint32 maxInstBytes = oldInstBytes;
 	uint32 maxInstCount = maxInstBytes / sizeof(FileObjectInstance);
 
 	bool modified = false;
@@ -1635,7 +1644,7 @@ BuildBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDelet
 		hotReloadTrace("SaveBinaryIpls: rebuilding image %d (%s): %d total inst(s), %d alive\n",
 			imgIdx & 0xFFFFFF, imageName, (int)imageInsts.size(), numAlive);
 
-		if(numAlive == 0){
+		if(numAlive == 0 && !allowStandaloneResize){
 			log("SaveBinaryIpls: refusing to empty binary IPL image %d (%s)\n",
 				imgIdx & 0xFFFFFF, imageName);
 			hotReloadTrace("SaveBinaryIpls: refusing to empty binary IPL image %d (%s)\n",
@@ -1643,13 +1652,26 @@ BuildBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDelet
 			result->numBlockedEmptyDeletes++;
 			return false;
 		}
-		if((uint32)numAlive > maxInstCount){
+		if((uint32)numAlive > maxInstCount && !allowStandaloneResize){
 			log("SaveBinaryIpls: image %d (%s) needs %d inst(s), but only %u fit in section\n",
 				imgIdx & 0xFFFFFF, imageName, numAlive, maxInstCount);
 			hotReloadTrace("SaveBinaryIpls: image %d (%s) needs %d inst(s), but only %u fit in section\n",
 				imgIdx & 0xFFFFFF, imageName, numAlive, maxInstCount);
 			rememberBinaryImage(result->failedImages, &result->numFailedImages, imgIdx);
 			return false;
+		}
+		if(allowStandaloneResize){
+			size_t newInstBytes = (size_t)numAlive * sizeof(FileObjectInstance);
+			size_t suffixBytes = size > (int)nextOffset ? (size_t)size - nextOffset : 0;
+			std::vector<uint8> resizedBuf(hdr->offsetInst + newInstBytes + suffixBytes);
+			memcpy(&resizedBuf[0], &writeBuf[0], hdr->offsetInst);
+			if(suffixBytes > 0)
+				memcpy(&resizedBuf[0] + hdr->offsetInst + newInstBytes, &writeBuf[0] + nextOffset, suffixBytes);
+			writeBuf.swap(resizedBuf);
+			hdr = (BinaryIplHeader*)&writeBuf[0];
+			if(nextOffset == hdr->offsetCarGens)
+				hdr->offsetCarGens = hdr->offsetInst + (uint32)newInstBytes;
+			instData = numAlive > 0 ? (FileObjectInstance*)(&writeBuf[0] + hdr->offsetInst) : nil;
 		}
 
 		int nextIdx = 0;
@@ -1691,7 +1713,7 @@ BuildBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDelet
 	memset(hdr->pad20, 0, sizeof(hdr->pad20));
 
 	if(outBuffer){
-		outBuffer->assign(buffer, buffer + size);
+		outBuffer->swap(writeBuf);
 	}
 
 	if(rebuild && rebuiltIndexUpdates){
@@ -1701,6 +1723,23 @@ BuildBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDelet
 	}
 
 	return true;
+}
+
+static bool
+BuildBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDeleted, int *numMoved,
+                        std::vector<uint8> *outBuffer,
+                        std::vector<std::pair<ObjectInst*, int>> *rebuiltIndexUpdates)
+{
+	return BuildBinaryImageByIndexInternal(imgIdx, result, numDeleted, numMoved,
+	                                       outBuffer, rebuiltIndexUpdates, false);
+}
+
+static bool
+BuildBinaryBackupImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDeleted, int *numMoved,
+                              std::vector<uint8> *outBuffer)
+{
+	return BuildBinaryImageByIndexInternal(imgIdx, result, numDeleted, numMoved,
+	                                       outBuffer, nil, true);
 }
 
 static bool
@@ -1763,6 +1802,772 @@ SaveBinaryIpls(void)
 			result.numBlockedEmptyDeletes);
 	if(result.numFailedImages)
 		log("Binary IPLs: %d image(s) failed to save\n", result.numFailedImages);
+	return result;
+}
+
+struct BackupManifestEntry
+{
+	std::string type;
+	std::string logicalPath;
+	std::string sourcePath;
+	std::string outputPath;
+	std::string archiveLogicalPath;
+	std::string entryFilename;
+};
+
+struct BackupManifestError
+{
+	std::string scope;
+	std::string path;
+	std::string reason;
+};
+
+static std::string
+JoinPathStrings(const std::string &base, const std::string &child)
+{
+	if(base.empty())
+		return child;
+	if(child.empty())
+		return base;
+#ifdef _WIN32
+	char sep = '\\';
+	if(base.back() == '\\' || base.back() == '/')
+		return base + child;
+#else
+	char sep = '/';
+	if(base.back() == '/')
+		return base + child;
+#endif
+	return base + sep + child;
+}
+
+static void
+NormalizeBackupPath(const char *in, char *out, size_t outSize)
+{
+	size_t j = 0;
+	if(outSize == 0)
+		return;
+	if(in == nil){
+		out[0] = '\0';
+		return;
+	}
+	for(size_t i = 0; in[i] != '\0' && j + 1 < outSize; i++){
+		char c = in[i];
+		if(c == '\\')
+			c = '/';
+		if(j == 0 && c == '/')
+			continue;
+		out[j++] = c;
+	}
+	out[j] = '\0';
+}
+
+static bool
+PathExists(const char *path)
+{
+	struct stat st;
+	return path && stat(path, &st) == 0;
+}
+
+static bool
+IsDirectoryPath(const char *path)
+{
+	struct stat st;
+	if(path == nil || stat(path, &st) != 0)
+		return false;
+#ifdef _WIN32
+	return (st.st_mode & _S_IFDIR) != 0;
+#else
+	return S_ISDIR(st.st_mode);
+#endif
+}
+
+static bool
+RemoveDirectoryRecursive(const char *path)
+{
+	if(path == nil || path[0] == '\0' || !IsDirectoryPath(path))
+		return false;
+
+#ifdef _WIN32
+	std::string pattern = JoinPathStrings(path, "*");
+	WIN32_FIND_DATAA entry;
+	HANDLE handle = FindFirstFileA(pattern.c_str(), &entry);
+	if(handle != INVALID_HANDLE_VALUE){
+		do{
+			if(strcmp(entry.cFileName, ".") == 0 || strcmp(entry.cFileName, "..") == 0)
+				continue;
+			std::string childPath = JoinPathStrings(path, entry.cFileName);
+			if(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY){
+				if(!RemoveDirectoryRecursive(childPath.c_str())){
+					FindClose(handle);
+					return false;
+				}
+			}else if(DeleteFileA(childPath.c_str()) == 0){
+				FindClose(handle);
+				return false;
+			}
+		}while(FindNextFileA(handle, &entry));
+		FindClose(handle);
+	}
+	return RemoveDirectoryA(path) != 0;
+#else
+	DIR *d = opendir(path);
+	if(d){
+		dirent *ent;
+		while((ent = readdir(d)) != nil){
+			if(strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+				continue;
+			std::string childPath = JoinPathStrings(path, ent->d_name);
+			if(IsDirectoryPath(childPath.c_str())){
+				if(!RemoveDirectoryRecursive(childPath.c_str())){
+					closedir(d);
+					return false;
+				}
+			}else if(remove(childPath.c_str()) != 0){
+				closedir(d);
+				return false;
+			}
+		}
+		closedir(d);
+	}
+	return rmdir(path) == 0;
+#endif
+}
+
+static void
+ListSubdirectories(const char *path, std::vector<std::string> &dirs)
+{
+	dirs.clear();
+	if(path == nil || !IsDirectoryPath(path))
+		return;
+
+#ifdef _WIN32
+	std::string pattern = JoinPathStrings(path, "*");
+	WIN32_FIND_DATAA entry;
+	HANDLE handle = FindFirstFileA(pattern.c_str(), &entry);
+	if(handle == INVALID_HANDLE_VALUE)
+		return;
+	do{
+		if(strcmp(entry.cFileName, ".") == 0 || strcmp(entry.cFileName, "..") == 0)
+			continue;
+		if(entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+			dirs.push_back(entry.cFileName);
+	}while(FindNextFileA(handle, &entry));
+	FindClose(handle);
+#else
+	DIR *d = opendir(path);
+	if(d == nil)
+		return;
+	dirent *ent;
+	while((ent = readdir(d)) != nil){
+		if(strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
+			continue;
+		std::string childPath = JoinPathStrings(path, ent->d_name);
+		if(IsDirectoryPath(childPath.c_str()))
+			dirs.push_back(ent->d_name);
+	}
+	closedir(d);
+#endif
+}
+
+static void
+BuildTimestampString(char *dst, size_t size)
+{
+	time_t now = time(nil);
+	struct tm tmNow;
+#ifdef _WIN32
+	localtime_s(&tmNow, &now);
+#else
+	localtime_r(&now, &tmNow);
+#endif
+	strftime(dst, size, "%Y-%m-%d_%H-%M-%S", &tmNow);
+}
+
+static bool
+BuildUniqueSnapshotDir(const char *rootDir, char *dst, size_t size)
+{
+	char timestamp[64];
+	BuildTimestampString(timestamp, sizeof(timestamp));
+	for(int attempt = 0; attempt < 100; attempt++){
+		if(attempt == 0){
+			if(snprintf(dst, size, "%s/%s", rootDir, timestamp) >= (int)size)
+				return false;
+		}else{
+			if(snprintf(dst, size, "%s/%s_%02d", rootDir, timestamp, attempt) >= (int)size)
+				return false;
+		}
+		if(!PathExists(dst))
+			return true;
+	}
+	return false;
+}
+
+static bool
+BuildStreamingFamilyPrefixForBackup(const char *scenePath, char *prefix, size_t size)
+{
+	const char *filename, *ext, *s;
+	char *t;
+
+	if(scenePath == nil || prefix == nil || size < 8)
+		return false;
+
+	filename = strrchr(scenePath, '\\');
+	if(filename == nil)
+		filename = strrchr(scenePath, '/');
+	if(filename == nil)
+		filename = scenePath - 1;
+	ext = strchr(filename+1, '.');
+	if(ext == nil)
+		return false;
+
+	t = prefix;
+	for(s = filename+1; s != ext && (size_t)(t - prefix) < size - 8; s++)
+		*t++ = *s;
+	*t = '\0';
+	strcat(prefix, "_stream");
+	return true;
+}
+
+static bool
+SceneHasRelatedStreamingFamilyForBackup(const char *scenePath)
+{
+	char prefix[256];
+	if(!isSA() || !BuildStreamingFamilyPrefixForBackup(scenePath, prefix, sizeof(prefix)))
+		return false;
+
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst->m_imageIndex < 0 || inst->m_file == nil)
+			continue;
+		if(rw::strncmp_ci(inst->m_file->name, prefix, strlen(prefix)) == 0)
+			return true;
+	}
+	return false;
+}
+
+static bool
+InstanceBelongsToStreamingFamilyForBackup(ObjectInst *inst, const char *scenePath)
+{
+	char prefix[256];
+
+	if(inst == nil || inst->m_file == nil || scenePath == nil)
+		return false;
+	if(inst->m_imageIndex < 0)
+		return strcmp(inst->m_file->name, scenePath) == 0;
+	if(!BuildStreamingFamilyPrefixForBackup(scenePath, prefix, sizeof(prefix)))
+		return false;
+	return rw::strncmp_ci(inst->m_file->name, prefix, strlen(prefix)) == 0;
+}
+
+static bool
+textInstNeedsBackup(ObjectInst *inst)
+{
+	return inst &&
+		(inst->m_isDirty ||
+		 inst->m_isAdded ||
+		 !inst->m_savedStateValid ||
+		 inst->m_isDeleted != inst->m_wasSavedDeleted);
+}
+
+static bool
+sceneNeedsBackup(const char *scenePath)
+{
+	if(scenePath == nil)
+		return false;
+
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst == nil || inst->m_file == nil || inst->m_imageIndex >= 0)
+			continue;
+		if(strcmp(inst->m_file->name, scenePath) != 0)
+			continue;
+		if(textInstNeedsBackup(inst))
+			return true;
+	}
+
+	if(!SceneHasRelatedStreamingFamilyForBackup(scenePath))
+		return false;
+
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(!InstanceBelongsToStreamingFamilyForBackup(inst, scenePath))
+			continue;
+		if(inst->m_imageIndex >= 0){
+			if(binaryInstNeedsSave(inst))
+				return true;
+		}else if(textInstNeedsBackup(inst))
+			return true;
+	}
+	return false;
+}
+
+static bool
+BuildBackupTextRelativePath(const char *logicalPath, std::string &relativePath)
+{
+	char normalized[512];
+	NormalizeBackupPath(logicalPath, normalized, sizeof(normalized));
+	if(normalized[0] == '\0')
+		return false;
+	relativePath = "text/";
+	relativePath += normalized;
+	return true;
+}
+
+static bool
+BuildBackupBinaryRelativePath(int32 imgIdx, std::string &relativePath, std::string &archiveLogicalPath,
+                              std::string &entryFilename)
+{
+	GameFile *file = GetGameFileFromImage(imgIdx);
+	const char *archiveLogicalName = GetCdImageLogicalName(imgIdx);
+	char normalizedArchive[512];
+
+	if(file == nil || file->name == nil || archiveLogicalName == nil)
+		return false;
+	NormalizeBackupPath(archiveLogicalName, normalizedArchive, sizeof(normalizedArchive));
+	if(normalizedArchive[0] == '\0')
+		return false;
+
+	entryFilename = file->name;
+	entryFilename += ".ipl";
+	archiveLogicalPath = normalizedArchive;
+	relativePath = "streaming/";
+	relativePath += archiveLogicalPath;
+	relativePath += "/";
+	relativePath += entryFilename;
+	return true;
+}
+
+static bool
+IsCustomIplLogicalPath(const char *path)
+{
+	char normalized[256];
+	NormalizeBackupPath(path, normalized, sizeof(normalized));
+	return rw::strncmp_ci(normalized, "data/maps/custom.ipl", 20) == 0 &&
+	       normalized[20] == '\0';
+}
+
+static void
+AddBackupError(std::vector<BackupManifestError> &errors, AutomaticBackupResult *result,
+               const char *scope, const char *path, const char *reason)
+{
+	BackupManifestError entry;
+	entry.scope = scope ? scope : "";
+	entry.path = path ? path : "";
+	entry.reason = reason ? reason : "";
+	errors.push_back(entry);
+	if(result){
+		result->hadWarnings = true;
+		result->numErrors++;
+	}
+}
+
+static bool
+QueueTextBackupFile(const char *scenePath, ObjectInst **insts, int numInsts, bool compactDeletes,
+                    const char *snapshotDir, std::vector<PendingSaveFile> &pendingFiles,
+                    std::vector<BackupManifestEntry> &entries, AutomaticBackupResult *result)
+{
+	std::string out;
+	std::string relativePath;
+	char sourcePath[1024];
+
+	if(!BuildSceneFileContents(scenePath, insts, numInsts, compactDeletes, out))
+		return false;
+	if(!BuildBackupTextRelativePath(scenePath, relativePath))
+		return false;
+
+	ResolveSceneReadPath(scenePath, sourcePath, sizeof(sourcePath));
+
+	PendingSaveFile pending;
+	pending.finalPath = JoinPathStrings(snapshotDir, relativePath);
+	pending.data.assign(out.begin(), out.end());
+	pendingFiles.push_back(pending);
+
+	BackupManifestEntry entry;
+	entry.type = "text";
+	entry.logicalPath = scenePath;
+	entry.sourcePath = sourcePath;
+	entry.outputPath = relativePath;
+	entries.push_back(entry);
+	if(result)
+		result->numTextFiles++;
+	return true;
+}
+
+static bool
+QueueBinaryBackupFile(int32 imgIdx, const std::vector<uint8> &data, const char *snapshotDir,
+                      std::vector<PendingSaveFile> &pendingFiles, std::vector<BackupManifestEntry> &entries,
+                      AutomaticBackupResult *result)
+{
+	std::string relativePath, archiveLogicalPath, entryFilename;
+	GameFile *file = GetGameFileFromImage(imgIdx);
+	const char *sourcePath;
+
+	if(data.empty())
+		return true;
+	if(!BuildBackupBinaryRelativePath(imgIdx, relativePath, archiveLogicalPath, entryFilename))
+		return false;
+
+	sourcePath = file && file->sourcePath ? file->sourcePath : GetCdImageSourcePath(imgIdx);
+
+	PendingSaveFile pending;
+	pending.finalPath = JoinPathStrings(snapshotDir, relativePath);
+	pending.data = data;
+	pendingFiles.push_back(pending);
+
+	BackupManifestEntry entry;
+	entry.type = "binary";
+	entry.logicalPath = file && file->name ? file->name : "";
+	entry.sourcePath = sourcePath ? sourcePath : "";
+	entry.outputPath = relativePath;
+	entry.archiveLogicalPath = archiveLogicalPath;
+	entry.entryFilename = entryFilename;
+	entries.push_back(entry);
+	if(result)
+		result->numBinaryFiles++;
+	return true;
+}
+
+static bool
+QueueSceneBackupSnapshot(const char *filename, const char *snapshotDir,
+                         std::vector<PendingSaveFile> &pendingFiles,
+                         std::vector<BackupManifestEntry> &entries,
+                         std::vector<BackupManifestError> &errors,
+                         AutomaticBackupResult *result,
+                         int32 *queuedImages, int *numQueuedImages)
+{
+	CPtrNode *p;
+	ObjectInst *inst;
+	int numInsts = 0;
+	ObjectInst *fileInsts[8096];
+
+	for(p = instances.first; p; p = p->next){
+		inst = (ObjectInst*)p->item;
+		if(inst->m_file && strcmp(inst->m_file->name, filename) == 0)
+			fileInsts[numInsts++] = inst;
+	}
+
+	if(numInsts == 0)
+		return true;
+
+	for(int i = 0; i < numInsts - 1; i++)
+		for(int j = i + 1; j < numInsts; j++)
+			if(fileInsts[i]->m_iplIndex > fileInsts[j]->m_iplIndex){
+				ObjectInst *tmp = fileInsts[i];
+				fileInsts[i] = fileInsts[j];
+				fileInsts[j] = tmp;
+			}
+
+	int32 relatedImages[256];
+	int numRelatedImages = CollectRelatedStreamingImages(filename, relatedImages, 256);
+
+	if(numRelatedImages == 0)
+		return QueueTextBackupFile(filename, fileInsts, numInsts, false, snapshotDir, pendingFiles, entries, result);
+
+	struct SavedTextState
+	{
+		ObjectInst *inst;
+		int oldIplIndex;
+		int oldLodId;
+		ObjectInst *oldLod;
+	};
+	struct SavedBinaryState
+	{
+		ObjectInst *inst;
+		int oldLodId;
+		ObjectInst *oldLod;
+		bool oldDirty;
+		int oldBinInstIndex;
+	};
+
+	int maxOldIndex = -1;
+	for(int i = 0; i < numInsts; i++)
+		if(fileInsts[i]->m_iplIndex > maxOldIndex)
+			maxOldIndex = fileInsts[i]->m_iplIndex;
+
+	std::vector<int> oldToNew(maxOldIndex+1, -1);
+	std::vector<ObjectInst*> oldTextInsts(maxOldIndex+1, nil);
+	std::vector<SavedTextState> textStates;
+	std::vector<SavedBinaryState> binaryStates;
+	ObjectInst *activeTextInsts[8096];
+	int numActiveTextInsts = 0;
+
+	for(int i = 0; i < numInsts; i++){
+		inst = fileInsts[i];
+		if(inst->m_iplIndex >= 0 && inst->m_iplIndex <= maxOldIndex)
+			oldTextInsts[inst->m_iplIndex] = inst;
+		if(inst->m_isDeleted)
+			continue;
+		oldToNew[inst->m_iplIndex] = numActiveTextInsts;
+		activeTextInsts[numActiveTextInsts++] = inst;
+	}
+
+	for(int i = 0; i < numActiveTextInsts; i++){
+		inst = activeTextInsts[i];
+		textStates.push_back({ inst, inst->m_iplIndex, inst->m_lodId, inst->m_lod });
+		int oldLodId = inst->m_lodId;
+		if(oldLodId >= 0 &&
+		   oldLodId <= maxOldIndex &&
+		   oldTextInsts[oldLodId] &&
+		   !oldTextInsts[oldLodId]->m_isDeleted){
+			inst->m_lod = oldTextInsts[oldLodId];
+			inst->m_lodId = oldToNew[oldLodId];
+		}else{
+			inst->m_lod = nil;
+			inst->m_lodId = -1;
+		}
+	}
+
+	for(p = instances.first; p; p = p->next){
+		inst = (ObjectInst*)p->item;
+		if(inst->m_imageIndex < 0)
+			continue;
+		if(!IsImageInList(inst->m_imageIndex, relatedImages, numRelatedImages))
+			continue;
+
+		binaryStates.push_back({ inst, inst->m_lodId, inst->m_lod, inst->m_isDirty, inst->m_binInstIndex });
+		int oldLodId = inst->m_lodId;
+		if(oldLodId >= 0 &&
+		   oldLodId <= maxOldIndex &&
+		   oldTextInsts[oldLodId] &&
+		   !oldTextInsts[oldLodId]->m_isDeleted){
+			inst->m_lod = oldTextInsts[oldLodId];
+			inst->m_lodId = oldToNew[oldLodId];
+		}else{
+			inst->m_lod = nil;
+			inst->m_lodId = -1;
+		}
+		if(inst->m_lodId != oldLodId)
+			inst->m_isDirty = true;
+	}
+
+	bool ok = true;
+	int numDeleted = 0;
+	int numMoved = 0;
+	int localTextFiles = 0;
+	int localBinaryFiles = 0;
+	std::vector<PendingSaveFile> familyPendingFiles;
+	std::vector<BackupManifestEntry> familyEntries;
+	std::vector<int32> familyImages;
+	for(int i = 0; i < numRelatedImages && ok; i++){
+		std::vector<uint8> writeBuf;
+		BinaryIplSaveResult buildResult = {};
+		if(!BuildBinaryBackupImageByIndex(relatedImages[i], &buildResult, &numDeleted, &numMoved, &writeBuf)){
+			AddBackupError(errors, result, "family", filename, "failed_to_build_related_binary");
+			ok = false;
+			break;
+		}
+		AutomaticBackupResult localResult = {};
+		if(!QueueBinaryBackupFile(relatedImages[i], writeBuf, snapshotDir, familyPendingFiles, familyEntries, &localResult)){
+			AddBackupError(errors, result, "family", filename, "failed_to_queue_related_binary");
+			ok = false;
+			break;
+		}
+		localBinaryFiles += localResult.numBinaryFiles;
+		familyImages.push_back(relatedImages[i]);
+	}
+
+	if(ok){
+		AutomaticBackupResult localResult = {};
+		if(!QueueTextBackupFile(filename, fileInsts, numInsts, true, snapshotDir, familyPendingFiles, familyEntries, &localResult)){
+			AddBackupError(errors, result, "family", filename, "failed_to_queue_text_scene");
+			ok = false;
+		}else
+			localTextFiles += localResult.numTextFiles;
+	}
+
+	for(size_t i = 0; i < textStates.size(); i++){
+		textStates[i].inst->m_iplIndex = textStates[i].oldIplIndex;
+		textStates[i].inst->m_lodId = textStates[i].oldLodId;
+		textStates[i].inst->m_lod = textStates[i].oldLod;
+	}
+	for(size_t i = 0; i < binaryStates.size(); i++){
+		binaryStates[i].inst->m_lodId = binaryStates[i].oldLodId;
+		binaryStates[i].inst->m_lod = binaryStates[i].oldLod;
+		binaryStates[i].inst->m_isDirty = binaryStates[i].oldDirty;
+		binaryStates[i].inst->m_binInstIndex = binaryStates[i].oldBinInstIndex;
+	}
+
+	if(ok){
+		pendingFiles.insert(pendingFiles.end(), familyPendingFiles.begin(), familyPendingFiles.end());
+		entries.insert(entries.end(), familyEntries.begin(), familyEntries.end());
+		for(size_t i = 0; i < familyImages.size(); i++)
+			rememberBinaryImage(queuedImages, numQueuedImages, familyImages[i]);
+		if(result){
+			result->numTextFiles += localTextFiles;
+			result->numBinaryFiles += localBinaryFiles;
+		}
+	}
+
+	return ok;
+}
+
+static bool
+QueueStandaloneBinaryBackupSnapshot(int32 imgIdx, const char *snapshotDir,
+                                    std::vector<PendingSaveFile> &pendingFiles,
+                                    std::vector<BackupManifestEntry> &entries,
+                                    std::vector<BackupManifestError> &errors,
+                                    AutomaticBackupResult *result)
+{
+	std::vector<uint8> writeBuf;
+	int numDeleted = 0;
+	int numMoved = 0;
+	BinaryIplSaveResult buildResult = {};
+
+	if(!BuildBinaryBackupImageByIndex(imgIdx, &buildResult, &numDeleted, &numMoved, &writeBuf)){
+		const char *logicalName = GetGameFileFromImage(imgIdx) && GetGameFileFromImage(imgIdx)->name ?
+			GetGameFileFromImage(imgIdx)->name : "";
+		AddBackupError(errors, result, "binary", logicalName, "failed_to_build_binary_snapshot");
+		return false;
+	}
+	if(!QueueBinaryBackupFile(imgIdx, writeBuf, snapshotDir, pendingFiles, entries, result)){
+		const char *logicalName = GetGameFileFromImage(imgIdx) && GetGameFileFromImage(imgIdx)->name ?
+			GetGameFileFromImage(imgIdx)->name : "";
+		AddBackupError(errors, result, "binary", logicalName, "failed_to_queue_binary_snapshot");
+		return false;
+	}
+	return true;
+}
+
+static void
+BuildBackupManifest(std::string &out, const AutomaticBackupResult &result,
+                    const std::vector<BackupManifestEntry> &entries,
+                    const std::vector<BackupManifestError> &errors)
+{
+	out.clear();
+	out += "format automatic_backup_v1\n";
+	out += "save_destination ";
+	out += gSaveDestination == SAVE_DESTINATION_MODLOADER ? "modloader\n" : "original_files\n";
+	out += "text_files " + std::to_string(result.numTextFiles) + "\n";
+	out += "binary_files " + std::to_string(result.numBinaryFiles) + "\n";
+	out += "errors " + std::to_string(result.numErrors) + "\n";
+
+	bool hasCustomIpl = false;
+	for(size_t i = 0; i < entries.size(); i++)
+		if(entries[i].type == "text" && IsCustomIplLogicalPath(entries[i].logicalPath.c_str())){
+			hasCustomIpl = true;
+			break;
+		}
+	out += std::string("custom_ipl_present ") + (hasCustomIpl ? "1\n" : "0\n");
+	out += "\n";
+
+	for(size_t i = 0; i < entries.size(); i++){
+		const BackupManifestEntry &entry = entries[i];
+		out += "entry\n";
+		out += "type " + entry.type + "\n";
+		out += "logical " + entry.logicalPath + "\n";
+		out += "source " + entry.sourcePath + "\n";
+		out += "output " + entry.outputPath + "\n";
+		if(!entry.archiveLogicalPath.empty())
+			out += "archive " + entry.archiveLogicalPath + "\n";
+		if(!entry.entryFilename.empty())
+			out += "entry_filename " + entry.entryFilename + "\n";
+		out += "end\n\n";
+	}
+
+	for(size_t i = 0; i < errors.size(); i++){
+		const BackupManifestError &error = errors[i];
+		out += "error\n";
+		out += "scope " + error.scope + "\n";
+		out += "path " + error.path + "\n";
+		out += "reason " + error.reason + "\n";
+		out += "end\n\n";
+	}
+}
+
+static void
+PruneAutomaticBackupSnapshots(const char *rootDir, int keepCount)
+{
+	if(rootDir == nil || keepCount <= 0)
+		return;
+
+	std::vector<std::string> dirs;
+	ListSubdirectories(rootDir, dirs);
+	if((int)dirs.size() <= keepCount)
+		return;
+
+	std::sort(dirs.begin(), dirs.end(), std::greater<std::string>());
+	for(size_t i = (size_t)keepCount; i < dirs.size(); i++){
+		std::string fullPath = JoinPathStrings(rootDir, dirs[i]);
+		RemoveDirectoryRecursive(fullPath.c_str());
+	}
+}
+
+AutomaticBackupResult
+CreateAutomaticBackup(const char *rootDir, int keepCount)
+{
+	AutomaticBackupResult result = {};
+	std::vector<PendingSaveFile> pendingFiles;
+	std::vector<BackupManifestEntry> entries;
+	std::vector<BackupManifestError> errors;
+	std::vector<std::string> checkedScenes;
+	int32 queuedImages[256];
+	int numQueuedImages = 0;
+	char snapshotDir[1024];
+
+	if(rootDir == nil || rootDir[0] == '\0')
+		return result;
+	if(keepCount < 1)
+		keepCount = 1;
+	if(!BuildUniqueSnapshotDir(rootDir, snapshotDir, sizeof(snapshotDir))){
+		result.hadWarnings = true;
+		result.numErrors = 1;
+		return result;
+	}
+
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst == nil || inst->m_file == nil || inst->m_imageIndex >= 0)
+			continue;
+
+		bool alreadyChecked = false;
+		for(size_t i = 0; i < checkedScenes.size(); i++)
+			if(checkedScenes[i] == inst->m_file->name){
+				alreadyChecked = true;
+				break;
+			}
+		if(alreadyChecked)
+			continue;
+		checkedScenes.push_back(inst->m_file->name);
+
+		if(sceneNeedsBackup(inst->m_file->name))
+			QueueSceneBackupSnapshot(inst->m_file->name, snapshotDir, pendingFiles, entries, errors,
+			                         &result, queuedImages, &numQueuedImages);
+	}
+
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst == nil || !binaryInstNeedsSave(inst))
+			continue;
+		if(IsImageInList(inst->m_imageIndex, queuedImages, numQueuedImages))
+			continue;
+		if(QueueStandaloneBinaryBackupSnapshot(inst->m_imageIndex, snapshotDir, pendingFiles, entries, errors, &result))
+			rememberBinaryImage(queuedImages, &numQueuedImages, inst->m_imageIndex);
+	}
+
+	if(pendingFiles.empty() && errors.empty())
+		return result;
+	if(entries.empty())
+		return result;
+
+	std::string manifest;
+	BuildBackupManifest(manifest, result, entries, errors);
+	PendingSaveFile manifestFile;
+	manifestFile.finalPath = JoinPathStrings(snapshotDir, "manifest.txt");
+	manifestFile.data.assign(manifest.begin(), manifest.end());
+	pendingFiles.push_back(manifestFile);
+
+	if(!CommitPendingSaveFiles(pendingFiles)){
+		result.hadWarnings = true;
+		result.numErrors++;
+		result.createdSnapshot = false;
+		result.snapshotPath[0] = '\0';
+		return result;
+	}
+
+	result.createdSnapshot = true;
+	strncpy(result.snapshotPath, snapshotDir, sizeof(result.snapshotPath));
+	result.snapshotPath[sizeof(result.snapshotPath)-1] = '\0';
+	PruneAutomaticBackupSnapshots(rootDir, keepCount);
 	return result;
 }
 
