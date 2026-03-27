@@ -2,12 +2,6 @@
 #include "lod_associations.h"
 #include "object_categories.h"
 
-#ifdef _WIN32
-#include <direct.h>
-#else
-#include <sys/stat.h>
-#endif
-
 CPtrList instances;
 CPtrList selection;
 
@@ -569,7 +563,7 @@ void
 LoadFavourites(void)
 {
 	memset(favourites, 0, sizeof(favourites));
-	FILE *f = fopen("favourites.txt", "r");
+	FILE *f = fopenArianeDataRead("favourites.txt", "favourites.txt");
 	if(f == nil) return;
 	char line[64];
 	while(fgets(line, sizeof(line), f)){
@@ -583,7 +577,7 @@ LoadFavourites(void)
 void
 SaveFavourites(void)
 {
-	FILE *f = fopen("favourites.txt", "w");
+	FILE *f = fopenArianeDataWrite("favourites.txt");
 	if(f == nil) return;
 	for(int i = 0; i < NUMOBJECTDEFS; i++)
 		if(favourites[i])
@@ -1220,24 +1214,9 @@ ExportPrefab(const char *path)
 
 	// Build local index map for LOD references within the prefab
 	// insts[i] -> local index i, so we can resolve m_lod pointers
-	// Ensure parent directory exists
-	{
-		char dir[512];
-		strncpy(dir, path, sizeof(dir)-1);
-		dir[sizeof(dir)-1] = '\0';
-		char *slash = strrchr(dir, '/');
-#ifdef _WIN32
-		char *bslash = strrchr(dir, '\\');
-		if(bslash && (slash == nil || bslash > slash)) slash = bslash;
-#endif
-		if(slash){
-			*slash = '\0';
-#ifdef _WIN32
-			_mkdir(dir);
-#else
-			mkdir(dir, 0777);
-#endif
-		}
+	if(!EnsureParentDirectoriesForPath(path)){
+		log("ExportPrefab: failed to create parent directories for %s\n", path);
+		return 0;
 	}
 
 	FILE *f = fopen(path, "w");

@@ -1,6 +1,7 @@
 #include <plugin.h>
 #include <CPlayerPed.h>
 #include <CWorld.h>
+#include <direct.h>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -29,11 +30,43 @@ enum {
 
 using namespace plugin;
 
+static bool
+BuildArianePath(const char *name, char *out, size_t size)
+{
+	if(name == NULL || out == NULL || size == 0)
+		return false;
+	_mkdir("ariane");
+	return snprintf(out, size, "ariane/%s", name) < (int)size;
+}
+
+static FILE*
+OpenArianeFileForRead(const char *name, char *usedPath, size_t size)
+{
+	FILE *f = NULL;
+	if(BuildArianePath(name, usedPath, size))
+		f = fopen(usedPath, "r");
+	if(f)
+		return f;
+	strncpy(usedPath, name, size);
+	usedPath[size-1] = '\0';
+	return fopen(usedPath, "r");
+}
+
+static void
+RemoveArianeAndLegacyFiles(const char *name)
+{
+	char path[256];
+	if(BuildArianePath(name, path, sizeof(path)))
+		remove(path);
+	remove(name);
+}
+
 #if defined(GTASA)
 static void
 LogHotReload(const char *fmt, ...)
 {
-	FILE *f = fopen("ariane_plugin_log.txt", "a");
+	char path[256];
+	FILE *f = BuildArianePath("ariane_plugin_log.txt", path, sizeof(path)) ? fopen(path, "a") : NULL;
 	if(!f)
 		return;
 	va_list args;
@@ -206,7 +239,8 @@ SetupBigBuildingIfNeededBeforeAdd(CEntity *entity)
 static void
 ProcessEntityReload(void)
 {
-	FILE *f = fopen("ariane_reload_entities.txt", "r");
+	char usedPath[256];
+	FILE *f = OpenArianeFileForRead("ariane_reload_entities.txt", usedPath, sizeof(usedPath));
 	if(!f) return;
 
 	struct PendingLodLink {
@@ -376,7 +410,7 @@ ProcessEntityReload(void)
 	}
 
 	fclose(f);
-	remove("ariane_reload_entities.txt");
+	RemoveArianeAndLegacyFiles("ariane_reload_entities.txt");
 }
 #endif
 
@@ -391,14 +425,16 @@ public:
 			// --- Phase 1: one-time teleport from editor ---
 			static bool teleportDone = false;
 			if(!teleportDone){
-				FILE *f = fopen("ariane_teleport.txt", "r");
-				if(!f){ teleportDone = true; }
+				char usedPath[256];
+				FILE *f = OpenArianeFileForRead("ariane_teleport.txt", usedPath, sizeof(usedPath));
+				if(!f)
+					teleportDone = true;
 				else {
 					float x, y, z, heading;
 					int area = 0;
 					int n = fscanf(f, "%f %f %f %f %d", &x, &y, &z, &heading, &area);
 					fclose(f);
-					remove("ariane_teleport.txt");
+					RemoveArianeAndLegacyFiles("ariane_teleport.txt");
 
 					if(n >= 4){
 #if defined(GTASA)
@@ -420,7 +456,8 @@ public:
 #if defined(GTASA)
 			// --- Phase 2: legacy hot reload of streaming IPLs ---
 			{
-				FILE *f = fopen("ariane_reload.txt", "r");
+				char usedPath[256];
+				FILE *f = OpenArianeFileForRead("ariane_reload.txt", usedPath, sizeof(usedPath));
 				if(f){
 					char line[64];
 					int slots[256];
@@ -437,7 +474,7 @@ public:
 							slots[numSlots++] = slot;
 					}
 					fclose(f);
-					remove("ariane_reload.txt");
+					RemoveArianeAndLegacyFiles("ariane_reload.txt");
 
 					if(numSlots > 0){
 						CVector reloadPos = player->GetPosition();
@@ -451,8 +488,8 @@ public:
 				}
 			}
 
-			// --- Phase 3: hot reload text IPL entities ---
-			ProcessEntityReload();
+				// --- Phase 3: hot reload text IPL entities ---
+				ProcessEntityReload();
 #endif
 		};
 	}

@@ -4,6 +4,12 @@
 #include "telemetry.h"
 #include "modloader.h"
 
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
+
 //#define XINPUT
 #ifdef XINPUT
 #include <Xinput.h>
@@ -17,6 +23,38 @@ rw::EngineOpenParams engineOpenParams;
 rw::Light *pAmbient, *pDirect;
 rw::Texture *whiteTex;
 static char gHotReloadTracePath[1024];
+
+static bool
+EnsureDirectoryTree(const char *path)
+{
+	if(path == nil || path[0] == '\0')
+		return false;
+
+	char dirpath[1024];
+	strncpy(dirpath, path, sizeof(dirpath)-1);
+	dirpath[sizeof(dirpath)-1] = '\0';
+
+	for(char *p = dirpath; *p; p++){
+		if(*p != '/' && *p != '\\')
+			continue;
+		char saved = *p;
+		*p = '\0';
+		if(dirpath[0] != '\0'){
+#ifdef _WIN32
+			_mkdir(dirpath);
+#else
+			mkdir(dirpath, 0777);
+#endif
+		}
+		*p = saved;
+	}
+#ifdef _WIN32
+	_mkdir(dirpath);
+#else
+	mkdir(dirpath, 0777);
+#endif
+	return true;
+}
 
 // TODO: print to log as well
 void
@@ -54,6 +92,113 @@ log(const char *fmt, ...)
 	va_end(ap);
 }
 
+bool
+GetEditorRootDirectory(char *dir, size_t size)
+{
+	if(size == 0)
+		return false;
+
+#ifdef _WIN32
+	DWORD len = GetModuleFileNameA(nil, dir, (DWORD)size);
+	if(len > 0 && len < size){
+		for(int i = (int)len - 1; i >= 0; i--){
+			if(dir[i] == '\\' || dir[i] == '/'){
+				dir[i] = '\0';
+				return true;
+			}
+		}
+	}
+
+	len = GetCurrentDirectoryA((DWORD)size, dir);
+	return len > 0 && len < size;
+#else
+	strncpy(dir, ".", size);
+	dir[size - 1] = '\0';
+	return true;
+#endif
+}
+
+bool
+BuildPath(char *dst, size_t size, const char *dir, const char *name)
+{
+	if(size == 0)
+		return false;
+	if(dir == nil || dir[0] == '\0')
+		return snprintf(dst, size, "%s", name) < (int)size;
+
+	size_t len = strlen(dir);
+#ifdef _WIN32
+	const char *sep = (dir[len-1] == '\\' || dir[len-1] == '/') ? "" : "\\";
+#else
+	const char *sep = (dir[len-1] == '/') ? "" : "/";
+#endif
+	return snprintf(dst, size, "%s%s%s", dir, sep, name) < (int)size;
+}
+
+bool
+EnsureParentDirectoriesForPath(const char *path)
+{
+	if(path == nil || path[0] == '\0')
+		return false;
+
+	char dirpath[1024];
+	strncpy(dirpath, path, sizeof(dirpath)-1);
+	dirpath[sizeof(dirpath)-1] = '\0';
+	char *slash = strrchr(dirpath, '/');
+#ifdef _WIN32
+	char *backslash = strrchr(dirpath, '\\');
+	if(backslash && (slash == nil || backslash > slash))
+		slash = backslash;
+#endif
+	if(slash == nil)
+		return true;
+	*slash = '\0';
+	if(dirpath[0] == '\0')
+		return true;
+	return EnsureDirectoryTree(dirpath);
+}
+
+bool
+GetArianeDataDirectory(char *dir, size_t size)
+{
+	char rootDir[1024];
+	if(!GetEditorRootDirectory(rootDir, sizeof(rootDir)) ||
+	   !BuildPath(dir, size, rootDir, "ariane"))
+		return false;
+	return EnsureDirectoryTree(dir);
+}
+
+bool
+GetArianeDataPath(char *dst, size_t size, const char *name)
+{
+	char dir[1024];
+	return GetArianeDataDirectory(dir, sizeof(dir)) &&
+	       BuildPath(dst, size, dir, name);
+}
+
+FILE*
+fopenArianeDataRead(const char *name, const char *legacyName)
+{
+	char path[1024];
+	FILE *f = nil;
+
+	if(name && GetArianeDataPath(path, sizeof(path), name))
+		f = fopen(path, "r");
+	if(f == nil && legacyName)
+		f = fopen(legacyName, "r");
+	return f;
+}
+
+FILE*
+fopenArianeDataWrite(const char *name)
+{
+	char path[1024];
+	if(name == nil || !GetArianeDataPath(path, sizeof(path), name) ||
+	   !EnsureParentDirectoriesForPath(path))
+		return nil;
+	return fopen(path, "w");
+}
+
 void
 setHotReloadTracePath(const char *path)
 {
@@ -68,7 +213,14 @@ setHotReloadTracePath(const char *path)
 void
 hotReloadTrace(const char *fmt, ...)
 {
-	const char *path = gHotReloadTracePath[0] ? gHotReloadTracePath : "ariane_hot_reload_log.txt";
+	char defaultPath[1024];
+	const char *path = gHotReloadTracePath;
+	if(path[0] == '\0'){
+		if(GetArianeDataPath(defaultPath, sizeof(defaultPath), "ariane_hot_reload_log.txt"))
+			path = defaultPath;
+		else
+			path = "ariane_hot_reload_log.txt";
+	}
 	FILE *f = fopen(path, "a");
 	if(f == nil)
 		return;

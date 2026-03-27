@@ -81,6 +81,14 @@ buildPath(char *dst, size_t size, const char *dir, const char *name)
 	return snprintf(dst, size, "%s%s%s", dir, sep, name) < (int)size;
 }
 
+static bool
+getLegacyRootPath(char *dst, size_t size, const char *name)
+{
+	char rootDir[2048];
+	return getEditorRootDirectory(rootDir, sizeof(rootDir)) &&
+	       buildPath(dst, size, rootDir, name);
+}
+
 static void
 sanitizeAutomaticBackupSettings(void)
 {
@@ -97,14 +105,12 @@ sanitizeAutomaticBackupSettings(void)
 static bool
 runAutomaticBackup(bool manual)
 {
-	char rootDir[2048];
 	char backupRoot[2048];
 	FileLoader::AutomaticBackupResult result;
 	uint32 latestSeq = GetLatestChangeSeq();
 
 	sanitizeAutomaticBackupSettings();
-	if(!getEditorRootDirectory(rootDir, sizeof(rootDir)) ||
-	   !buildPath(backupRoot, sizeof(backupRoot), rootDir, "automatic_backups")){
+	if(!GetArianeDataPath(backupRoot, sizeof(backupRoot), "automatic_backups")){
 		if(manual)
 			Toast(TOAST_SAVE, "Automatic Backup: failed to resolve backup folder");
 		return false;
@@ -1075,22 +1081,27 @@ testInGame(void)
 	// Camera heading
 	float heading = TheCamera.getHeading();
 
-	char rootDir[2048];
 	char teleportPath[2048];
-	if(!getEditorRootDirectory(rootDir, sizeof(rootDir)) ||
-	   !buildPath(teleportPath, sizeof(teleportPath), rootDir, "ariane_teleport.txt")){
+	char legacyTeleportPath[2048];
+	if(!GetArianeDataPath(teleportPath, sizeof(teleportPath), "ariane_teleport.txt") ||
+	   !getLegacyRootPath(legacyTeleportPath, sizeof(legacyTeleportPath), "ariane_teleport.txt")){
 		Toast(TOAST_SAVE, "Failed to resolve game folder");
 		return;
 	}
 
-	// Write the teleport file next to the editor executable.
+	// Write the teleport handoff into ariane/ and mirror the legacy root
+	// location so older in-game plugins continue to work.
 	FILE *f = fopen(teleportPath, "w");
-	if(f){
-		fprintf(f, "%f %f %f %f %d\n", pos.x, pos.y, pos.z, heading, currentArea);
-		fclose(f);
-	} else {
+	if(f == nil){
 		Toast(TOAST_SAVE, "Failed to write teleport file");
 		return;
+	}
+	fprintf(f, "%f %f %f %f %d\n", pos.x, pos.y, pos.z, heading, currentArea);
+	fclose(f);
+	FILE *legacy = fopen(legacyTeleportPath, "w");
+	if(legacy){
+		fprintf(legacy, "%f %f %f %f %d\n", pos.x, pos.y, pos.z, heading, currentArea);
+		fclose(legacy);
 	}
 
 	// Launch game executable
@@ -1100,8 +1111,10 @@ testInGame(void)
 	else if(isSA()) exeName = "gta_sa.exe";
 
 #ifdef _WIN32
+	char rootDir[2048];
 	char exePath[2048];
-	if(!buildPath(exePath, sizeof(exePath), rootDir, exeName)){
+	if(!getEditorRootDirectory(rootDir, sizeof(rootDir)) ||
+	   !buildPath(exePath, sizeof(exePath), rootDir, exeName)){
 		Toast(TOAST_SAVE, "Failed to resolve %s", exeName);
 		return;
 	}
@@ -1139,10 +1152,14 @@ hotReloadIpls(void)
 	char reloadPath[2048];
 	char entityReloadPath[2048];
 	char tracePath[2048];
+	char legacyReloadPath[2048];
+	char legacyEntityReloadPath[2048];
 	if(!getEditorRootDirectory(rootDir, sizeof(rootDir)) ||
-	   !buildPath(tracePath, sizeof(tracePath), rootDir, "ariane_hot_reload_log.txt") ||
-	   !buildPath(reloadPath, sizeof(reloadPath), rootDir, "ariane_reload.txt") ||
-	   !buildPath(entityReloadPath, sizeof(entityReloadPath), rootDir, "ariane_reload_entities.txt")){
+	   !GetArianeDataPath(tracePath, sizeof(tracePath), "ariane_hot_reload_log.txt") ||
+	   !GetArianeDataPath(reloadPath, sizeof(reloadPath), "ariane_reload.txt") ||
+	   !GetArianeDataPath(entityReloadPath, sizeof(entityReloadPath), "ariane_reload_entities.txt") ||
+	   !getLegacyRootPath(legacyReloadPath, sizeof(legacyReloadPath), "ariane_reload.txt") ||
+	   !getLegacyRootPath(legacyEntityReloadPath, sizeof(legacyEntityReloadPath), "ariane_reload_entities.txt")){
 		Toast(TOAST_SAVE, "Hot Reload: failed to resolve game folder");
 		return;
 	}
@@ -1203,14 +1220,20 @@ hotReloadIpls(void)
 	}
 
 	if(numNames > 0){
-
 		FILE *f = fopen(reloadPath, "w");
+		FILE *legacy = fopen(legacyReloadPath, "w");
 		if(f){
 			for(int i = 0; i < numNames; i++)
 				fprintf(f, "%s\n", iplNames[i]);
 			fclose(f);
+			if(legacy){
+				for(int i = 0; i < numNames; i++)
+					fprintf(legacy, "%s\n", iplNames[i]);
+				fclose(legacy);
+			}
 			numStreamingIpls = numNames;
-		}
+		}else if(legacy)
+			fclose(legacy);
 	}
 
 	// --- Entity deletes/moves (manipulated directly in game memory) ---
@@ -1218,6 +1241,7 @@ hotReloadIpls(void)
 	// if binary IMG patching/reload fails for a given IPL, the live entity
 	// still gets moved in-game.
 	FILE *fe = fopen(entityReloadPath, "w");
+	FILE *legacyFe = fopen(legacyEntityReloadPath, "w");
 	if(fe){
 		for(p = instances.first; p; p = p->next){
 			ObjectInst *inst = (ObjectInst*)p->item;
@@ -1259,6 +1283,19 @@ hotReloadIpls(void)
 					GetAreaFlags(inst),
 					lodModelId,
 					lodX, lodY, lodZ);
+				if(legacyFe)
+					fprintf(legacyFe, "A %d %f %f %f %f %f %f %f %d %d %f %f %f\n",
+						inst->m_objectId,
+						inst->m_translation.x,
+						inst->m_translation.y,
+						inst->m_translation.z,
+						inst->m_rotation.x,
+						inst->m_rotation.y,
+						inst->m_rotation.z,
+						inst->m_rotation.w,
+						GetAreaFlags(inst),
+						lodModelId,
+						lodX, lodY, lodZ);
 				numEntityCmds++;
 				inst->m_gameEntityExists = true;
 				inst->m_isAdded = false;
@@ -1274,6 +1311,12 @@ hotReloadIpls(void)
 					inst->m_origTranslation.x,
 					inst->m_origTranslation.y,
 					inst->m_origTranslation.z);
+				if(legacyFe)
+					fprintf(legacyFe, "D %d %f %f %f\n",
+						inst->m_objectId,
+						inst->m_origTranslation.x,
+						inst->m_origTranslation.y,
+						inst->m_origTranslation.z);
 				numEntityCmds++;
 				inst->m_gameEntityExists = false;
 			}else if(needsMove){
@@ -1290,6 +1333,19 @@ hotReloadIpls(void)
 					inst->m_rotation.y,
 					inst->m_rotation.z,
 					inst->m_rotation.w);
+				if(legacyFe)
+					fprintf(legacyFe, "M %d %f %f %f %f %f %f %f %f %f %f\n",
+						inst->m_objectId,
+						inst->m_origTranslation.x,
+						inst->m_origTranslation.y,
+						inst->m_origTranslation.z,
+						inst->m_translation.x,
+						inst->m_translation.y,
+						inst->m_translation.z,
+						inst->m_rotation.x,
+						inst->m_rotation.y,
+						inst->m_rotation.z,
+						inst->m_rotation.w);
 				numEntityCmds++;
 				// Update orig so next reload knows where the game entity now is
 				inst->m_origTranslation = inst->m_translation;
@@ -1297,10 +1353,13 @@ hotReloadIpls(void)
 			}
 		}
 		fclose(fe);
+		if(legacyFe)
+			fclose(legacyFe);
 
 		if(numEntityCmds == 0)
 			remove(entityReloadPath);
-	}
+	}else if(legacyFe)
+		fclose(legacyFe);
 
 	if(numStreamingIpls == 0 && numEntityCmds == 0){
 		if(totalBlockedDeletes)
@@ -1347,21 +1406,8 @@ uiMainmenu(void)
 					SAVE_DESTINATION_ORIGINAL_FILES : SAVE_DESTINATION_MODLOADER;
 				saveSaveSettings();
 			}
-			bool telemetryEnabled = TelemetryIsEnabled();
-			if(ImGui::MenuItem("Anonymous Telemetry", nil, telemetryEnabled)){
-				telemetryEnabled = !telemetryEnabled;
-				TelemetrySetEnabled(telemetryEnabled);
-				if(telemetryEnabled){
-					TelemetrySendPing();
-					Toast(TOAST_SAVE, "Anonymous telemetry enabled");
-				}else
-					Toast(TOAST_SAVE, "Anonymous telemetry disabled");
-			}
 			if(ImGui::MenuItem("Hot Reload", "Ctrl+R")){
 				hotReloadIpls();
-			}
-			if(ImGui::MenuItem("Create Backup Now")){
-				runAutomaticBackup(true);
 			}
 			ImGui::Separator();
 			if(ImGui::MenuItem("Export Prefab...", "Ctrl+Shift+E", false, selection.first != nil)){
@@ -1444,7 +1490,14 @@ uiExportPrefabPopup(void)
 		bool validName = prefabName[0] != '\0';
 		if(ImGui::Button("Export", ImVec2(120, 0)) && validName){
 			char path[512];
-			snprintf(path, sizeof(path), "prefabs/%s.ariane", prefabName);
+			char prefabDir[512];
+			if(!GetArianeDataPath(prefabDir, sizeof(prefabDir), "prefabs") ||
+			   snprintf(path, sizeof(path), "%s/%s.ariane", prefabDir, prefabName) >= (int)sizeof(path)){
+				Toast(TOAST_SAVE, "Failed to resolve prefab path");
+				ImGui::CloseCurrentPopup();
+				ImGui::EndPopup();
+				return;
+			}
 			int exported = ExportPrefab(path);
 			if(exported > 0)
 				Toast(TOAST_SAVE, "Exported %d instance(s) to %s", exported, path);
@@ -1461,9 +1514,8 @@ uiExportPrefabPopup(void)
 }
 
 static void
-scanPrefabDir(const char *dir, char files[][256], int *numFiles, int maxFiles)
+scanPrefabDir(const char *dir, char files[][256], char fullPaths[][512], int *numFiles, int maxFiles)
 {
-	*numFiles = 0;
 #ifdef _WIN32
 	char pattern[512];
 	snprintf(pattern, sizeof(pattern), "%s\\*.ariane", dir);
@@ -1472,8 +1524,18 @@ scanPrefabDir(const char *dir, char files[][256], int *numFiles, int maxFiles)
 	if(h == INVALID_HANDLE_VALUE) return;
 	do {
 		if(!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && *numFiles < maxFiles){
+			bool duplicate = false;
+			for(int i = 0; i < *numFiles; i++)
+				if(strcmp(files[i], fd.cFileName) == 0){
+					duplicate = true;
+					break;
+				}
+			if(duplicate)
+				continue;
 			strncpy(files[*numFiles], fd.cFileName, 255);
 			files[*numFiles][255] = '\0';
+			snprintf(fullPaths[*numFiles], 512, "%s/%s", dir, fd.cFileName);
+			fullPaths[*numFiles][511] = '\0';
 			(*numFiles)++;
 		}
 	} while(FindNextFileA(h, &fd));
@@ -1487,8 +1549,18 @@ scanPrefabDir(const char *dir, char files[][256], int *numFiles, int maxFiles)
 		size_t len = strlen(ent->d_name);
 		if(len > 7 && strcmp(ent->d_name + len - 7, ".ariane") == 0){
 			if(*numFiles < maxFiles){
+				bool duplicate = false;
+				for(int i = 0; i < *numFiles; i++)
+					if(strcmp(files[i], ent->d_name) == 0){
+						duplicate = true;
+						break;
+					}
+				if(duplicate)
+					continue;
 				strncpy(files[*numFiles], ent->d_name, 255);
 				files[*numFiles][255] = '\0';
+				snprintf(fullPaths[*numFiles], 512, "%s/%s", dir, ent->d_name);
+				fullPaths[*numFiles][511] = '\0';
 				(*numFiles)++;
 			}
 		}
@@ -1501,16 +1573,21 @@ static void
 uiImportPrefabPopup(void)
 {
 	static char prefabFiles[128][256];
+	static char prefabPaths[128][512];
 	static int numPrefabFiles = 0;
 	static char manualPath[512] = "";
 	static int selectedFile = -1;
 
 	if(gOpenImportPrefab){
+		char prefabDir[512];
 		ImGui::OpenPopup("Import Prefab");
 		gOpenImportPrefab = false;
 		manualPath[0] = '\0';
 		selectedFile = -1;
-		scanPrefabDir("prefabs", prefabFiles, &numPrefabFiles, 128);
+		numPrefabFiles = 0;
+		if(GetArianeDataPath(prefabDir, sizeof(prefabDir), "prefabs"))
+			scanPrefabDir(prefabDir, prefabFiles, prefabPaths, &numPrefabFiles, 128);
+		scanPrefabDir("prefabs", prefabFiles, prefabPaths, &numPrefabFiles, 128);
 	}
 
 	if(ImGui::BeginPopupModal("Import Prefab", nil, ImGuiWindowFlags_AlwaysAutoResize)){
@@ -1519,14 +1596,12 @@ uiImportPrefabPopup(void)
 		if(numPrefabFiles > 0){
 			ImGui::Text("Available prefabs:");
 			ImGui::BeginChild("PrefabList", ImVec2(350, 150), true);
-			for(int i = 0; i < numPrefabFiles; i++){
+			for(int i = 0; i < numPrefabFiles; i++)
 				if(ImGui::Selectable(prefabFiles[i], selectedFile == i))
 					selectedFile = i;
-			}
 			ImGui::EndChild();
-		}else{
-			ImGui::TextDisabled("No .ariane files found in prefabs/");
-		}
+		}else
+			ImGui::TextDisabled("No .ariane files found in ariane/prefabs/ or prefabs/");
 
 		ImGui::Separator();
 		ImGui::InputText("Or path", manualPath, sizeof(manualPath));
@@ -1537,7 +1612,7 @@ uiImportPrefabPopup(void)
 			if(manualPath[0] != '\0')
 				strncpy(path, manualPath, sizeof(path));
 			else
-				snprintf(path, sizeof(path), "prefabs/%s", prefabFiles[selectedFile]);
+				strncpy(path, prefabPaths[selectedFile], sizeof(path));
 			path[sizeof(path)-1] = '\0';
 
 			int imported = ImportPrefab(path);
@@ -1591,6 +1666,19 @@ uiHelpWindow(void)
 	ImGui::BulletText("B: Toggle Object Browser\n"
 		"Click in 3D view to place selected object.\n"
 		"RMB or Escape to exit place mode.");
+	ImGui::Separator();
+	if(ImGui::CollapsingHeader("Privacy & Telemetry")){
+		bool telemetryEnabled = TelemetryIsEnabled();
+		if(ImGui::Checkbox("Anonymous telemetry", &telemetryEnabled)){
+			TelemetrySetEnabled(telemetryEnabled);
+			if(telemetryEnabled){
+				TelemetrySendPing();
+				Toast(TOAST_SAVE, "Anonymous telemetry enabled");
+			}else
+				Toast(TOAST_SAVE, "Anonymous telemetry disabled");
+		}
+		ImGui::TextDisabled("Enabled by default. Disable if you do not want usage pings.");
+	}
 
 	if(ImGui::CollapsingHeader("Dear ImGUI help")){
 		ImGui::ShowUserGuide();
@@ -2354,7 +2442,7 @@ loadCamSettings(void)
 	char line[256], *p, *pp;
 	FILE *f;
 
-	f = fopen("camsettings.txt", "r");
+	f = fopenArianeDataRead("camsettings.txt", "camsettings.txt");
 	if(f == nil)
 		return;
 	camSettings.clear();
@@ -2402,7 +2490,7 @@ loadSaveSettings(void)
 	gAutomaticBackupLastHandledSeq = gAutomaticBackupLastSeenSeq;
 	gAutomaticBackupLastSnapshot[0] = '\0';
 
-	f = fopen("savesettings.txt", "r");
+	f = fopenArianeDataRead("savesettings.txt", "savesettings.txt");
 	if(f == nil)
 		return;
 
@@ -2431,7 +2519,7 @@ saveCamSettings(void)
 {
 	FILE *f;
 
-	f = fopen("camsettings.txt", "w");
+	f = fopenArianeDataWrite("camsettings.txt");
 	if(f == nil)
 		return;
 
@@ -2455,7 +2543,7 @@ saveSaveSettings(void)
 	FILE *f;
 
 	sanitizeAutomaticBackupSettings();
-	f = fopen("savesettings.txt", "w");
+	f = fopenArianeDataWrite("savesettings.txt");
 	if(f == nil)
 		return;
 
@@ -2757,8 +2845,8 @@ uiToolsWindow(void)
 	if(ImGui::Button("Create Backup Now"))
 		runAutomaticBackup(true);
 
-	ImGui::End();
-}
+		ImGui::End();
+	}
 
 static void
 uiInstWindow(void)
