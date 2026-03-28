@@ -738,7 +738,25 @@ QuatFromMatrix(const rw::Matrix &matrix)
 	q.x = -q.x;
 	q.y = -q.y;
 	q.z = -q.z;
+	float lenSq = q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w;
+	if(lenSq < 0.00000001f)
+		return { 0.0f, 0.0f, 0.0f, 1.0f };
+	float invLen = 1.0f / sqrtf(lenSq);
+	q.x *= invLen;
+	q.y *= invLen;
+	q.z *= invLen;
+	q.w *= invLen;
 	return q;
+}
+
+static rw::Quat
+NormalizeQuatOrIdentity(const rw::Quat &q)
+{
+	float lenSq = q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w;
+	if(lenSq < 0.00000001f)
+		return { 0.0f, 0.0f, 0.0f, 1.0f };
+	float invLen = 1.0f / sqrtf(lenSq);
+	return { q.x * invLen, q.y * invLen, q.z * invLen, q.w * invLen };
 }
 
 static rw::V3d
@@ -1334,10 +1352,10 @@ dogizmo(void)
 	// Capture start state when drag begins
 	if(isUsing && !wasDragging){
 		dragStartLeaderPos = inst->m_translation;
-		dragStartLeaderRot = inst->m_rotation;
+		dragStartLeaderRot = NormalizeQuatOrIdentity(inst->m_rotation);
 		dragStartFollowGround = gGizmoMode == GIZMO_TRANSLATE && gDragFollowGround;
 		dragStartAlignToSurface = dragStartFollowGround && gDragAlignToSurface;
-		dragGroundBaseRot = inst->m_rotation;
+		dragGroundBaseRot = dragStartLeaderRot;
 		dragGroundOffset = 0.0f;
 		if(dragStartFollowGround){
 			rw::V3d hitPos, hitNormal;
@@ -1467,7 +1485,7 @@ dogizmo(void)
 			rw::Quat newLeaderRot = QuatFromMatrix(inst->m_matrix);
 
 			// Compute rotation delta: the rotation that transforms startRot into newRot
-			rw::Quat deltaQ = rw::mult(newLeaderRot, rw::conj(dragStartLeaderRot));
+			rw::Quat deltaQ = NormalizeQuatOrIdentity(rw::mult(newLeaderRot, rw::conj(dragStartLeaderRot)));
 
 			// Apply to all affected objects: orbit positions around leader, compose rotations.
 			// conj(deltaQ) converts from stored-quaternion space to world space;
@@ -1478,7 +1496,7 @@ dogizmo(void)
 				ObjectInst *obj = dragTransforms[i].inst;
 				rw::V3d offset = sub(dragTransforms[i].oldPos, dragStartLeaderPos);
 				obj->m_translation = add(dragStartLeaderPos, rw::rotate(offset, worldQ));
-				obj->m_rotation = rw::mult(dragTransforms[i].oldRot, deltaQ);
+				obj->m_rotation = NormalizeQuatOrIdentity(rw::mult(dragTransforms[i].oldRot, deltaQ));
 				obj->m_isDirty = true;
 				obj->UpdateMatrix();
 				updateRwFrame(obj);
