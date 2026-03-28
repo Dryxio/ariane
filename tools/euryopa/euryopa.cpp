@@ -591,7 +591,7 @@ IntersectRayColModelDetailed(const Ray &worldRay, ObjectInst *inst, rw::V3d *hit
 	return true;
 }
 
-static bool
+bool
 IntersectRayColModel(const Ray &worldRay, ObjectInst *inst, rw::V3d *hitPos)
 {
 	return IntersectRayColModelDetailed(worldRay, inst, hitPos, nil);
@@ -1023,7 +1023,7 @@ SnapSelectedToGround(bool alignRotation)
 	return snapped;
 }
 
-static rw::V3d
+rw::V3d
 GetPlacementPosition(void)
 {
 	rw::V3d origin = TheCamera.m_position;

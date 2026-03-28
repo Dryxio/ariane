@@ -93,6 +93,7 @@ SphereIntersect(const CSphere &sph, const Ray &ray)
 }
 bool IntersectRayTriangle(const Ray &ray, rw::V3d a, rw::V3d b, rw::V3d c, float *t);
 bool IntersectRaySphere(const Ray &ray, const CSphere &sphere, float *t);
+bool IntersectRayColModel(const Ray &worldRay, ObjectInst *inst, rw::V3d *hitPos);
 
 //
 // Options
@@ -417,9 +418,11 @@ void SpawnPlaceObject(rw::V3d position);
 void SpawnExitPlaceMode(void);
 int GetSpawnObjectId(void);
 void SetSpawnObjectId(int id);
+void SetCustomPlacementIpl(const char *logicalPath, const char *sourcePath, bool addToDat);
 int GetLodForObject(int id);
 int SnapSelectedToGround(bool alignRotation);
 bool GetGroundPlacementSurface(rw::V3d pos, rw::V3d *hitPos, rw::V3d *hitNormal = nil, bool ignoreSelection = false);
+rw::V3d GetPlacementPosition(void);
 
 // Object Browser categories & favourites
 void InitObjectCategories(void);
@@ -434,6 +437,7 @@ void InitPreviewRenderer(void);
 void ShutdownPreviewRenderer(void);
 void RenderPreviewObject(int objectId);
 extern rw::Texture *gPreviewTexture;
+void HandleCustomImportDrop(const char *path);
 
 // Game Data structures
 
@@ -649,6 +653,7 @@ struct ObjectInst
 extern CPtrList instances;
 extern CPtrList selection;
 ObjectInst *GetInstanceByID(int32 id);
+int32 pick(void);
 ObjectInst *AddInstance(void);
 void ClearSelection(void);
 void DeleteSelected(void);
@@ -993,7 +998,7 @@ namespace WaterLevel
 	void WeldCoincidentVertices(int vertexIndex, rw::V3d oldPos);
 	void EnterCreateMode(void);
 	void CancelCreateMode(void);
-	int PickWaterPoly(Ray ray);
+	int PickWaterPoly(Ray ray, float *hitT = nil);
 	void SelectWaterPoly(int type, int index);
 	void DeleteSelectedWaterPolys(void);
 	void DuplicateSelectedWaterPolys(void);

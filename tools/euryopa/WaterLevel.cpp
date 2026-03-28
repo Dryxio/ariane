@@ -821,7 +821,7 @@ SnapToGrid(rw::V3d pos)
 //
 
 int
-PickWaterPoly(Ray ray)
+PickWaterPoly(Ray ray, float *hitT)
 {
 	float bestT = 1.0e30f;
 	int bestPoly = INT_MIN;
@@ -856,6 +856,8 @@ PickWaterPoly(Ray ray)
 			bestPoly = -(i + 1);
 		}
 	}
+	if(hitT)
+		*hitT = bestT;
 	return bestPoly;
 }
 
