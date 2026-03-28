@@ -1,5 +1,6 @@
 #include "euryopa.h"
 #include "modloader.h"
+#include <limits.h>
 
 int gameversion;
 int gameplatform;
@@ -397,7 +398,7 @@ GetColVertex(CColModel *col, int idx)
 	return col->vertices[idx];
 }
 
-static bool
+bool
 IntersectRaySphere(const Ray &ray, const CSphere &sphere, float *t)
 {
 	rw::V3d diff = sub(ray.start, sphere.center);
@@ -489,7 +490,7 @@ GetBoxHitNormal(const Ray &ray, const CBox &box, float t)
 	return normal;
 }
 
-static bool
+bool
 IntersectRayTriangle(const Ray &ray, rw::V3d a, rw::V3d b, rw::V3d c, float *t)
 {
 	const float eps = 0.0001f;
@@ -1056,6 +1057,12 @@ handleTool(void)
 	if(io.WantCaptureMouse)
 		return;
 
+	// Water edit mode intercepts all clicks
+	if(WaterLevel::gWaterEditMode){
+		WaterLevel::HandleWaterTool();
+		return;
+	}
+
 	// Place mode intercepts all clicks
 	if(gPlaceMode){
 		if(CPad::IsMButtonClicked(1)){
@@ -1264,6 +1271,12 @@ dogizmo(void)
 
 	if(!gGizmoEnabled)
 		return;
+
+	if(WaterLevel::gWaterEditMode){
+		WaterLevel::DoWaterGizmo();
+		return;
+	}
+
 	if(!selection.first)
 		return;
 
@@ -1611,6 +1624,8 @@ Draw(void)
 		Path::RenderCarPaths();
 	if(gRenderEffects)
 		Effects::Render();
+	if(WaterLevel::gWaterEditMode)
+		WaterLevel::RenderEditOverlay();
 
 	rw::SetRenderState(rw::ALPHATESTFUNC, rw::ALPHAALWAYS);	// don't mess up GUI
 	// This fucks up the z buffer, but what else can we do?

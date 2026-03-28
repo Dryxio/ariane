@@ -91,6 +91,8 @@ SphereIntersect(const CSphere &sph, const Ray &ray)
 	float discr = sq(b) - 4*a*c;
 	return discr > 0.0f;
 }
+bool IntersectRayTriangle(const Ray &ray, rw::V3d a, rw::V3d b, rw::V3d c, float *t);
+bool IntersectRaySphere(const Ray &ray, const CSphere &sphere, float *t);
 
 //
 // Options
@@ -945,8 +947,71 @@ void RenderPostFX(void);
 
 namespace WaterLevel
 {
+	struct WaterVertex {
+		rw::V3d pos;
+		rw::V2d speed;
+		float waveunk, waveheight;
+	};
+	struct WaterQuad {
+		int indices[4];
+		int flags;	// bit 0: visible, bit 1: limited depth
+	};
+	struct WaterTri {
+		int indices[3];
+		int flags;
+	};
+
 	void Initialise(void);
 	void Render(void);
+
+	// Editor state
+	extern bool gWaterEditMode;
+	extern int gWaterSubMode;	// 0=polygon, 1=vertex
+	extern bool gWaterDirty;
+	extern int gWaterCreateMode;	// 0=off, 1..N=placing corners
+	extern int gWaterCreateShape;	// 0=quad, 1=triangle
+	extern float gWaterCreateZ;
+	extern bool gWaterSnapEnabled;
+	extern float gWaterSnapSize;
+
+	// Accessor API
+	int GetNumQuads(void);
+	int GetNumTris(void);
+	int GetNumVertices(void);
+	WaterVertex *GetVertex(int i);
+	WaterQuad *GetQuad(int i);
+	WaterTri *GetTri(int i);
+
+	// Editor functions
+	void HandleWaterTool(void);
+	void DoWaterGizmo(void);
+	void RenderEditOverlay(void);
+	bool SaveWater(void);
+	void ClearWaterPolySelection(void);
+	void ClearWaterVertexSelection(void);
+	void ClearWaterSelection(void);
+	void WeldCoincidentVertices(int vertexIndex, rw::V3d oldPos);
+	void EnterCreateMode(void);
+	void CancelCreateMode(void);
+	int PickWaterPoly(Ray ray);
+	void SelectWaterPoly(int type, int index);
+	void DeleteSelectedWaterPolys(void);
+	void DuplicateSelectedWaterPolys(void);
+	void ReloadWater(void);
+
+	// Undo/Redo
+	void WaterUndoPush(void);
+	void WaterUndo(void);
+	void WaterRedo(void);
+	bool WaterCanUndo(void);
+	bool WaterCanRedo(void);
+
+	// Selection queries for gui
+	int GetNumSelectedPolys(void);
+	int GetNumSelectedVertices(void);
+	int GetSelectedPolyType(int sel);	// 0=quad, 1=tri
+	int GetSelectedPolyIndex(int sel);
+	int GetSelectedVertexIndex(int sel);
 };
 
 namespace Clouds

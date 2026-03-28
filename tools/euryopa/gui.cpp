@@ -1837,6 +1837,17 @@ uiView(void)
 
 
 	ImGui::Checkbox("Draw Water", &gRenderWater);
+	if(params.water == GAME_SA){
+		ImGui::SameLine();
+		if(ImGui::Button("Edit Water (H)")){
+			if(!WaterLevel::gWaterEditMode){
+				WaterLevel::gWaterEditMode = true;
+				ClearSelection();
+				if(gPlaceMode)
+					SpawnExitPlaceMode();
+			}
+		}
+	}
 	if(gameversion == GAME_SA)
 		ImGui::Checkbox("Play Animations", &gPlayAnimations);
 
@@ -2848,6 +2859,273 @@ uiToolsWindow(void)
 		ImGui::End();
 	}
 
+static bool waterPanelEditActive;
+
+static void
+waterPanelCheckUndoPush(void)
+{
+	if(ImGui::IsItemActivated() && !waterPanelEditActive){
+		WaterLevel::WaterUndoPush();
+		waterPanelEditActive = true;
+	}
+	if(!ImGui::IsAnyItemActive())
+		waterPanelEditActive = false;
+}
+
+static void
+uiWaterWindow(void)
+{
+	if(!ImGui::IsAnyItemActive())
+		waterPanelEditActive = false;
+
+	ImGui::Begin("Water Editor", nil);
+
+	// Creation mode UI
+	if(WaterLevel::gWaterCreateMode > 0){
+		const char *shapeName = WaterLevel::gWaterCreateShape == 0 ? "QUAD" : "TRIANGLE";
+		ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.4f, 1.0f), "CREATE %s", shapeName);
+		ImGui::Separator();
+		ImGui::DragFloat("Z Height", &WaterLevel::gWaterCreateZ, 0.5f);
+		const char *shapeNames[] = { "Quad (2 clicks)", "Triangle (3 clicks)" };
+		int prevShape = WaterLevel::gWaterCreateShape;
+		ImGui::Combo("Shape", &WaterLevel::gWaterCreateShape, shapeNames, 2);
+		if(WaterLevel::gWaterCreateShape != prevShape){
+			// Restart placement with new shape
+			WaterLevel::CancelCreateMode();
+			WaterLevel::EnterCreateMode();
+		}
+		ImGui::Checkbox("Snap to Grid", &WaterLevel::gWaterSnapEnabled);
+		if(WaterLevel::gWaterSnapEnabled){
+			ImGui::SameLine();
+			ImGui::SetNextItemWidth(60);
+			ImGui::DragFloat("##SnapSize", &WaterLevel::gWaterSnapSize, 1.0f, 1.0f, 100.0f, "%.0f");
+		}
+		ImGui::Separator();
+		int neededCorners = WaterLevel::gWaterCreateShape == 0 ? 2 : 3;
+		ImGui::Text("Click corner %d of %d", WaterLevel::gWaterCreateMode, neededCorners);
+		ImGui::Text("Shift+click: keep creating after placement");
+		ImGui::Text("Right-click or Esc: cancel");
+		ImGui::Separator();
+		ImGui::Text("Quads: %d/%d  Tris: %d/%d  Verts: %d/%d",
+			WaterLevel::GetNumQuads(), NUMWATERQUADS,
+			WaterLevel::GetNumTris(), NUMWATERTRIS,
+			WaterLevel::GetNumVertices(), NUMWATERVERTICES);
+		ImGui::End();
+		return;
+	}
+
+	const char *modeName = WaterLevel::gWaterSubMode == 0 ? "Polygon" : "Vertex";
+	ImGui::Text("Mode: %s (Tab to switch)", modeName);
+	ImGui::Separator();
+
+	int numPolySel = WaterLevel::GetNumSelectedPolys();
+	int numVertSel = WaterLevel::GetNumSelectedVertices();
+
+	if(WaterLevel::gWaterSubMode == 0){
+		// Polygon mode
+		if(numPolySel == 0){
+			ImGui::Text("Click a water polygon to select it");
+			ImGui::Text("Shift+click: add, Ctrl+click: toggle");
+			ImGui::Text("N: create new quad");
+		}else if(numPolySel == 1){
+			int ptype = WaterLevel::GetSelectedPolyType(0);
+			int pidx = WaterLevel::GetSelectedPolyIndex(0);
+			const char *shapeName = ptype == 0 ? "Quad" : "Triangle";
+			ImGui::Text("Water %s #%d", shapeName, pidx);
+
+			// Flags
+			int *flagsPtr;
+			int numVerts;
+			int *indices;
+			if(ptype == 0){
+				WaterLevel::WaterQuad *q = WaterLevel::GetQuad(pidx);
+				flagsPtr = &q->flags;
+				numVerts = 4;
+				indices = q->indices;
+			}else{
+				WaterLevel::WaterTri *t = WaterLevel::GetTri(pidx);
+				flagsPtr = &t->flags;
+				numVerts = 3;
+				indices = t->indices;
+			}
+
+			bool visible = (*flagsPtr & 1) != 0;
+			bool limited = (*flagsPtr & 2) != 0;
+			if(ImGui::Checkbox("Visible", &visible)){
+				WaterLevel::WaterUndoPush();
+				*flagsPtr = (*flagsPtr & ~1) | (visible ? 1 : 0);
+				WaterLevel::gWaterDirty = true;
+			}
+			ImGui::SameLine();
+			if(ImGui::Checkbox("Limited Depth", &limited)){
+				WaterLevel::WaterUndoPush();
+				*flagsPtr = (*flagsPtr & ~2) | (limited ? 2 : 0);
+				WaterLevel::gWaterDirty = true;
+			}
+
+			ImGui::Separator();
+
+			// Per-vertex properties
+			for(int j = 0; j < numVerts; j++){
+				WaterLevel::WaterVertex *v = WaterLevel::GetVertex(indices[j]);
+				ImGui::PushID(j);
+				char label[32];
+				snprintf(label, sizeof(label), "Vertex %d", j);
+				if(ImGui::TreeNode(label)){
+					bool changed = false;
+					rw::V3d oldPos = v->pos;
+					changed |= ImGui::DragFloat3("Position", (float*)&v->pos, 0.1f);
+					waterPanelCheckUndoPush();
+					changed |= ImGui::DragFloat2("Flow", (float*)&v->speed, 0.01f);
+					waterPanelCheckUndoPush();
+					changed |= ImGui::DragFloat("Big waves", &v->waveunk, 0.01f);
+					waterPanelCheckUndoPush();
+					changed |= ImGui::DragFloat("Small waves", &v->waveheight, 0.01f);
+					waterPanelCheckUndoPush();
+					if(changed){
+						WaterLevel::WeldCoincidentVertices(indices[j], oldPos);
+						WaterLevel::gWaterDirty = true;
+					}
+					ImGui::TreePop();
+				}
+				ImGui::PopID();
+			}
+
+			ImGui::Separator();
+
+			// Flatten Z button
+			if(ImGui::Button("Flatten Z")){
+				WaterLevel::WaterUndoPush();
+				float avgZ = 0.0f;
+				for(int j = 0; j < numVerts; j++)
+					avgZ += WaterLevel::GetVertex(indices[j])->pos.z;
+				avgZ /= (float)numVerts;
+				for(int j = 0; j < numVerts; j++){
+					rw::V3d op = WaterLevel::GetVertex(indices[j])->pos;
+					WaterLevel::GetVertex(indices[j])->pos.z = avgZ;
+					WaterLevel::WeldCoincidentVertices(indices[j], op);
+				}
+				WaterLevel::gWaterDirty = true;
+			}
+
+			// Set Z
+			static float setZValue = 0.0f;
+			ImGui::SameLine();
+			ImGui::SetNextItemWidth(80);
+			ImGui::DragFloat("##SetZ", &setZValue, 0.1f);
+			ImGui::SameLine();
+			if(ImGui::Button("Set Z")){
+				WaterLevel::WaterUndoPush();
+				for(int j = 0; j < numVerts; j++){
+					rw::V3d op = WaterLevel::GetVertex(indices[j])->pos;
+					WaterLevel::GetVertex(indices[j])->pos.z = setZValue;
+					WaterLevel::WeldCoincidentVertices(indices[j], op);
+				}
+				WaterLevel::gWaterDirty = true;
+			}
+		}else{
+			// Multiple polygons selected
+			ImGui::Text("%d polygons selected", numPolySel);
+			ImGui::Separator();
+
+			// Bulk set Z
+			static float bulkZ = 0.0f;
+			ImGui::DragFloat("Z value", &bulkZ, 0.1f);
+			if(ImGui::Button("Set All Z")){
+				WaterLevel::WaterUndoPush();
+				for(int i = 0; i < numPolySel; i++){
+					int pt = WaterLevel::GetSelectedPolyType(i);
+					int pi = WaterLevel::GetSelectedPolyIndex(i);
+					int n; int *idx;
+					if(pt == 0){
+						n = 4; idx = WaterLevel::GetQuad(pi)->indices;
+					}else{
+						n = 3; idx = WaterLevel::GetTri(pi)->indices;
+					}
+					for(int j = 0; j < n; j++){
+						rw::V3d op = WaterLevel::GetVertex(idx[j])->pos;
+						WaterLevel::GetVertex(idx[j])->pos.z = bulkZ;
+						WaterLevel::WeldCoincidentVertices(idx[j], op);
+					}
+				}
+				WaterLevel::gWaterDirty = true;
+			}
+		}
+	}else{
+		// Vertex mode
+		if(numVertSel == 0){
+			ImGui::Text("Click a vertex to select it");
+			ImGui::Text("Shift+click: add, Ctrl+click: toggle");
+		}else if(numVertSel == 1){
+			int vi = WaterLevel::GetSelectedVertexIndex(0);
+			WaterLevel::WaterVertex *v = WaterLevel::GetVertex(vi);
+			ImGui::Text("Water Vertex #%d", vi);
+			ImGui::Separator();
+			bool changed = false;
+			rw::V3d oldPos = v->pos;
+			changed |= ImGui::DragFloat3("Position", (float*)&v->pos, 0.1f);
+			waterPanelCheckUndoPush();
+			changed |= ImGui::DragFloat2("Flow", (float*)&v->speed, 0.01f);
+			waterPanelCheckUndoPush();
+			changed |= ImGui::DragFloat("Big waves", &v->waveunk, 0.01f);
+			waterPanelCheckUndoPush();
+			changed |= ImGui::DragFloat("Small waves", &v->waveheight, 0.01f);
+			waterPanelCheckUndoPush();
+			if(changed){
+				WaterLevel::WeldCoincidentVertices(vi, oldPos);
+				WaterLevel::gWaterDirty = true;
+			}
+		}else{
+			ImGui::Text("%d vertices selected", numVertSel);
+			ImGui::Separator();
+			static float bulkZ = 0.0f;
+			ImGui::DragFloat("Z value", &bulkZ, 0.1f);
+			if(ImGui::Button("Set All Z")){
+				WaterLevel::WaterUndoPush();
+				for(int i = 0; i < numVertSel; i++){
+					int vi = WaterLevel::GetSelectedVertexIndex(i);
+					rw::V3d op = WaterLevel::GetVertex(vi)->pos;
+					WaterLevel::GetVertex(vi)->pos.z = bulkZ;
+					WaterLevel::WeldCoincidentVertices(vi, op);
+				}
+				WaterLevel::gWaterDirty = true;
+			}
+		}
+	}
+
+	ImGui::Separator();
+
+	// Tools
+	ImGui::Checkbox("Snap to Grid", &WaterLevel::gWaterSnapEnabled);
+	if(WaterLevel::gWaterSnapEnabled){
+		ImGui::SameLine();
+		ImGui::SetNextItemWidth(60);
+		ImGui::DragFloat("##SnapSz", &WaterLevel::gWaterSnapSize, 1.0f, 1.0f, 100.0f, "%.0f");
+	}
+
+	ImGui::Separator();
+
+	// Stats and actions
+	ImGui::Text("Quads: %d  Tris: %d  Verts: %d",
+		WaterLevel::GetNumQuads(), WaterLevel::GetNumTris(), WaterLevel::GetNumVertices());
+	if(WaterLevel::gWaterDirty)
+		ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Unsaved changes (Ctrl+S to save)");
+	if(WaterLevel::WaterCanUndo()) ImGui::SameLine();
+	if(WaterLevel::WaterCanUndo() && ImGui::SmallButton("Undo"))
+		WaterLevel::WaterUndo();
+	if(WaterLevel::WaterCanRedo()) ImGui::SameLine();
+	if(WaterLevel::WaterCanRedo() && ImGui::SmallButton("Redo"))
+		WaterLevel::WaterRedo();
+
+	if(ImGui::Button("Reload water.dat")){
+		WaterLevel::ReloadWater();
+		Toast(TOAST_SAVE, "Reloaded water.dat");
+	}
+
+	ImGui::End();
+
+}
+
 static void
 uiInstWindow(void)
 {
@@ -3341,23 +3619,34 @@ gui(void)
 	UpdaterDrawGui();
 	automaticBackupTick();
 
-	// Copy/Paste
-	if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('C')){
-		int before = 0;
-		for(CPtrNode *p = selection.first; p; p = p->next) before++;
-		CopySelected();
-		if(before > 0)
-			Toast(TOAST_COPY_PASTE, "Copied %d instance(s)", before);
+	// Ctrl+D duplicate in water mode
+	if(WaterLevel::gWaterEditMode && CPad::IsCtrlDown() && CPad::IsKeyJustDown('D')){
+		int count = WaterLevel::GetNumSelectedPolys();
+		if(count > 0){
+			WaterLevel::DuplicateSelectedWaterPolys();
+			Toast(TOAST_COPY_PASTE, "Duplicated %d water polygon(s)", count);
+		}
 	}
-	if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('V')){
-		int before = 0;
-		for(CPtrNode *p = instances.first; p; p = p->next) before++;
-		PasteClipboard();
-		int after = 0;
-		for(CPtrNode *p = instances.first; p; p = p->next) after++;
-		int pasted = after - before;
-		if(pasted > 0)
-			Toast(TOAST_COPY_PASTE, "Pasted %d instance(s)", pasted);
+
+	// Copy/Paste (not in water edit mode)
+	if(!WaterLevel::gWaterEditMode){
+		if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('C')){
+			int before = 0;
+			for(CPtrNode *p = selection.first; p; p = p->next) before++;
+			CopySelected();
+			if(before > 0)
+				Toast(TOAST_COPY_PASTE, "Copied %d instance(s)", before);
+		}
+		if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('V')){
+			int before = 0;
+			for(CPtrNode *p = instances.first; p; p = p->next) before++;
+			PasteClipboard();
+			int after = 0;
+			for(CPtrNode *p = instances.first; p; p = p->next) after++;
+			int pasted = after - before;
+			if(pasted > 0)
+				Toast(TOAST_COPY_PASTE, "Pasted %d instance(s)", pasted);
+		}
 	}
 
 	if(!CPad::IsCtrlDown() && CPad::IsKeyJustDown('C')) gUseViewerCam = !gUseViewerCam;
@@ -3371,34 +3660,65 @@ gui(void)
 		gOpenImportPrefab = true;
 	}
 
-	// Gizmo mode shortcuts
-	if(CPad::IsKeyJustDown('W')) gGizmoMode = GIZMO_TRANSLATE;
-	if(CPad::IsKeyJustDown('Q')) gGizmoMode = GIZMO_ROTATE;
+	// Gizmo mode shortcuts (not in water edit mode — water gizmo is always translate)
+	if(!WaterLevel::gWaterEditMode){
+		if(CPad::IsKeyJustDown('W')) gGizmoMode = GIZMO_TRANSLATE;
+		if(CPad::IsKeyJustDown('Q')) gGizmoMode = GIZMO_ROTATE;
+	}
 
-	// Delete selected instances
+	// Delete
 	if(CPad::IsKeyJustDown(KEY_DEL) || CPad::IsKeyJustDown(KEY_BACKSP)){
-		int count = 0;
-		for(CPtrNode *p = selection.first; p; p = p->next) count++;
-		if(count > 0){
-			DeleteSelected();
-			Toast(TOAST_DELETE, "Deleted %d instance(s)", count);
+		if(WaterLevel::gWaterEditMode){
+			int count = WaterLevel::GetNumSelectedPolys();
+			if(count > 0){
+				WaterLevel::DeleteSelectedWaterPolys();
+				Toast(TOAST_DELETE, "Deleted %d water polygon(s)", count);
+			}
+		}else{
+			int count = 0;
+			for(CPtrNode *p = selection.first; p; p = p->next) count++;
+			if(count > 0){
+				DeleteSelected();
+				Toast(TOAST_DELETE, "Deleted %d instance(s)", count);
+			}
 		}
 	}
 
 	// Undo/Redo
 	if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('Z')){
-		Undo();
-		Toast(TOAST_UNDO_REDO, "Undo");
+		if(WaterLevel::gWaterEditMode){
+			if(WaterLevel::WaterCanUndo()){
+				WaterLevel::WaterUndo();
+				Toast(TOAST_UNDO_REDO, "Water Undo");
+			}
+		}else{
+			Undo();
+			Toast(TOAST_UNDO_REDO, "Undo");
+		}
 	}
 	if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('Y')){
-		Redo();
-		Toast(TOAST_UNDO_REDO, "Redo");
+		if(WaterLevel::gWaterEditMode){
+			if(WaterLevel::WaterCanRedo()){
+				WaterLevel::WaterRedo();
+				Toast(TOAST_UNDO_REDO, "Water Redo");
+			}
+		}else{
+			Redo();
+			Toast(TOAST_UNDO_REDO, "Redo");
+		}
 	}
 
-	// Ctrl+S to save all IPLs
+	// Ctrl+S to save
 	if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('S')){
-		if(saveAllIpls())
-			Toast(TOAST_SAVE, "Saved all IPL files to %s", getSaveDestinationLabel());
+		if(WaterLevel::gWaterEditMode){
+			if(WaterLevel::gWaterDirty){
+				if(WaterLevel::SaveWater())
+					Toast(TOAST_SAVE, "Saved water.dat to %s", getSaveDestinationLabel());
+			}
+		}else{
+			if(saveAllIpls())
+				Toast(TOAST_SAVE, "Saved all IPL files to %s", getSaveDestinationLabel());
+		}
 	}
 
 	// Ctrl+G to test in game
@@ -3459,9 +3779,52 @@ gui(void)
 			SpawnExitPlaceMode();
 	}
 
-	// Escape exits place mode
-	if(CPad::IsKeyJustDown(KEY_ESC) && gPlaceMode)
-		SpawnExitPlaceMode();
+	// Escape: cancel creation, exit water mode, or exit place mode
+	if(CPad::IsKeyJustDown(KEY_ESC)){
+		if(WaterLevel::gWaterCreateMode > 0){
+			WaterLevel::CancelCreateMode();
+		}else if(WaterLevel::gWaterEditMode){
+			WaterLevel::gWaterEditMode = false;
+			WaterLevel::ClearWaterSelection();
+			WaterLevel::gWaterSubMode = 0;
+		}else if(gPlaceMode)
+			SpawnExitPlaceMode();
+	}
+
+	// H toggles water edit mode (SA only)
+	if(params.water == GAME_SA && CPad::IsKeyJustDown('H') && !CPad::IsCtrlDown()){
+		WaterLevel::gWaterEditMode = !WaterLevel::gWaterEditMode;
+		if(WaterLevel::gWaterEditMode){
+			ClearSelection();
+			if(gPlaceMode)
+				SpawnExitPlaceMode();
+		}else{
+			WaterLevel::CancelCreateMode();
+			WaterLevel::ClearWaterSelection();
+			WaterLevel::gWaterSubMode = 0;
+		}
+	}
+
+	// Tab switches water sub-mode (cancel creation first)
+	if(WaterLevel::gWaterEditMode && CPad::IsKeyJustDown(KEY_TAB)){
+		WaterLevel::CancelCreateMode();
+		if(WaterLevel::gWaterSubMode == 0){
+			WaterLevel::ClearWaterPolySelection();
+			WaterLevel::gWaterSubMode = 1;
+		}else{
+			WaterLevel::ClearWaterVertexSelection();
+			WaterLevel::gWaterSubMode = 0;
+		}
+	}
+
+	// N enters quad creation mode
+	if(WaterLevel::gWaterEditMode && !WaterLevel::gWaterCreateMode && CPad::IsKeyJustDown('N') && !CPad::IsCtrlDown()){
+		WaterLevel::EnterCreateMode();
+	}
+
+	// Water editor window
+	if(WaterLevel::gWaterEditMode)
+		uiWaterWindow();
 
 	if(showHelpWindow) uiHelpWindow();
 	if(showDemoWindow){
@@ -3485,6 +3848,49 @@ gui(void)
 				"PLACE: %s  [Click=Place | Shift+Click=Multi | RMB/Esc=Cancel]", obj->m_name);
 			ImGui::End();
 		}
+	}
+
+	// Water hover hint (when not in water edit mode, mouse over water)
+	if(!WaterLevel::gWaterEditMode && !gPlaceMode && params.water == GAME_SA){
+		ImGuiIO &hintIO = ImGui::GetIO();
+		if(!hintIO.WantCaptureMouse){
+			Ray ray;
+			ray.start = TheCamera.m_position;
+			ray.dir = normalize(TheCamera.m_mouseDir);
+			int hit = WaterLevel::PickWaterPoly(ray);
+			if(hit != INT_MIN){
+				ImGui::SetNextWindowPos(ImVec2(hintIO.MousePos.x + 15, hintIO.MousePos.y + 15));
+				ImGui::SetNextWindowBgAlpha(0.7f);
+				ImGui::Begin("##WaterHint", nil,
+					ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+					ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+					ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoInputs);
+				ImGui::TextColored(ImVec4(0.0f, 0.8f, 1.0f, 1.0f), "H - Edit Water");
+				ImGui::End();
+			}
+		}
+	}
+
+	// Water edit mode overlay
+	if(WaterLevel::gWaterEditMode){
+		ImGui::SetNextWindowPos(ImVec2(10, ImGui::GetIO().DisplaySize.y - 40));
+		ImGui::SetNextWindowBgAlpha(0.6f);
+		ImGui::Begin("##WaterMode", nil,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+			ImGuiWindowFlags_NoFocusOnAppearing);
+		if(WaterLevel::gWaterCreateMode > 0){
+			const char *shape = WaterLevel::gWaterCreateShape == 0 ? "QUAD" : "TRI";
+			int needed = WaterLevel::gWaterCreateShape == 0 ? 2 : 3;
+			ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.4f, 1.0f),
+				"CREATE %s [corner %d/%d] Z=%.1f | RMB/Esc:cancel | Shift+click:multi",
+				shape, WaterLevel::gWaterCreateMode, needed, WaterLevel::gWaterCreateZ);
+		}else{
+			const char *subMode = WaterLevel::gWaterSubMode == 0 ? "polygon" : "vertex";
+			ImGui::TextColored(ImVec4(0.0f, 0.8f, 1.0f, 1.0f),
+				"WATER [%s] | H:exit | Tab:mode | N:new | Del:delete | Ctrl+D:dup | Ctrl+Z/Y:undo | Ctrl+S:save", subMode);
+		}
+		ImGui::End();
 	}
 
 	uiToasts();
