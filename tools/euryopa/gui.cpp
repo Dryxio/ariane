@@ -1427,6 +1427,7 @@ struct CustomImportState
 	char txdSource[1024];
 	char colSource[1024];
 	bool hasCol;
+	bool preferAutoCol;
 	int objectId;
 	float drawDist;
 	ObjectDef previewObj;
@@ -1877,6 +1878,7 @@ clearCustomImportColSelection(void)
 {
 	gCustomImport.colSource[0] = '\0';
 	gCustomImport.hasCol = false;
+	gCustomImport.preferAutoCol = true;
 	clearCustomImportMessages();
 }
 
@@ -1890,6 +1892,7 @@ setCustomImportColPath(const char *path)
 	strncpy(gCustomImport.colSource, path, sizeof(gCustomImport.colSource)-1);
 	gCustomImport.colSource[sizeof(gCustomImport.colSource)-1] = '\0';
 	gCustomImport.hasCol = true;
+	gCustomImport.preferAutoCol = false;
 	clearCustomImportMessages();
 }
 
@@ -1905,7 +1908,8 @@ autofillCustomImportSiblingPaths(const char *baseName)
 		strncpy(gCustomImport.txdSource, txdPath, sizeof(gCustomImport.txdSource)-1);
 		gCustomImport.txdSource[sizeof(gCustomImport.txdSource)-1] = '\0';
 	}
-	if(buildSiblingPath(colPath, sizeof(colPath), gCustomImport.sourceDir, baseName, ".col") &&
+	if(!gCustomImport.preferAutoCol &&
+	   buildSiblingPath(colPath, sizeof(colPath), gCustomImport.sourceDir, baseName, ".col") &&
 	   doesFileExist(colPath))
 		setCustomImportColPath(colPath);
 }
@@ -1924,8 +1928,13 @@ setCustomImportDffPath(const char *path)
 		gCustomImport.sourceBase[sizeof(gCustomImport.sourceBase)-1] = '\0';
 		strncpy(gCustomImport.modelName, detectedBase, sizeof(gCustomImport.modelName)-1);
 		gCustomImport.modelName[sizeof(gCustomImport.modelName)-1] = '\0';
-		if(gCustomImport.txdName[0] == '\0')
-			strncpy(gCustomImport.txdName, detectedBase, sizeof(gCustomImport.txdName)-1);
+		gCustomImport.txdSource[0] = '\0';
+		strncpy(gCustomImport.txdName, detectedBase, sizeof(gCustomImport.txdName)-1);
+		gCustomImport.txdName[sizeof(gCustomImport.txdName)-1] = '\0';
+		if(!gCustomImport.preferAutoCol){
+			gCustomImport.colSource[0] = '\0';
+			gCustomImport.hasCol = false;
+		}
 		autofillCustomImportSiblingPaths(detectedBase);
 	}
 	clearCustomImportMessages();
@@ -2829,6 +2838,12 @@ uiCustomImportPopup(void)
 		ImGui::SameLine();
 		if(ImGui::SmallButton("Clear##CustomImportDff")){
 			gCustomImport.dffSource[0] = '\0';
+			gCustomImport.txdSource[0] = '\0';
+			gCustomImport.txdName[0] = '\0';
+			if(!gCustomImport.preferAutoCol){
+				gCustomImport.colSource[0] = '\0';
+				gCustomImport.hasCol = false;
+			}
 			clearCustomImportMessages();
 		}
 	}
@@ -2844,6 +2859,7 @@ uiCustomImportPopup(void)
 		ImGui::SameLine();
 		if(ImGui::SmallButton("Clear##CustomImportTxd")){
 			gCustomImport.txdSource[0] = '\0';
+			gCustomImport.txdName[0] = '\0';
 			clearCustomImportMessages();
 		}
 	}
