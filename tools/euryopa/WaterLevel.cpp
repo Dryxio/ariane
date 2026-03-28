@@ -31,6 +31,11 @@ int numWaterQuads;
 WaterTri waterTris[NUMWATERTRIS];
 int numWaterTris;
 
+// Game engine limits (what the game actually supports)
+#define SA_MAX_QUADS 301
+#define SA_MAX_TRIS 6
+#define SA_MAX_VERTICES 1021
+
 // Editor state
 bool gWaterEditMode;
 int gWaterSubMode;	// 0=polygon, 1=vertex
@@ -936,13 +941,15 @@ static int
 CreateWaterQuad(rw::V3d a, rw::V3d b)
 {
 	if(numWaterVertices + 4 > NUMWATERVERTICES){
-		log("CreateWaterQuad: vertex limit reached\n");
+		log("CreateWaterQuad: vertex array limit reached\n");
 		return -1;
 	}
 	if(numWaterQuads + 1 > NUMWATERQUADS){
-		log("CreateWaterQuad: quad limit reached\n");
+		log("CreateWaterQuad: quad array limit reached\n");
 		return -1;
 	}
+	if(numWaterQuads >= SA_MAX_QUADS)
+		log("WARNING: quad count will exceed game limit of %d\n", SA_MAX_QUADS);
 
 	// Build 4 corners (axis-aligned): SW, SE, NW, NE order
 	// a = one corner, b = opposite corner
@@ -979,13 +986,15 @@ static int
 CreateWaterTriangle(rw::V3d a, rw::V3d b, rw::V3d c)
 {
 	if(numWaterVertices + 3 > NUMWATERVERTICES){
-		log("CreateWaterTriangle: vertex limit reached\n");
+		log("CreateWaterTriangle: vertex array limit reached\n");
 		return -1;
 	}
 	if(numWaterTris + 1 > NUMWATERTRIS){
-		log("CreateWaterTriangle: tri limit reached\n");
+		log("CreateWaterTriangle: tri array limit reached\n");
 		return -1;
 	}
+	if(numWaterTris >= SA_MAX_TRIS)
+		log("WARNING: triangle count will exceed game limit of %d\n", SA_MAX_TRIS);
 
 	rw::V3d corners[3] = { SnapToGrid(a), SnapToGrid(b), SnapToGrid(c) };
 	const float snapDist = 2.0f;
@@ -1531,6 +1540,126 @@ DoWaterGizmo(void)
 // Save
 //
 
+//
+// Validation
+//
+
+static float
+ClampFlow(float v)
+{
+	// int8 fixed-point: range is -128/64 to 127/64 = -2.0 to 1.984375
+	if(v < -2.0f) v = -2.0f;
+	if(v > 1.984375f) v = 1.984375f;
+	return v;
+}
+
+static float
+ClampWave(float v)
+{
+	if(v < 0.0f) v = 0.0f;
+	if(v > 1.0f) v = 1.0f;
+	return v;
+}
+
+// Clamp all flow/wave values in the water data to valid ranges.
+static void
+ClampAllWaterValues(void)
+{
+	for(int i = 0; i < numWaterVertices; i++){
+		WaterVertex *v = &waterVertices[i];
+		v->speed.x = ClampFlow(v->speed.x);
+		v->speed.y = ClampFlow(v->speed.y);
+		v->waveunk = ClampWave(v->waveunk);
+		v->waveheight = ClampWave(v->waveheight);
+	}
+}
+
+// Check if a quad is too small (area < 1 square unit).
+static bool
+IsQuadDegenerate(WaterQuad *q)
+{
+	rw::V3d v0 = waterVertices[q->indices[0]].pos;
+	rw::V3d v1 = waterVertices[q->indices[1]].pos;
+	rw::V3d v2 = waterVertices[q->indices[2]].pos;
+	rw::V3d v3 = waterVertices[q->indices[3]].pos;
+	// Sum area of the two triangles forming the quad
+	rw::V3d cr1 = cross(sub(v1, v0), sub(v2, v0));
+	rw::V3d cr2 = cross(sub(v2, v1), sub(v3, v1));
+	float area = (length(cr1) + length(cr2)) * 0.5f;
+	return area < 1.0f;
+}
+
+// Check if a triangle is too small (area < 1 square unit).
+static bool
+IsTriDegenerate(WaterTri *t)
+{
+	rw::V3d a = waterVertices[t->indices[0]].pos;
+	rw::V3d b = waterVertices[t->indices[1]].pos;
+	rw::V3d c = waterVertices[t->indices[2]].pos;
+	rw::V3d ab = sub(b, a);
+	rw::V3d ac = sub(c, a);
+	rw::V3d cr = cross(ab, ac);
+	float area = length(cr) * 0.5f;
+	return area < 1.0f;
+}
+
+// Validate water data before save. Returns number of warnings, logs them.
+static int
+ValidateWaterData(void)
+{
+	int warnings = 0;
+
+	if(numWaterQuads > SA_MAX_QUADS){
+		log("WARNING: %d quads exceeds game limit of %d\n", numWaterQuads, SA_MAX_QUADS);
+		warnings++;
+	}
+	if(numWaterTris > SA_MAX_TRIS){
+		log("WARNING: %d triangles exceeds game limit of %d\n", numWaterTris, SA_MAX_TRIS);
+		warnings++;
+	}
+	// Count unique vertices by position (game deduplicates on load)
+	int uniqueVerts = 0;
+	{
+		static bool counted[NUMWATERVERTICES];
+		memset(counted, 0, sizeof(bool) * numWaterVertices);
+		const float eps = 0.01f;
+		for(int i = 0; i < numWaterVertices; i++){
+			if(counted[i]) continue;
+			uniqueVerts++;
+			rw::V3d p = waterVertices[i].pos;
+			for(int j = i + 1; j < numWaterVertices; j++){
+				if(!counted[j] &&
+				   fabs(waterVertices[j].pos.x - p.x) < eps &&
+				   fabs(waterVertices[j].pos.y - p.y) < eps &&
+				   fabs(waterVertices[j].pos.z - p.z) < eps)
+					counted[j] = true;
+			}
+		}
+	}
+	if(uniqueVerts > SA_MAX_VERTICES){
+		log("WARNING: %d unique vertices exceeds game limit of %d\n", uniqueVerts, SA_MAX_VERTICES);
+		warnings++;
+	}
+
+	int degQuads = 0, degTris = 0;
+	for(int i = 0; i < numWaterQuads; i++)
+		if(IsQuadDegenerate(&waterQuads[i]))
+			degQuads++;
+	for(int i = 0; i < numWaterTris; i++)
+		if(IsTriDegenerate(&waterTris[i]))
+			degTris++;
+	if(degQuads){
+		log("WARNING: %d quad(s) with area < 1 (too small)\n", degQuads);
+		warnings++;
+	}
+	if(degTris){
+		log("WARNING: %d triangle(s) with area < 1 (too small)\n", degTris);
+		warnings++;
+	}
+
+	return warnings;
+}
+
 static bool
 ReplacePathWater(const char *src, const char *dst)
 {
@@ -1544,6 +1673,27 @@ ReplacePathWater(const char *src, const char *dst)
 bool
 SaveWater(void)
 {
+	// Validate before writing
+	int warnings = ValidateWaterData();
+	if(warnings > 0)
+		log("SaveWater: %d validation warning(s)\n", warnings);
+
+	// Clamp out-of-range values (push undo first since this mutates data)
+	bool needsClamp = false;
+	for(int i = 0; i < numWaterVertices && !needsClamp; i++){
+		WaterVertex *v = &waterVertices[i];
+		if(v->speed.x < -2.0f || v->speed.x > 1.984375f ||
+		   v->speed.y < -2.0f || v->speed.y > 1.984375f ||
+		   v->waveunk < 0.0f || v->waveunk > 1.0f ||
+		   v->waveheight < 0.0f || v->waveheight > 1.0f)
+			needsClamp = true;
+	}
+	if(needsClamp){
+		WaterUndoPush();
+		ClampAllWaterValues();
+		log("SaveWater: clamped out-of-range flow/wave values\n");
+	}
+
 	char finalPath[1024];
 	const char *logicalPath = "data/water.dat";
 

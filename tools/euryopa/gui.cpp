@@ -2976,11 +2976,11 @@ uiWaterWindow(void)
 					rw::V3d oldPos = v->pos;
 					changed |= ImGui::DragFloat3("Position", (float*)&v->pos, 0.1f);
 					waterPanelCheckUndoPush();
-					changed |= ImGui::DragFloat2("Flow", (float*)&v->speed, 0.01f);
+					changed |= ImGui::DragFloat2("Flow", (float*)&v->speed, 0.01f, -2.0f, 1.984375f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
 					waterPanelCheckUndoPush();
-					changed |= ImGui::DragFloat("Big waves", &v->waveunk, 0.01f);
+					changed |= ImGui::DragFloat("Big waves", &v->waveunk, 0.01f, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
 					waterPanelCheckUndoPush();
-					changed |= ImGui::DragFloat("Small waves", &v->waveheight, 0.01f);
+					changed |= ImGui::DragFloat("Small waves", &v->waveheight, 0.01f, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
 					waterPanelCheckUndoPush();
 					if(changed){
 						WaterLevel::WeldCoincidentVertices(indices[j], oldPos);
@@ -3065,11 +3065,11 @@ uiWaterWindow(void)
 			rw::V3d oldPos = v->pos;
 			changed |= ImGui::DragFloat3("Position", (float*)&v->pos, 0.1f);
 			waterPanelCheckUndoPush();
-			changed |= ImGui::DragFloat2("Flow", (float*)&v->speed, 0.01f);
+			changed |= ImGui::DragFloat2("Flow", (float*)&v->speed, 0.01f, -2.0f, 1.984375f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
 			waterPanelCheckUndoPush();
-			changed |= ImGui::DragFloat("Big waves", &v->waveunk, 0.01f);
+			changed |= ImGui::DragFloat("Big waves", &v->waveunk, 0.01f, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
 			waterPanelCheckUndoPush();
-			changed |= ImGui::DragFloat("Small waves", &v->waveheight, 0.01f);
+			changed |= ImGui::DragFloat("Small waves", &v->waveheight, 0.01f, 0.0f, 1.0f, "%.3f", ImGuiSliderFlags_AlwaysClamp);
 			waterPanelCheckUndoPush();
 			if(changed){
 				WaterLevel::WeldCoincidentVertices(vi, oldPos);
@@ -3106,8 +3106,11 @@ uiWaterWindow(void)
 	ImGui::Separator();
 
 	// Stats and actions
-	ImGui::Text("Quads: %d  Tris: %d  Verts: %d",
-		WaterLevel::GetNumQuads(), WaterLevel::GetNumTris(), WaterLevel::GetNumVertices());
+	int nq = WaterLevel::GetNumQuads(), nt = WaterLevel::GetNumTris(), nv = WaterLevel::GetNumVertices();
+	ImGui::Text("Quads: %d/301  Tris: %d/6  Verts: %d", nq, nt, nv);
+	if(nq > 301 || nt > 6)
+		ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Exceeds game polygon limits!");
+	ImGui::TextDisabled("Unique vertex limit (1021) checked on save");
 	if(WaterLevel::gWaterDirty)
 		ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Unsaved changes (Ctrl+S to save)");
 	if(WaterLevel::WaterCanUndo()) ImGui::SameLine();
