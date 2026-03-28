@@ -1,5 +1,6 @@
 #include "euryopa.h"
 #include "lod_associations.h"
+#include "modloader.h"
 #include "object_categories.h"
 
 CPtrList instances;
@@ -286,7 +287,12 @@ DeleteSelected(void)
 bool gPlaceMode;
 static int spawnObjectId = -1;
 static GameFile *customIplFile = nil;
-static const char *CUSTOM_IPL_PATH = "data\\maps\\custom.ipl";
+static const char *DEFAULT_CUSTOM_IPL_PATH = "data\\maps\\custom.ipl";
+static const char *CUSTOM_IMPORT_IDE_PATH = "data/maps/ariane/custom.ide";
+static const char *CUSTOM_IMPORT_IPL_PATH = "data/maps/ariane/custom.ipl";
+static char currentCustomIplPath[256] = "data\\maps\\custom.ipl";
+static char currentCustomIplSourcePath[1024];
+static bool currentCustomIplAppendToDat = true;
 
 #define LOD_LOOKUP_SIZE 20000
 static int lodLookup[LOD_LOOKUP_SIZE];
@@ -310,10 +316,68 @@ GetSpawnObjectId(void)
 	return spawnObjectId;
 }
 
+static bool
+pathsEqualCiNormalized(const char *a, const char *b)
+{
+	if(a == nil || b == nil)
+		return false;
+	while(*a || *b){
+		char ca = *a++;
+		char cb = *b++;
+		if(ca == '\\') ca = '/';
+		if(cb == '\\') cb = '/';
+		if(ca >= 'A' && ca <= 'Z') ca = ca - 'A' + 'a';
+		if(cb >= 'A' && cb <= 'Z') cb = cb - 'A' + 'a';
+		if(ca != cb)
+			return false;
+	}
+	return true;
+}
+
+void
+SetCustomPlacementIpl(const char *logicalPath, const char *sourcePath, bool addToDat)
+{
+	char normalizedLogical[256];
+	char resolvedSource[1024];
+
+	if(logicalPath == nil || logicalPath[0] == '\0')
+		logicalPath = DEFAULT_CUSTOM_IPL_PATH;
+
+	strncpy(normalizedLogical, logicalPath, sizeof(normalizedLogical)-1);
+	normalizedLogical[sizeof(normalizedLogical)-1] = '\0';
+	for(char *p = normalizedLogical; *p; p++)
+		if(*p == '/')
+			*p = '\\';
+
+	resolvedSource[0] = '\0';
+	if(sourcePath && sourcePath[0]){
+		strncpy(resolvedSource, sourcePath, sizeof(resolvedSource)-1);
+		resolvedSource[sizeof(resolvedSource)-1] = '\0';
+	}else if(!addToDat){
+		BuildModloaderLogicalExportPath(logicalPath, resolvedSource, sizeof(resolvedSource));
+	}
+
+	bool sameLogical = strcmp(currentCustomIplPath, normalizedLogical) == 0;
+	bool sameSource = strcmp(currentCustomIplSourcePath, resolvedSource) == 0;
+	if(!sameLogical || !sameSource || currentCustomIplAppendToDat != addToDat)
+		customIplFile = nil;
+
+	strncpy(currentCustomIplPath, normalizedLogical, sizeof(currentCustomIplPath)-1);
+	currentCustomIplPath[sizeof(currentCustomIplPath)-1] = '\0';
+	strncpy(currentCustomIplSourcePath, resolvedSource, sizeof(currentCustomIplSourcePath)-1);
+	currentCustomIplSourcePath[sizeof(currentCustomIplSourcePath)-1] = '\0';
+	currentCustomIplAppendToDat = addToDat;
+}
+
 void
 SetSpawnObjectId(int id)
 {
 	spawnObjectId = id;
+	ObjectDef *obj = GetObjectDef(id);
+	if(obj && obj->m_file && pathsEqualCiNormalized(obj->m_file->name, CUSTOM_IMPORT_IDE_PATH))
+		SetCustomPlacementIpl(CUSTOM_IMPORT_IPL_PATH, nil, false);
+	else
+		SetCustomPlacementIpl(DEFAULT_CUSTOM_IPL_PATH, nil, true);
 }
 
 int
@@ -390,9 +454,15 @@ GetOrCreateCustomIplFile(void)
 	if(customIplFile)
 		return customIplFile;
 	char path[256];
-	strncpy(path, CUSTOM_IPL_PATH, sizeof(path));
+	strncpy(path, currentCustomIplPath, sizeof(path));
+	path[sizeof(path)-1] = '\0';
 	customIplFile = NewGameFile(path);
-	AppendIplToDat(CUSTOM_IPL_PATH);
+	if(currentCustomIplSourcePath[0]){
+		free(customIplFile->sourcePath);
+		customIplFile->sourcePath = strdup(currentCustomIplSourcePath);
+	}
+	if(currentCustomIplAppendToDat)
+		AppendIplToDat(currentCustomIplPath);
 	return customIplFile;
 }
 

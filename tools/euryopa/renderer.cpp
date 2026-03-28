@@ -18,6 +18,61 @@ static uint16 currentScanCode;
 
 static rw::ObjPipeline *colourCodePipe;
 
+static ObjectInst*
+findClosestRayHitInVisibleList(const std::vector<ObjectInst*> &insts, const Ray &ray,
+	rw::V3d *bestHit, float *bestT)
+{
+	ObjectInst *bestInst = nil;
+
+	for(ObjectInst *inst : insts){
+		ObjectDef *obj = GetObjectDef(inst->m_objectId);
+		if(obj == nil || obj->m_colModel == nil)
+			continue;
+
+		rw::V3d hitPos;
+		if(!IntersectRayColModel(ray, inst, &hitPos))
+			continue;
+
+		float t = dot(sub(hitPos, ray.start), ray.dir);
+		if(t < 0.0f || t >= *bestT)
+			continue;
+
+		*bestT = t;
+		*bestHit = hitPos;
+		bestInst = inst;
+	}
+
+	return bestInst;
+}
+
+static ObjectInst*
+findClosestRayHitInSortedList(const std::vector<InstDist> &insts, const Ray &ray,
+	rw::V3d *bestHit, float *bestT)
+{
+	ObjectInst *bestInst = nil;
+
+	for(const InstDist &entry : insts){
+		ObjectInst *inst = entry.inst;
+		ObjectDef *obj = GetObjectDef(inst->m_objectId);
+		if(obj == nil || obj->m_colModel == nil)
+			continue;
+
+		rw::V3d hitPos;
+		if(!IntersectRayColModel(ray, inst, &hitPos))
+			continue;
+
+		float t = dot(sub(hitPos, ray.start), ray.dir);
+		if(t < 0.0f || t >= *bestT)
+			continue;
+
+		*bestT = t;
+		*bestHit = hitPos;
+		bestInst = inst;
+	}
+
+	return bestInst;
+}
+
 enum Visibility
 {
 	VIS_INVISIBLE,
@@ -573,6 +628,26 @@ RenderEverything(void)
 {
 	RenderOpaque();
 	RenderTransparent();
+}
+
+ObjectInst*
+GetVisibleInstUnderRay(const Ray &ray, rw::V3d *hitPos, float *hitT)
+{
+	float bestT = 1.0e30f;
+	rw::V3d bestHit = { 0.0f, 0.0f, 0.0f };
+	ObjectInst *bestInst = findClosestRayHitInVisibleList(visibleInsts, ray, &bestHit, &bestT);
+
+	ObjectInst *sortedHit = findClosestRayHitInSortedList(sortedInsts, ray, &bestHit, &bestT);
+	if(sortedHit)
+		bestInst = sortedHit;
+
+	if(bestInst == nil)
+		return nil;
+	if(hitPos)
+		*hitPos = bestHit;
+	if(hitT)
+		*hitT = bestT;
+	return bestInst;
 }
 
 static void

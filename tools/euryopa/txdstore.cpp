@@ -45,6 +45,33 @@ AddTxdSlot(const char *name)
 }
 
 bool
+RemoveTxdSlot(int i)
+{
+	if(i < 0 || i >= numTxds)
+		return false;
+	if(i != numTxds-1){
+		log("warning: refusing to remove non-tail TXD slot %d (%s)\n", i, txdlist[i].name);
+		return false;
+	}
+
+	TxdDef *td = &txdlist[i];
+	if(td->txd){
+		if(rw::TexDictionary::getCurrent() == td->txd)
+			rw::TexDictionary::setCurrent(defaultTxd);
+		if(pushedTxd == td->txd)
+			pushedTxd = defaultTxd;
+		td->txd->destroy();
+		td->txd = nil;
+	}
+
+	memset(td, 0, sizeof(*td));
+	td->parentId = -1;
+	td->imageIndex = -1;
+	numTxds--;
+	return true;
+}
+
+bool
 IsTxdLoaded(int i)
 {
 	TxdDef *td = GetTxdDef(i);

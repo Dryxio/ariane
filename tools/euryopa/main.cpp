@@ -666,7 +666,8 @@ AppEventHandler(sk::Event e, void *param)
 				Toast(TOAST_SPAWN, "Imported %d instance(s) from prefab", imported);
 			else
 				Toast(TOAST_SPAWN, "Failed to import prefab");
-		}
+		}else
+			HandleCustomImportDrop(path);
 		return EVENTPROCESSED;
 	}
 	case IDLE:

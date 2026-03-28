@@ -466,6 +466,7 @@ void RegisterTexStorePlugin(void);
 TxdDef *GetTxdDef(int i);
 int FindTxdSlot(const char *name);
 int AddTxdSlot(const char *name);
+bool RemoveTxdSlot(int i);
 void TxdPush(void);
 void TxdPop(void);
 bool IsTxdLoaded(int i);
@@ -576,6 +577,7 @@ struct ObjectDef
 	void SetFlags(int flags);
 };
 ObjectDef *AddObjectDef(int id);
+void RemoveObjectDef(int id);
 ObjectDef *GetObjectDef(int id);
 ObjectDef *GetObjectDef(const char *name, int *id);
 
@@ -932,6 +934,7 @@ void BuildRenderList(void);
 void RenderOpaque(void);
 void RenderTransparent(void);
 void RenderEverything(void);
+ObjectInst *GetVisibleInstUnderRay(const Ray &ray, rw::V3d *hitPos = nil, float *hitT = nil);
 
 // Debug Render
 void RenderLine(rw::V3d v1, rw::V3d v2, rw::RGBA c1, rw::RGBA c2);

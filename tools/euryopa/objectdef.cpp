@@ -3,6 +3,19 @@
 
 static ObjectDef *objdefs[NUMOBJECTDEFS];
 
+static void
+destroyDetachedAtomic(rw::Atomic *atomic)
+{
+	if(atomic == nil)
+		return;
+	rw::Frame *frame = atomic->getFrame();
+	if(frame){
+		atomic->setFrame(nil);
+		frame->destroyHierarchy();
+	}
+	atomic->destroy();
+}
+
 float
 ObjectDef::GetLargestDrawDist(void)
 {
@@ -369,6 +382,46 @@ AddObjectDef(int id)
 	objdefs[id] = obj;
 	obj->m_id = id;
 	return obj;
+}
+
+void
+RemoveObjectDef(int id)
+{
+	if(id < 0 || id >= NUMOBJECTDEFS)
+		return;
+	ObjectDef *obj = objdefs[id];
+	if(obj == nil)
+		return;
+
+	for(int i = 0; i < nelem(objdefs); i++){
+		ObjectDef *other = objdefs[i];
+		if(other == nil || other == obj)
+			continue;
+		if(other->m_relatedModel == obj)
+			other->m_relatedModel = nil;
+		if(other->m_relatedTimeModel == obj)
+			other->m_relatedTimeModel = nil;
+	}
+
+	if(obj->m_clump){
+		obj->m_clump->destroy();
+		obj->m_clump = nil;
+	}else{
+		for(int i = 0; i < nelem(obj->m_atomics); i++){
+			if(obj->m_atomics[i]){
+				destroyDetachedAtomic(obj->m_atomics[i]);
+				obj->m_atomics[i] = nil;
+			}
+		}
+	}
+
+	if(obj->m_colModel){
+		delete obj->m_colModel;
+		obj->m_colModel = nil;
+	}
+
+	delete obj;
+	objdefs[id] = nil;
 }
 
 ObjectDef*
