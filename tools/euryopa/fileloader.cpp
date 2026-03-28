@@ -30,6 +30,7 @@ NewGameFile(char *path)
 namespace FileLoader {
 
 GameFile *currentFile;
+void LoadObjectInstance(char *line);
 
 void*
 DatDesc::get(DatDesc *desc, const char *name)
@@ -84,9 +85,9 @@ LoadDataFile(const char *filename, DatDesc *desc)
 log("Loading data file %s\n", filename);
 	while(line = LoadLine(file)){
 		if(line[0] == '#'){
-			// Pass # lines to handler so inst section
-			// can count deleted placeholders
-			if(handler)
+			// Only inst sections need commented lines so deleted
+			// placeholders keep their original indices.
+			if(handler == LoadObjectInstance)
 				handler(line);
 			continue;
 		}
