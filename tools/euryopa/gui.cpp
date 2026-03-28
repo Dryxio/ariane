@@ -2868,7 +2868,7 @@ uiCustomImportPopup(void)
 	}else{
 		ImGui::TextDisabled("No COL selected. Collision will be auto-generated.");
 	}
-	ImGui::TextDisabled("Tip: you can also drag & drop .dff/.txd/.col files directly into the window.");
+	ImGui::TextDisabled("Tip: you can also drag & drop .dff/.txd/.col files anywhere in Ariane.");
 
 	ImGui::Separator();
 	ImGui::InputInt("Object ID", &gCustomImport.objectId);
