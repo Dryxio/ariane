@@ -23,6 +23,7 @@ rw::EngineOpenParams engineOpenParams;
 rw::Light *pAmbient, *pDirect;
 rw::Texture *whiteTex;
 static char gHotReloadTracePath[1024];
+static char gImGuiIniPath[1024];
 
 static bool
 EnsureDirectoryTree(const char *path)
@@ -133,6 +134,18 @@ BuildPath(char *dst, size_t size, const char *dir, const char *name)
 	const char *sep = (dir[len-1] == '/') ? "" : "/";
 #endif
 	return snprintf(dst, size, "%s%s%s", dir, sep, name) < (int)size;
+}
+
+static bool
+SetEditorWorkingDirectory(void)
+{
+#ifdef _WIN32
+	char rootDir[1024];
+	return GetEditorRootDirectory(rootDir, sizeof(rootDir)) &&
+	       SetCurrentDirectoryA(rootDir) != 0;
+#else
+	return true;
+#endif
 }
 
 bool
@@ -471,6 +484,9 @@ Init(void)
 	sk::globals.width = 1280;
 	sk::globals.height = 800;
 	sk::globals.quit = 0;
+
+	if(!SetEditorWorkingDirectory())
+		debug("warning: couldn't set working directory to editor root\n");
 }
 
 bool
@@ -584,6 +600,12 @@ InitRW(void)
 	Scene.world->addCamera(TheCamera.m_rwcam_viewer);
 
 	ImGui_ImplRW_Init();
+	char rootDir[1024];
+	if(GetEditorRootDirectory(rootDir, sizeof(rootDir)) &&
+	   BuildPath(gImGuiIniPath, sizeof(gImGuiIniPath), rootDir, "imgui.ini")){
+		ImGuiIO &io = ImGui::GetIO();
+		io.IniFilename = gImGuiIniPath;
+	}
 	ImGui::StyleColorsClassic();
 
 	RenderInit();
