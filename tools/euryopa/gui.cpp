@@ -1456,6 +1456,43 @@ pathFilename(const char *path)
 }
 
 static bool
+pathsEqualCiNormalized(const char *a, const char *b)
+{
+	if(a == nil || b == nil)
+		return false;
+	while(*a || *b){
+		char ca = *a++;
+		char cb = *b++;
+		if(ca == '\\') ca = '/';
+		if(cb == '\\') cb = '/';
+		if(ca >= 'A' && ca <= 'Z') ca = ca - 'A' + 'a';
+		if(cb >= 'A' && cb <= 'Z') cb = cb - 'A' + 'a';
+		if(ca != cb)
+			return false;
+	}
+	return true;
+}
+
+static bool
+pathContainsModloaderDir(const char *path)
+{
+	if(path == nil || path[0] == '\0')
+		return false;
+	char normalized[1024];
+	size_t i = 0;
+	for(; path[i] && i < sizeof(normalized)-1; i++){
+		char c = path[i];
+		if(c == '\\') c = '/';
+		if(c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+		normalized[i] = c;
+	}
+	normalized[i] = '\0';
+	return strstr(normalized, "/modloader/") != nil ||
+	       strcmp(normalized, "modloader") == 0 ||
+	       strncmp(normalized, "modloader/", 10) == 0;
+}
+
+static bool
 pickFileDialog(char *dst, size_t size, const char *expectedExt)
 {
 	if(dst == nil || size == 0)
@@ -2607,12 +2644,23 @@ finalizeCustomImport(void)
 	ModloaderInit();
 	const char *winningDff = ModloaderFindOverride(gCustomImport.modelName, "dff");
 	const char *winningTxd = ModloaderFindOverride(gCustomImport.txdName, "txd");
-	if(winningDff == nil || strcmp(winningDff, dffTarget) != 0 ||
-	   winningTxd == nil || strcmp(winningTxd, txdTarget) != 0){
+	if(winningDff == nil || !pathsEqualCiNormalized(winningDff, dffTarget) ||
+	   winningTxd == nil || !pathsEqualCiNormalized(winningTxd, txdTarget)){
 		rollbackTouchedFiles(rollbackEntries);
 		ModloaderInit();
-		snprintf(gCustomImport.error, sizeof(gCustomImport.error),
-		         "Another mod shadows the imported DFF/TXD names. Rename the model/TXD and retry.");
+		const char *shownDff = winningDff ? winningDff : "<none>";
+		const char *shownTxd = winningTxd ? winningTxd : "<none>";
+		bool sourceInModloader = pathContainsModloaderDir(gCustomImport.dffSource) ||
+		                        pathContainsModloaderDir(gCustomImport.txdSource);
+		if(sourceInModloader)
+			snprintf(gCustomImport.error, sizeof(gCustomImport.error),
+			         "Import is shadowed before Ariane wins override resolution. DFF winner: %s | TXD winner: %s. "
+			         "Tip: importing files from another modloader folder can cause this.",
+			         shownDff, shownTxd);
+		else
+			snprintf(gCustomImport.error, sizeof(gCustomImport.error),
+			         "Import is shadowed before Ariane wins override resolution. DFF winner: %s | TXD winner: %s.",
+			         shownDff, shownTxd);
 		return false;
 	}
 
