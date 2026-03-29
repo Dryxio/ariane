@@ -44,6 +44,8 @@ void log(const char *fmt, ...);
 bool GetEditorRootDirectory(char *dir, size_t size);
 bool BuildPath(char *dst, size_t size, const char *dir, const char *name);
 bool EnsureParentDirectoriesForPath(const char *path);
+#include "version.h"
+
 bool GetArianeDataDirectory(char *dir, size_t size);
 bool GetArianeDataPath(char *dst, size_t size, const char *name);
 FILE *fopenArianeDataRead(const char *name, const char *legacyName = nil);
@@ -152,9 +154,9 @@ enum {
 	NUMCDIMAGES = 200,
 	NUMTCYCBOXES = 64,
 
-	NUMWATERVERTICES = 4000,
-	NUMWATERQUADS = 1000,
-	NUMWATERTRIS = 1000,
+		NUMWATERVERTICES = 262144,
+		NUMWATERQUADS = 65536,
+		NUMWATERTRIS = 65536,
 	NUMZONES = 1500,	// for each type
 };
 
@@ -971,6 +973,7 @@ namespace WaterLevel
 
 	void Initialise(void);
 	void Render(void);
+	bool UsesPatchedGameLimits(void);
 
 	// Editor state
 	extern bool gWaterEditMode;

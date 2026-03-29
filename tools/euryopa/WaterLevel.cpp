@@ -31,7 +31,7 @@ int numWaterQuads;
 WaterTri waterTris[NUMWATERTRIS];
 int numWaterTris;
 
-// Game engine limits (what the game actually supports)
+// Vanilla SA engine limits. PE uses patched water.dat and should not enforce these.
 #define SA_MAX_QUADS 301
 #define SA_MAX_TRIS 6
 #define SA_MAX_VERTICES 1021
@@ -45,6 +45,12 @@ int gWaterCreateShape;	// 0=quad, 1=triangle
 float gWaterCreateZ;
 bool gWaterSnapEnabled = true;
 float gWaterSnapSize = 4.0f;
+
+bool
+UsesPatchedGameLimits(void)
+{
+	return isSA() && strcmp(ARIANE_CHANNEL, "PE") == 0;
+}
 
 // Accessor API
 int GetNumQuads(void) { return numWaterQuads; }
@@ -950,7 +956,7 @@ CreateWaterQuad(rw::V3d a, rw::V3d b)
 		log("CreateWaterQuad: quad array limit reached\n");
 		return -1;
 	}
-	if(numWaterQuads >= SA_MAX_QUADS)
+	if(!UsesPatchedGameLimits() && numWaterQuads >= SA_MAX_QUADS)
 		log("WARNING: quad count will exceed game limit of %d\n", SA_MAX_QUADS);
 
 	// Build 4 corners (axis-aligned): SW, SE, NW, NE order
@@ -995,7 +1001,7 @@ CreateWaterTriangle(rw::V3d a, rw::V3d b, rw::V3d c)
 		log("CreateWaterTriangle: tri array limit reached\n");
 		return -1;
 	}
-	if(numWaterTris >= SA_MAX_TRIS)
+	if(!UsesPatchedGameLimits() && numWaterTris >= SA_MAX_TRIS)
 		log("WARNING: triangle count will exceed game limit of %d\n", SA_MAX_TRIS);
 
 	rw::V3d corners[3] = { SnapToGrid(a), SnapToGrid(b), SnapToGrid(c) };
@@ -1611,36 +1617,38 @@ ValidateWaterData(void)
 {
 	int warnings = 0;
 
-	if(numWaterQuads > SA_MAX_QUADS){
-		log("WARNING: %d quads exceeds game limit of %d\n", numWaterQuads, SA_MAX_QUADS);
-		warnings++;
-	}
-	if(numWaterTris > SA_MAX_TRIS){
-		log("WARNING: %d triangles exceeds game limit of %d\n", numWaterTris, SA_MAX_TRIS);
-		warnings++;
-	}
-	// Count unique vertices by position (game deduplicates on load)
-	int uniqueVerts = 0;
-	{
-		static bool counted[NUMWATERVERTICES];
-		memset(counted, 0, sizeof(bool) * numWaterVertices);
-		const float eps = 0.01f;
-		for(int i = 0; i < numWaterVertices; i++){
-			if(counted[i]) continue;
-			uniqueVerts++;
-			rw::V3d p = waterVertices[i].pos;
-			for(int j = i + 1; j < numWaterVertices; j++){
-				if(!counted[j] &&
-				   fabs(waterVertices[j].pos.x - p.x) < eps &&
-				   fabs(waterVertices[j].pos.y - p.y) < eps &&
-				   fabs(waterVertices[j].pos.z - p.z) < eps)
-					counted[j] = true;
+	if(!UsesPatchedGameLimits()){
+		if(numWaterQuads > SA_MAX_QUADS){
+			log("WARNING: %d quads exceeds game limit of %d\n", numWaterQuads, SA_MAX_QUADS);
+			warnings++;
+		}
+		if(numWaterTris > SA_MAX_TRIS){
+			log("WARNING: %d triangles exceeds game limit of %d\n", numWaterTris, SA_MAX_TRIS);
+			warnings++;
+		}
+		// Count unique vertices by position (game deduplicates on load)
+		int uniqueVerts = 0;
+		{
+			static bool counted[NUMWATERVERTICES];
+			memset(counted, 0, sizeof(bool) * numWaterVertices);
+			const float eps = 0.01f;
+			for(int i = 0; i < numWaterVertices; i++){
+				if(counted[i]) continue;
+				uniqueVerts++;
+				rw::V3d p = waterVertices[i].pos;
+				for(int j = i + 1; j < numWaterVertices; j++){
+					if(!counted[j] &&
+					   fabs(waterVertices[j].pos.x - p.x) < eps &&
+					   fabs(waterVertices[j].pos.y - p.y) < eps &&
+					   fabs(waterVertices[j].pos.z - p.z) < eps)
+						counted[j] = true;
+				}
 			}
 		}
-	}
-	if(uniqueVerts > SA_MAX_VERTICES){
-		log("WARNING: %d unique vertices exceeds game limit of %d\n", uniqueVerts, SA_MAX_VERTICES);
-		warnings++;
+		if(uniqueVerts > SA_MAX_VERTICES){
+			log("WARNING: %d unique vertices exceeds game limit of %d\n", uniqueVerts, SA_MAX_VERTICES);
+			warnings++;
+		}
 	}
 
 	int degQuads = 0, degTris = 0;

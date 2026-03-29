@@ -4400,10 +4400,15 @@ uiWaterWindow(void)
 
 	// Stats and actions
 	int nq = WaterLevel::GetNumQuads(), nt = WaterLevel::GetNumTris(), nv = WaterLevel::GetNumVertices();
-	ImGui::Text("Quads: %d/301  Tris: %d/6  Verts: %d", nq, nt, nv);
-	if(nq > 301 || nt > 6)
-		ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Exceeds game polygon limits!");
-	ImGui::TextDisabled("Unique vertex limit (1021) checked on save");
+	ImGui::Text("Quads: %d/%d  Tris: %d/%d  Verts: %d/%d",
+		nq, NUMWATERQUADS, nt, NUMWATERTRIS, nv, NUMWATERVERTICES);
+	if(WaterLevel::UsesPatchedGameLimits())
+		ImGui::TextDisabled("PE patched water.dat mode: vanilla SA limits disabled");
+	else{
+		if(nq > 301 || nt > 6)
+			ImGui::TextColored(ImVec4(1.0f, 0.3f, 0.3f, 1.0f), "Exceeds vanilla SA polygon limits!");
+		ImGui::TextDisabled("Vanilla unique vertex limit (1021) checked on save");
+	}
 	if(WaterLevel::gWaterDirty)
 		ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.0f, 1.0f), "Unsaved changes (Ctrl+S to save)");
 	if(WaterLevel::WaterCanUndo()) ImGui::SameLine();
