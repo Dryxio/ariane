@@ -1276,7 +1276,7 @@ handleTool(void)
 {
 	// Don't process viewport clicks when ImGui wants the mouse
 	ImGuiIO &io = ImGui::GetIO();
-	if(io.WantCaptureMouse)
+	if(io.WantCaptureMouse || gGizmoHovered || gGizmoUsing || ImGuizmo::IsOver())
 		return;
 
 	// Water edit mode intercepts all clicks
@@ -1688,13 +1688,14 @@ dogizmo(void)
 			inst->m_matrix.at.z = gizobj.at.z;
 			rw::Quat newLeaderRot = QuatFromMatrix(inst->m_matrix);
 
-			// Compute rotation delta: the rotation that transforms startRot into newRot
-			rw::Quat deltaQ = NormalizeQuatOrIdentity(rw::mult(newLeaderRot, rw::conj(dragStartLeaderRot)));
+			// Stored instance quaternions are conjugated relative to world-space rotation.
+			// To apply the leader's world-space delta to the rest of the selection, the
+			// stored-space delta must be built as conj(start) * new, not new * conj(start).
+			rw::Quat deltaQ = NormalizeQuatOrIdentity(rw::mult(rw::conj(dragStartLeaderRot), newLeaderRot));
 
 			// Apply to all affected objects: orbit positions around leader, compose rotations.
-			// conj(deltaQ) converts from stored-quaternion space to world space;
-			// right-multiplying oldRot by deltaQ applies the delta on the world side
-			// of this codebase's conj(m_rotation) matrix convention.
+			// conj(deltaQ) is the world-space delta; right-multiplying oldRot by deltaQ
+			// applies that world delta under this codebase's conj(m_rotation) convention.
 			rw::Quat worldQ = rw::conj(deltaQ);
 			for(int i = 0; i < dragNumTransforms; i++){
 				ObjectInst *obj = dragTransforms[i].inst;

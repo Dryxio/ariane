@@ -361,16 +361,19 @@ SyncEditorInputState(void)
 	CPad::tempKeystates[KEY_LALT] = isVirtualKeyDown(VK_LMENU);
 	CPad::tempKeystates[KEY_RALT] = isVirtualKeyDown(VK_RMENU);
 
-	CPad::tempMouseState.btns =
+	uint32 physicalMouseBtns =
 		(isVirtualKeyDown(VK_LBUTTON) ? 1 : 0) |
 		(isVirtualKeyDown(VK_MBUTTON) ? 2 : 0) |
 		(isVirtualKeyDown(VK_RBUTTON) ? 4 : 0);
+	CPad::tempMouseState.btns = physicalMouseBtns;
 
 	if(ImGui::GetCurrentContext()){
 		ImGuiIO &io = ImGui::GetIO();
-		io.MouseDown[0] = !!(CPad::tempMouseState.btns & 1);
-		io.MouseDown[1] = !!(CPad::tempMouseState.btns & 4);
-		io.MouseDown[2] = !!(CPad::tempMouseState.btns & 2);
+		io.MouseDown[0] = !!(physicalMouseBtns & 1);
+		io.MouseDown[1] = !!(physicalMouseBtns & 4);
+		io.MouseDown[2] = !!(physicalMouseBtns & 2);
+		if(io.WantCaptureMouse || ImGuizmo::IsOver() || gGizmoHovered || gGizmoUsing)
+			CPad::tempMouseState.btns = 0;
 		if(ImGui::IsKeyDown(ImGuiKey_LeftShift) != (CPad::tempKeystates[KEY_LSHIFT] != 0))
 			io.AddKeyEvent(ImGuiKey_LeftShift, CPad::tempKeystates[KEY_LSHIFT] != 0);
 		if(ImGui::IsKeyDown(ImGuiKey_RightShift) != (CPad::tempKeystates[KEY_RSHIFT] != 0))
