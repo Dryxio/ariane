@@ -499,6 +499,7 @@ createSpawnedInstance(int objectId, rw::V3d position, GameFile *file, int iplInd
 	inst->m_imageIndex = -1;
 	inst->m_binInstIndex = -1;
 	inst->m_iplIndex = iplIndex;
+	SetInstIplFilterKey(inst, file ? file->name : nil);
 	inst->m_isAdded = true;
 	inst->m_isDirty = true;
 	inst->m_savedStateValid = false;
@@ -1135,6 +1136,7 @@ cloneInstance(ObjectInst *src, GameFile *dstFile, int iplIndex, rw::V3d offset)
 	inst->m_imageIndex = -1;
 	inst->m_binInstIndex = -1;
 	inst->m_iplIndex = iplIndex;
+	SetInstIplFilterKey(inst, dstFile ? dstFile->name : nil);
 	inst->m_isAdded = true;
 	inst->m_isDirty = true;
 	inst->m_savedStateValid = false;
@@ -1458,6 +1460,7 @@ ImportPrefab(const char *path)
 		inst->m_imageIndex = -1;
 		inst->m_binInstIndex = -1;
 		inst->m_iplIndex = ++maxIdx;
+		SetInstIplFilterKey(inst, file ? file->name : nil);
 		inst->m_isAdded = true;
 		inst->m_isDirty = true;
 		inst->m_savedStateValid = false;

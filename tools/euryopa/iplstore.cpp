@@ -72,7 +72,7 @@ AddIplSlot(const char *name)
 }
 
 void
-LoadIpl(int slot)
+LoadIpl(int slot, const char *sceneName)
 {
 	int i;
 	int size;
@@ -120,6 +120,7 @@ LoadIpl(int slot)
 			inst->m_file = file;
 			inst->m_imageIndex = ipl->imageIndex;
 			inst->m_binInstIndex = i;
+			SetInstIplFilterKey(inst, sceneName ? sceneName : (file ? file->name : nil));
 
 			if(inst->m_lodId < 0)
 				inst->m_lod = nil;

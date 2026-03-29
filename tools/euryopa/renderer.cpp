@@ -492,6 +492,8 @@ ProcessBuilding(ObjectInst *inst)
 	float dist;
 	if(inst->m_isBigBuilding || inst->m_scanCode == currentScanCode)
 		return;
+	if(!IsInstVisibleByIplFilter(inst))
+		return;
 	inst->m_scanCode = currentScanCode;
 	int v;
 	if(gRenderOnlyHD)
@@ -511,6 +513,8 @@ ProcessBigBuilding(ObjectInst *inst)
 {
 	float dist;
 	if(!inst->m_isBigBuilding || inst->m_scanCode == currentScanCode)
+		return;
+	if(!IsInstVisibleByIplFilter(inst))
 		return;
 	inst->m_scanCode = currentScanCode;
 	int v;

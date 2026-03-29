@@ -1,6 +1,9 @@
 #include "euryopa.h"
 #include "modloader.h"
 #include <limits.h>
+#include <algorithm>
+#include <string.h>
+#include <vector>
 
 int gameversion;
 int gameplatform;
@@ -45,6 +48,15 @@ bool gPlayAnimations = true;
 bool gUseViewerCam;
 bool gDrawTarget = true;
 
+struct IplVisibilityEntry
+{
+	char key[256];
+	char label[260];
+	bool visible;
+};
+static std::vector<IplVisibilityEntry> gIplVisibilityEntries;
+static bool gIplVisibilityEntriesDirty = true;
+
 // non-rendering things
 bool gRenderCollision;
 bool gRenderZones;
@@ -69,6 +81,198 @@ float gWetRoadEffect;
 
 // Neo stuff
 float gNeoLightMapStrength = 0.5f;
+
+static bool
+buildIplVisibilityKey(const char *name, char *dst, size_t size)
+{
+	const char *base, *end, *dot;
+	size_t len;
+
+	if(dst == nil || size == 0 || name == nil || name[0] == '\0')
+		return false;
+
+	base = name;
+	end = name + strlen(name);
+	dot = end;
+	for(const char *s = end; s > base; ){
+		s--;
+		if(*s == '.'){
+			dot = s;
+			break;
+		}
+	}
+	len = dot - base;
+	if(len == 0)
+		len = end - base;
+	if(len == 0)
+		return false;
+
+	if(len >= size)
+		len = size - 1;
+	memcpy(dst, base, len);
+	dst[len] = '\0';
+	return len > 0;
+}
+
+static bool
+buildInstIplVisibilityKey(const ObjectInst *inst, char *dst, size_t size)
+{
+	if(inst == nil || dst == nil || size == 0)
+		return false;
+	if(inst->m_iplFilterKey[0] != '\0'){
+		strncpy(dst, inst->m_iplFilterKey, size-1);
+		dst[size-1] = '\0';
+		return true;
+	}
+	if(inst->m_file == nil || inst->m_file->name == nil)
+		return false;
+	return buildIplVisibilityKey(inst->m_file->name, dst, size);
+}
+
+static int
+findIplVisibilityEntryIndex(const char *key)
+{
+	int low = 0;
+	int high = (int)gIplVisibilityEntries.size();
+	while(low < high){
+		int mid = low + (high - low)/2;
+		int cmp = rw::strcmp_ci(gIplVisibilityEntries[mid].key, key);
+		if(cmp < 0)
+			low = mid + 1;
+		else
+			high = mid;
+	}
+	if(low < (int)gIplVisibilityEntries.size() &&
+	   rw::strcmp_ci(gIplVisibilityEntries[low].key, key) == 0)
+		return low;
+	return -1;
+}
+
+void
+RefreshIplVisibilityEntries(void)
+{
+	if(!gIplVisibilityEntriesDirty)
+		return;
+
+	std::vector<IplVisibilityEntry> entries;
+	CPtrNode *p;
+
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		char key[256];
+
+		if(!buildInstIplVisibilityKey(inst, key, sizeof(key)))
+			continue;
+
+		int low = 0;
+		int high = (int)entries.size();
+		while(low < high){
+			int mid = low + (high - low)/2;
+			int cmp = rw::strcmp_ci(entries[mid].key, key);
+			if(cmp < 0)
+				low = mid + 1;
+			else
+				high = mid;
+		}
+		if(low < (int)entries.size() &&
+		   rw::strcmp_ci(entries[low].key, key) == 0)
+			continue;
+
+		IplVisibilityEntry entry;
+		memset(&entry, 0, sizeof(entry));
+		strncpy(entry.key, key, sizeof(entry.key)-1);
+		snprintf(entry.label, sizeof(entry.label), "%s.ipl", key);
+
+		int oldIndex = findIplVisibilityEntryIndex(key);
+		entry.visible = oldIndex < 0 ? true : gIplVisibilityEntries[oldIndex].visible;
+		entries.insert(entries.begin() + low, entry);
+	}
+
+	gIplVisibilityEntries.swap(entries);
+	gIplVisibilityEntriesDirty = false;
+}
+
+int
+GetIplVisibilityEntryCount(void)
+{
+	return (int)gIplVisibilityEntries.size();
+}
+
+const char*
+GetIplVisibilityEntryName(int i)
+{
+	if(i < 0 || i >= (int)gIplVisibilityEntries.size())
+		return "";
+	return gIplVisibilityEntries[i].label;
+}
+
+bool
+GetIplVisibilityEntryVisible(int i)
+{
+	if(i < 0 || i >= (int)gIplVisibilityEntries.size())
+		return true;
+	return gIplVisibilityEntries[i].visible;
+}
+
+void
+SetIplVisibilityEntryVisible(int i, bool visible)
+{
+	if(i < 0 || i >= (int)gIplVisibilityEntries.size())
+		return;
+	gIplVisibilityEntries[i].visible = visible;
+}
+
+void
+SetAllIplVisibilityEntries(bool visible)
+{
+	for(size_t i = 0; i < gIplVisibilityEntries.size(); i++)
+		gIplVisibilityEntries[i].visible = visible;
+}
+
+void
+ShowOnlyIplVisibilityEntry(int i)
+{
+	if(i < 0 || i >= (int)gIplVisibilityEntries.size())
+		return;
+
+	for(size_t j = 0; j < gIplVisibilityEntries.size(); j++)
+		gIplVisibilityEntries[j].visible = (int)j == i;
+}
+
+bool
+IsInstVisibleByIplFilter(const ObjectInst *inst)
+{
+	char key[256];
+	int i;
+
+	if(!buildInstIplVisibilityKey(inst, key, sizeof(key)))
+		return true;
+
+	i = findIplVisibilityEntryIndex(key);
+	if(i < 0){
+		RefreshIplVisibilityEntries();
+		i = findIplVisibilityEntryIndex(key);
+	}
+	if(i < 0)
+		return true;
+	return gIplVisibilityEntries[i].visible;
+}
+
+void
+SetInstIplFilterKey(ObjectInst *inst, const char *sceneName)
+{
+	char key[256];
+
+	if(inst == nil)
+		return;
+	if(!buildIplVisibilityKey(sceneName, key, sizeof(key)))
+		key[0] = '\0';
+	if(strcmp(inst->m_iplFilterKey, key) == 0)
+		return;
+	strncpy(inst->m_iplFilterKey, key, sizeof(inst->m_iplFilterKey)-1);
+	inst->m_iplFilterKey[sizeof(inst->m_iplFilterKey)-1] = '\0';
+	gIplVisibilityEntriesDirty = true;
+}
 
 bool
 IsHourInRange(int h1, int h2)

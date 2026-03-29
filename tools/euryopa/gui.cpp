@@ -30,6 +30,7 @@ static bool showBrowserWindow;
 static bool showDiffWindow;
 static bool showToolsWindow = true;
 static bool gBrowserIdeListDirty = true;
+static char gIplFilterSearch[128];
 
 static bool gAutomaticBackupsEnabled = true;
 static int gAutomaticBackupIntervalSeconds = 300;
@@ -2253,6 +2254,7 @@ spawnCustomImportedObject(int objectId)
 	inst->m_imageIndex = -1;
 	inst->m_binInstIndex = -1;
 	inst->m_iplIndex = maxIplIndex + 1;
+	SetInstIplFilterKey(inst, file ? file->name : nil);
 	inst->m_isAdded = true;
 	inst->m_isDirty = true;
 	inst->m_savedStateValid = false;
@@ -3221,6 +3223,50 @@ uiView(void)
 	ImGui::Checkbox("Render all Timed Objects", &gNoTimeCull);
 	if(params.numAreas)
 		ImGui::Checkbox("Render all Areas", &gNoAreaCull);
+
+	ImGui::Separator();
+	ImGui::Text("IPL Visibility");
+	RefreshIplVisibilityEntries();
+
+	int numIpls = GetIplVisibilityEntryCount();
+	if(numIpls == 0){
+		ImGui::TextDisabled("No loaded IPLs");
+		return;
+	}
+
+	int numVisible = 0;
+	for(int i = 0; i < numIpls; i++)
+		if(GetIplVisibilityEntryVisible(i))
+			numVisible++;
+	ImGui::Text("%d visible / %d total", numVisible, numIpls);
+	ImGui::InputTextWithHint("##ipl_filter_search", "Search IPLs", gIplFilterSearch, sizeof(gIplFilterSearch));
+	if(ImGui::Button("Show All"))
+		SetAllIplVisibilityEntries(true);
+	ImGui::SameLine();
+	if(ImGui::Button("Hide All"))
+		SetAllIplVisibilityEntries(false);
+
+	float listHeight = ImGui::GetContentRegionAvail().y;
+	if(listHeight < 220.0f)
+		listHeight = 220.0f;
+	ImGui::BeginChild("##ipl_visibility_list", ImVec2(0, listHeight), true);
+	for(int i = 0; i < numIpls; i++){
+		const char *name = GetIplVisibilityEntryName(i);
+		if(gIplFilterSearch[0] != '\0' && ImStristr(name, nil, gIplFilterSearch, nil) == nil)
+			continue;
+
+		bool visible = GetIplVisibilityEntryVisible(i);
+		ImGui::PushID(i);
+		if(ImGui::SmallButton("Only"))
+			ShowOnlyIplVisibilityEntry(i);
+		ImGui::SameLine();
+		if(ImGui::Checkbox("##visible", &visible))
+			SetIplVisibilityEntryVisible(i, visible);
+		ImGui::SameLine();
+		ImGui::TextUnformatted(name);
+		ImGui::PopID();
+	}
+	ImGui::EndChild();
 }
 
 static void
@@ -5044,6 +5090,7 @@ gui(void)
 
 	if(!CPad::IsCtrlDown() && CPad::IsKeyJustDown('V')) showViewWindow ^= 1;
 	if(showViewWindow){
+		ImGui::SetNextWindowSize(ImVec2(460.0f, 640.0f), ImGuiCond_FirstUseEver);
 		ImGui::Begin("View", &showViewWindow);
 		uiView();
 		ImGui::End();

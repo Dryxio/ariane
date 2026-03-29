@@ -116,6 +116,15 @@ extern bool gDoBackfaceCulling;
 extern bool gPlayAnimations;
 extern bool gUseViewerCam;
 extern bool gDrawTarget;
+void SetInstIplFilterKey(ObjectInst *inst, const char *sceneName);
+bool IsInstVisibleByIplFilter(const ObjectInst *inst);
+void RefreshIplVisibilityEntries(void);
+int GetIplVisibilityEntryCount(void);
+const char *GetIplVisibilityEntryName(int i);
+bool GetIplVisibilityEntryVisible(int i);
+void SetIplVisibilityEntryVisible(int i, bool visible);
+void SetAllIplVisibilityEntries(bool visible);
+void ShowOnlyIplVisibilityEntry(int i);
 
 // non-rendering things
 extern bool gRenderCollision;
@@ -637,6 +646,7 @@ struct ObjectInst
 	int m_iplIndex;		// index of this instance within its IPL file (for save)
 	int32 m_imageIndex;	// IMG directory index (for binary IPL save), -1 if text IPL
 	int m_binInstIndex;	// index within binary IPL instance array
+	char m_iplFilterKey[256];
 
 	GameFile *m_file;
 
@@ -841,7 +851,7 @@ ObjectInst **GetInstArray(int i);
 int GetInstArraySize(int i);
 IplDef *GetIplDef(int i);
 int AddIplSlot(const char *name);
-void LoadIpl(int i);
+void LoadIpl(int i, const char *sceneName = nil);
 
 // File Loader
 
