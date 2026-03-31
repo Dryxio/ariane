@@ -4478,8 +4478,44 @@ uiInstWindow(void)
 {
 	ImGui::Begin("Object Info", &showInstanceWindow);
 
-
 	if(selection.first){
+		int numSelected = 0;
+		for(CPtrNode *sel = selection.first; sel; sel = sel->next)
+			numSelected++;
+		ImGui::Text("%d selected", numSelected);
+		char exportDir[1024];
+		bool haveExportDir = GetArianeDataPath(exportDir, sizeof(exportDir), "dff-txd-exports");
+		if(ImGui::Button("Export DFF")){
+			if(!haveExportDir){
+				Toast(TOAST_SAVE, "Failed to resolve dff-txd-exports path");
+			}else{
+				int failed = 0;
+				int exported = ExportSelectedDffs(exportDir, &failed);
+				if(exported > 0 || failed == 0)
+					Toast(TOAST_SAVE, "Exported %d DFF(s) to %s%s", exported, exportDir,
+					      failed > 0 ? " (some skipped)" : "");
+				else
+					Toast(TOAST_SAVE, "Failed to export DFF(s)");
+			}
+		}
+		ImGui::SameLine();
+		if(ImGui::Button("Export TXD")){
+			if(!haveExportDir){
+				Toast(TOAST_SAVE, "Failed to resolve dff-txd-exports path");
+			}else{
+				int failed = 0;
+				int exported = ExportSelectedTxds(exportDir, &failed);
+				if(exported > 0 || failed == 0)
+					Toast(TOAST_SAVE, "Exported %d TXD(s) to %s%s", exported, exportDir,
+					      failed > 0 ? " (some skipped)" : "");
+				else
+					Toast(TOAST_SAVE, "Failed to export TXD(s)");
+			}
+		}
+		if(haveExportDir)
+			ImGui::TextDisabled("%s", exportDir);
+		ImGui::Separator();
+
 		ObjectInst *inst = (ObjectInst*)selection.first->item;
 		ObjectDef *obj = GetObjectDef(inst->m_objectId);
 		if(ImGui::CollapsingHeader("Instance"))

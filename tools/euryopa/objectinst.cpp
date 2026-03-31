@@ -6,6 +6,100 @@
 CPtrList instances;
 CPtrList selection;
 
+static bool
+BuildAssetExportPath(const char *dir, const char *name, const char *ext, char *dst, size_t size)
+{
+	char filename[128];
+
+	if(dir == nil || name == nil || ext == nil)
+		return false;
+	if(snprintf(filename, sizeof(filename), "%s.%s", name, ext) >= (int)sizeof(filename))
+		return false;
+	return BuildPath(dst, size, dir, filename);
+}
+
+static bool
+WriteBufferToPath(const char *path, const uint8 *data, int size)
+{
+	FILE *f;
+
+	if(path == nil || data == nil || size <= 0)
+		return false;
+	if(!EnsureParentDirectoriesForPath(path))
+		return false;
+
+	f = fopen(path, "wb");
+	if(f == nil)
+		return false;
+
+	size_t written = fwrite(data, 1, size, f);
+	fclose(f);
+	return written == (size_t)size;
+}
+
+static bool
+ExportEffectiveAsset(const char *name, const char *ext, int32 imageIndex, const char *dstPath)
+{
+	uint8 *buffer;
+	int size = 0;
+	bool freeBuffer = false;
+
+	const char *loosePath = ModloaderFindOverride(name, ext);
+	if(loosePath){
+		buffer = ReadLooseFile(loosePath, &size);
+		freeBuffer = true;
+	}else{
+		if(imageIndex < 0)
+			return false;
+		buffer = ReadFileFromImage(imageIndex, &size);
+	}
+
+	if(buffer == nil || size <= 0){
+		if(freeBuffer)
+			free(buffer);
+		return false;
+	}
+
+	bool ok = WriteBufferToPath(dstPath, buffer, size);
+	if(freeBuffer)
+		free(buffer);
+	return ok;
+}
+
+static bool
+HasEarlierSelectedModel(CPtrNode *upto, const char *name)
+{
+	for(CPtrNode *p = selection.first; p && p != upto; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		ObjectDef *obj;
+		if(inst == nil || inst->m_isDeleted)
+			continue;
+		obj = GetObjectDef(inst->m_objectId);
+		if(obj && rw::strncmp_ci(obj->m_name, name, MODELNAMELEN) == 0)
+			return true;
+	}
+	return false;
+}
+
+static bool
+HasEarlierSelectedTxd(CPtrNode *upto, const char *name)
+{
+	for(CPtrNode *p = selection.first; p && p != upto; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		ObjectDef *obj;
+		TxdDef *txd;
+		if(inst == nil || inst->m_isDeleted)
+			continue;
+		obj = GetObjectDef(inst->m_objectId);
+		if(obj == nil)
+			continue;
+		txd = GetTxdDef(obj->m_txdSlot);
+		if(txd && rw::strncmp_ci(txd->name, name, MODELNAMELEN) == 0)
+			return true;
+	}
+	return false;
+}
+
 static int
 countLiveLodChildren(ObjectInst *lodInst, ObjectInst *ignoreInst)
 {
@@ -1338,6 +1432,80 @@ ExportPrefab(const char *path)
 	fclose(f);
 	log("ExportPrefab: wrote %d instance(s) to %s\n", numInsts, path);
 	return numInsts;
+}
+
+int
+ExportSelectedDffs(const char *dir, int *numFailed)
+{
+	int exported = 0;
+	int failed = 0;
+	char path[1024];
+
+	for(CPtrNode *p = selection.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		ObjectDef *obj;
+
+		if(inst == nil || inst->m_isDeleted)
+			continue;
+		obj = GetObjectDef(inst->m_objectId);
+		if(obj == nil || obj->m_name[0] == '\0'){
+			failed++;
+			continue;
+		}
+		if(HasEarlierSelectedModel(p, obj->m_name))
+			continue;
+		if(!BuildAssetExportPath(dir, obj->m_name, "dff", path, sizeof(path)) ||
+		   !ExportEffectiveAsset(obj->m_name, "dff", obj->m_imageIndex, path)){
+			log("ExportSelectedDffs: failed to export %s\n", obj->m_name);
+			failed++;
+			continue;
+		}
+		exported++;
+	}
+
+	if(numFailed)
+		*numFailed = failed;
+	return exported;
+}
+
+int
+ExportSelectedTxds(const char *dir, int *numFailed)
+{
+	int exported = 0;
+	int failed = 0;
+	char path[1024];
+
+	for(CPtrNode *p = selection.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		ObjectDef *obj;
+		TxdDef *txd;
+
+		if(inst == nil || inst->m_isDeleted)
+			continue;
+		obj = GetObjectDef(inst->m_objectId);
+		if(obj == nil){
+			failed++;
+			continue;
+		}
+		txd = GetTxdDef(obj->m_txdSlot);
+		if(txd == nil || txd->name[0] == '\0'){
+			failed++;
+			continue;
+		}
+		if(HasEarlierSelectedTxd(p, txd->name))
+			continue;
+		if(!BuildAssetExportPath(dir, txd->name, "txd", path, sizeof(path)) ||
+		   !ExportEffectiveAsset(txd->name, "txd", txd->imageIndex, path)){
+			log("ExportSelectedTxds: failed to export %s\n", txd->name);
+			failed++;
+			continue;
+		}
+		exported++;
+	}
+
+	if(numFailed)
+		*numFailed = failed;
+	return exported;
 }
 
 struct PrefabEntry {
