@@ -1,6 +1,9 @@
 ariane
 ======
 
+Join the Discord for download, latest updates, progress etc..
+Discord : https://discord.gg/8NS59AbQtN
+
 A map editor for GTA III, Vice City and San Andreas, built on [librw](https://github.com/aap/librw).
 
 Forked from [euryopa](https://github.com/aap/librwgta) by aap.
