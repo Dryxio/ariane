@@ -768,10 +768,16 @@ ToggleFavourite(int id)
 // Diff viewer — monotonic change counter for chronological ordering
 static uint32 gChangeSeqCounter = 0;
 
+uint32
+BumpChangeSeq(void)
+{
+	return ++gChangeSeqCounter;
+}
+
 void
 StampChangeSeq(ObjectInst *inst)
 {
-	inst->m_changeSeq = ++gChangeSeqCounter;
+	inst->m_changeSeq = BumpChangeSeq();
 }
 
 uint32

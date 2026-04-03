@@ -703,8 +703,6 @@ ModloaderInit(void)
 		std::vector<ImageEntryOverride> candidates;
 		for(size_t i = 0; i < allModFiles.size(); i++){
 			ModFile &mf = allModFiles[i];
-			if(strcmp(mf.ext, "ipl") != 0)
-				continue;
 
 			ImageEntryOverride ov = {};
 			if(!ExtractImageEntryOverrideKey(mf.logicalPath,

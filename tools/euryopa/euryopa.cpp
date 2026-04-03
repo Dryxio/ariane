@@ -65,8 +65,11 @@ bool gRenderNavigZones;
 bool gRenderInfoZones;
 bool gRenderCullZones;
 bool gRenderAttribZones;
-bool gRenderPedPaths;
-bool gRenderCarPaths;
+bool gRenderLegacyPedPaths;
+bool gRenderLegacyCarPaths;
+bool gRenderSaPedPaths;
+bool gRenderSaCarPaths;
+bool gRenderSaAreaGrid;
 bool gRenderEffects;
 bool gRenderTimecycleBoxes;
 
@@ -1304,37 +1307,54 @@ handleTool(void)
 
 	// select
 	if(CPad::IsMButtonClicked(1)){
-		ObjectInst *inst = GetInstanceByID(pick());
-		if(inst && !inst->m_isDeleted){
-			if(CPad::IsShiftDown())
-				inst->Select();
-			else if(CPad::IsAltDown())
-				inst->Deselect();
-			else if(CPad::IsCtrlDown()){
-				if(inst->m_selected) inst->Deselect();
-				else inst->Select();
-			}else{
-				ClearSelection();
-				inst->Select();
-			}
-		}else
+		if(Path::hoveredNode || SAPaths::hoveredNode || Effects::hoveredEffect){
 			ClearSelection();
+			Path::selectedNode = Path::hoveredNode;
+			SAPaths::selectedNode = SAPaths::hoveredNode;
+			Effects::selectedEffect = Effects::hoveredEffect;
+		}else{
+			ObjectInst *inst = GetInstanceByID(pick());
+			if(inst && !inst->m_isDeleted){
+				if(CPad::IsShiftDown())
+					inst->Select();
+				else if(CPad::IsAltDown())
+					inst->Deselect();
+				else if(CPad::IsCtrlDown()){
+					if(inst->m_selected) inst->Deselect();
+					else inst->Select();
+				}else{
+					ClearSelection();
+					inst->Select();
+				}
+			}else
+				ClearSelection();
 
-		Path::selectedNode = Path::hoveredNode;
-		Effects::selectedEffect = Effects::hoveredEffect;
+			Path::selectedNode = nil;
+			SAPaths::selectedNode = nil;
+			Effects::selectedEffect = nil;
+		}
 	}else if(CPad::IsMButtonClicked(2)){
 		if(CPad::IsCtrlDown()){
 			Path::selectedNode = Path::hoveredNode;
+			SAPaths::selectedNode = SAPaths::hoveredNode;
 			Effects::selectedEffect = Effects::hoveredEffect;
 		}else{
-			ClearSelection();
-			ObjectInst *inst = GetInstanceByID(pick());
-			if(inst && !inst->m_isDeleted)
-				inst->Select();
+			if(Path::hoveredNode || SAPaths::hoveredNode || Effects::hoveredEffect){
+				ClearSelection();
+				Path::selectedNode = Path::hoveredNode;
+				SAPaths::selectedNode = SAPaths::hoveredNode;
+				Effects::selectedEffect = Effects::hoveredEffect;
+			}else{
+				ClearSelection();
+				ObjectInst *inst = GetInstanceByID(pick());
+				if(inst && !inst->m_isDeleted)
+					inst->Select();
+			}
 		}
 	}else if(CPad::IsMButtonClicked(3)){
 		ClearSelection();
 		Path::selectedNode = nil;
+		SAPaths::selectedNode = nil;
 		Effects::selectedEffect = nil;
 	}
 }
@@ -1357,6 +1377,7 @@ LoadGame(void)
 //	SetCurrentDirectory("C:/Users/aap/games/gtavc");
 //	SetCurrentDirectory("C:/Users/aap/games/gtasa");
 
+	SAPaths::Reset();
 	FindVersion();
 	ModloaderInit();
 	switch(gameversion){
@@ -1499,8 +1520,63 @@ dogizmo(void)
 		return;
 	}
 
-	if(!selection.first)
+	if(!selection.first){
+		static bool wasDraggingSaNode = false;
+		static rw::V3d dragStartSaNodePos;
+
+		if(!SAPaths::HasSelectedNode()){
+			wasDraggingSaNode = false;
+			return;
+		}
+
+		rw::V3d nodePos;
+		if(!SAPaths::GetSelectedNodePosition(&nodePos))
+			return;
+
+		rw::Camera *cam = (rw::Camera*)rw::engine->currentCamera;
+		float *fview = (float*)&cam->devView;
+		float *fproj = (float*)&cam->devProj;
+		rw::RawMatrix gizobj;
+		rw::RawMatrix::setIdentity(&gizobj);
+		gizobj.pos.x = nodePos.x;
+		gizobj.pos.y = nodePos.y;
+		gizobj.pos.z = nodePos.z;
+		float *fobj = (float*)&gizobj;
+
+		ImGuiIO &io = ImGui::GetIO();
+		ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+
+		float snapValues[3];
+		float *snapPtr = nil;
+		if(gGizmoSnap){
+			snapValues[0] = gGizmoSnapTranslate;
+			snapValues[1] = gGizmoSnapTranslate;
+			snapValues[2] = gGizmoSnapTranslate;
+			snapPtr = snapValues;
+		}
+
+		ImGuizmo::Manipulate(fview, fproj, ImGuizmo::TRANSLATE, ImGuizmo::WORLD, fobj, nil, snapPtr);
+
+		gGizmoHovered = ImGuizmo::IsOver();
+		bool isUsing = ImGuizmo::IsUsing();
+		gGizmoUsing = isUsing;
+
+		if(isUsing && !wasDraggingSaNode)
+			dragStartSaNodePos = nodePos;
+
+		if(isUsing){
+			rw::V3d newPos = { gizobj.pos.x, gizobj.pos.y, gizobj.pos.z };
+			SAPaths::SetSelectedNodePosition(newPos, false);
+		}else if(wasDraggingSaNode){
+			rw::V3d finalPos;
+			if(SAPaths::GetSelectedNodePosition(&finalPos) &&
+			   length(sub(finalPos, dragStartSaNodePos)) >= 0.0001f)
+				SAPaths::CommitSelectedNodeEdit();
+		}
+
+		wasDraggingSaNode = isUsing;
 		return;
+	}
 
 	ObjectInst *inst = (ObjectInst*)selection.first->item;
 	if(inst->m_isDeleted)
@@ -1840,11 +1916,18 @@ Draw(void)
 	if(gRenderAttribZones)
 		Zones::RenderAttribZones();
 	Path::hoveredNode = nil;
+	SAPaths::hoveredNode = nil;
 	Effects::hoveredEffect = nil;
-	if(gRenderPedPaths)
+	if(gRenderLegacyPedPaths)
 		Path::RenderPedPaths();
-	if(gRenderCarPaths)
+	if(gRenderLegacyCarPaths)
 		Path::RenderCarPaths();
+	if(gRenderSaPedPaths)
+		SAPaths::RenderPedPaths();
+	if(gRenderSaCarPaths)
+		SAPaths::RenderCarPaths();
+	if(gRenderSaAreaGrid)
+		SAPaths::RenderAreaGrid();
 	if(gRenderEffects)
 		Effects::Render();
 	if(WaterLevel::gWaterEditMode)

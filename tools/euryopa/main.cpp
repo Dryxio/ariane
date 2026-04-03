@@ -524,6 +524,17 @@ DefinedState(void)
 // Simple function to convert a raster to the current platform.
 // TODO: convert custom formats (DXT) properly.
 static rw::Raster*
+CreateFallbackRaster(void)
+{
+	rw::Image *img = rw::Image::create(1, 1, 32);
+	uint32 white = 0xFFFFFFFF;
+	img->pixels = (uint8*)&white;
+	rw::Raster *ras = rw::Raster::createFromImage(img);
+	img->destroy();
+	return ras;
+}
+
+static rw::Raster*
 ConvertTexRaster(rw::Raster *ras)
 {
 	using namespace rw;
@@ -536,10 +547,21 @@ ConvertTexRaster(rw::Raster *ras)
 		return ras;
 
 	Image *img = ras->toImage();
+	if(img == nil){
+		log("warning: failed to convert raster from platform %d to %d, using fallback texture\n",
+			ras->platform, rw::platform);
+		ras->destroy();
+		return CreateFallbackRaster();
+	}
 	ras->destroy();
 	img->unpalettize();
 	ras = Raster::createFromImage(img);
 	img->destroy();
+	if(ras == nil){
+		log("warning: failed to create converted raster for platform %d, using fallback texture\n",
+			rw::platform);
+		return CreateFallbackRaster();
+	}
 	return ras;
 }
 

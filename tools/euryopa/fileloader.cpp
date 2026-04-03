@@ -2140,6 +2140,18 @@ BuildBackupBinaryRelativePath(int32 imgIdx, std::string &relativePath, std::stri
 }
 
 static bool
+BuildBackupSaPathRelativePath(const char *logicalPath, std::string &relativePath)
+{
+	char normalized[512];
+	NormalizeBackupPath(logicalPath, normalized, sizeof(normalized));
+	if(normalized[0] == '\0')
+		return false;
+	relativePath = "sa_paths/";
+	relativePath += normalized;
+	return true;
+}
+
+static bool
 IsCustomIplLogicalPath(const char *path)
 {
 	char normalized[256];
@@ -2223,6 +2235,34 @@ QueueBinaryBackupFile(int32 imgIdx, const std::vector<uint8> &data, const char *
 	entry.outputPath = relativePath;
 	entry.archiveLogicalPath = archiveLogicalPath;
 	entry.entryFilename = entryFilename;
+	entries.push_back(entry);
+	if(result)
+		result->numBinaryFiles++;
+	return true;
+}
+
+static bool
+QueueSaPathBackupFile(const SAPaths::BackupFile &src, const char *snapshotDir,
+                      std::vector<PendingSaveFile> &pendingFiles,
+                      std::vector<BackupManifestEntry> &entries,
+                      AutomaticBackupResult *result)
+{
+	std::string relativePath;
+	if(src.data.empty())
+		return true;
+	if(!BuildBackupSaPathRelativePath(src.logicalPath, relativePath))
+		return false;
+
+	PendingSaveFile pending;
+	pending.finalPath = JoinPathStrings(snapshotDir, relativePath);
+	pending.data = src.data;
+	pendingFiles.push_back(pending);
+
+	BackupManifestEntry entry;
+	entry.type = "sa_path";
+	entry.logicalPath = src.logicalPath;
+	entry.sourcePath = src.sourcePath;
+	entry.outputPath = relativePath;
 	entries.push_back(entry);
 	if(result)
 		result->numBinaryFiles++;
@@ -2544,6 +2584,17 @@ CreateAutomaticBackup(const char *rootDir, int keepCount)
 			continue;
 		if(QueueStandaloneBinaryBackupSnapshot(inst->m_imageIndex, snapshotDir, pendingFiles, entries, errors, &result))
 			rememberBinaryImage(queuedImages, &numQueuedImages, inst->m_imageIndex);
+	}
+
+	if(SAPaths::HasDirtyAreas()){
+		std::vector<SAPaths::BackupFile> saPathFiles;
+		if(!SAPaths::CollectDirtyAreaBackupFiles(saPathFiles)){
+			AddBackupError(errors, &result, "sa_path", "models/gta3.img", "failed_to_collect_dirty_sa_paths");
+		}else{
+			for(size_t i = 0; i < saPathFiles.size(); i++)
+				if(!QueueSaPathBackupFile(saPathFiles[i], snapshotDir, pendingFiles, entries, &result))
+					AddBackupError(errors, &result, "sa_path", saPathFiles[i].logicalPath, "failed_to_queue_dirty_sa_path");
+		}
 	}
 
 	if(pendingFiles.empty() && errors.empty())

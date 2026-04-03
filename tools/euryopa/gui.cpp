@@ -29,6 +29,7 @@ static bool showRenderingWindow;
 static bool showBrowserWindow;
 static bool showDiffWindow;
 static bool showToolsWindow = true;
+static bool gSaNodeJustSelected;
 static bool gBrowserIdeListDirty = true;
 static char gIplFilterSearch[128];
 
@@ -3016,7 +3017,8 @@ uiHelpWindow(void)
 	ImGui::BulletText("Use the filter in the instance list to find instances by name.");
 	ImGui::Separator();
 	ImGui::BulletText("Gizmo: W = Translate, Q = Rotate\n"
-		"Select an object to manipulate it with the gizmo.");
+		"Select an object or SA path node to manipulate it.\n"
+		"SA path nodes use translate only.");
 	ImGui::BulletText("Delete/Backspace: delete selected building(s)\n"
 		"Deleting also removes linked LOD instances.");
 	ImGui::BulletText("Ctrl+C: Copy selected building(s)\n"
@@ -3194,8 +3196,16 @@ uiView(void)
 		ImGui::Unindent();
 	}
 	if(!isSA()) ImGui::Checkbox("Draw 2dfx", &gRenderEffects);
-	ImGui::Checkbox("Draw Car Paths", &gRenderCarPaths);
-	ImGui::Checkbox("Draw Ped Paths", &gRenderPedPaths);
+	ImGui::SeparatorText("Legacy Paths");
+	ImGui::Checkbox("Draw Legacy Car Paths", &gRenderLegacyCarPaths);
+	ImGui::Checkbox("Draw Legacy Ped Paths", &gRenderLegacyPedPaths);
+	if(isSA()){
+		ImGui::SeparatorText("San Andreas Streamed Paths");
+		ImGui::Checkbox("Draw SA Car Paths", &gRenderSaCarPaths);
+		ImGui::Checkbox("Draw SA Ped Paths", &gRenderSaPedPaths);
+		ImGui::Checkbox("Draw SA Area Grid", &gRenderSaAreaGrid);
+		ImGui::SetItemTooltip("Show the 8x8 area grid boundaries (750 unit cells).\nNodes cannot be moved across these boundaries.");
+	}
 
 
 	ImGui::Checkbox("Draw Water", &gRenderWater);
@@ -3483,9 +3493,11 @@ uiPathInfo(ObjectInst *inst)
 		ObjectDef *obj;
 		obj = GetObjectDef(inst->m_objectId);
 
+		ImGui::TextDisabled("Legacy object-attached path patches");
+
 		if(obj->m_carPathIndex >= 0){
 			PathNode *nd = Path::GetCarNode(obj->m_carPathIndex,0);
-			ImGui::Text(nd->water ? "WaterPath" : "CarPath");
+			ImGui::Text(nd->water ? "Legacy Water Path" : "Legacy Car Path");
 			if(ImGui::BeginTable("Nodes", uiNumCarPathColumns(), ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)){
 				uiCarPathHeader();
 				for(int i = 0; nd = Path::GetCarNode(obj->m_carPathIndex,i); i++){
@@ -3496,7 +3508,7 @@ uiPathInfo(ObjectInst *inst)
 			}
 		}
 		if(obj->m_pedPathIndex >= 0){
-			ImGui::Text("Ped Path");
+			ImGui::Text("Legacy Ped Path");
 			PathNode *nd;
 			if(ImGui::BeginTable("Nodes", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)){
 				uiPedPathHeader();
@@ -3510,10 +3522,11 @@ uiPathInfo(ObjectInst *inst)
 	}else if(Path::selectedNode && !Path::selectedNode->isDetached()){
 		ObjectDef *obj = GetObjectDef(Path::selectedNode->objId);
 		ImGui::Text("Object %s", obj->m_name);
+		ImGui::TextDisabled("Legacy object-attached path patch");
 		uiFilteredInstanceList(obj);
 	}else if(Path::selectedNode && Path::selectedNode->tabId == 1){
 		int i = Path::selectedNode->idx;
-		ImGui::Text(Path::selectedNode->water ? "WaterPath %d" : "CarPath %d", i);
+		ImGui::Text(Path::selectedNode->water ? "Legacy Water Path %d" : "Legacy Car Path %d", i);
 		ImGui::PushID(i);
 		if(ImGui::BeginTable("Nodes", uiNumCarPathColumns(), ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)){
 			uiCarPathHeader();
@@ -3528,7 +3541,7 @@ uiPathInfo(ObjectInst *inst)
 		ImGui::PopID();
 	}else if(Path::selectedNode && Path::selectedNode->tabId == 3){
 		int i = Path::selectedNode->idx;
-		ImGui::Text("PedPath %d", i);
+		ImGui::Text("Legacy Ped Path %d", i);
 		ImGui::PushID(i);
 		if(ImGui::BeginTable("Nodes", 8, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)){
 			uiPedPathHeader();
@@ -4064,10 +4077,10 @@ uiEditorWindow(void)
 
 	PathNode *nd;
 	if(nd = Path::GetDetachedCarNode(0,0))
-	if(ImGui::TreeNode("Detached Car Paths")){
+	if(ImGui::TreeNode("Detached Legacy Car Paths")){
 		for(int i = 0; nd = Path::GetDetachedCarNode(i,0); i++){
-			static char str[20];
-			sprintf(str, nd->water ? "WaterPath %d" : "CarPath %d", i);
+			static char str[32];
+			sprintf(str, nd->water ? "Legacy Water Path %d" : "Legacy Car Path %d", i);
 			ImGui::PushID(i);
 			ImGui::Selectable(str);
 			ImGui::PopID();
@@ -4083,10 +4096,10 @@ uiEditorWindow(void)
 	}
 
 	if(nd = Path::GetDetachedPedNode(0,0))
-	if(ImGui::TreeNode("Detached Ped Paths")){
+	if(ImGui::TreeNode("Detached Legacy Ped Paths")){
 		for(int i = 0; nd = Path::GetDetachedPedNode(i,0); i++){
-			static char str[20];
-			sprintf(str,"PedPath %d", i);
+			static char str[32];
+			sprintf(str,"Legacy Ped Path %d", i);
 			ImGui::PushID(i);
 			ImGui::Selectable(str);
 			ImGui::PopID();
@@ -4526,12 +4539,18 @@ uiInstWindow(void)
 			if(ImGui::CollapsingHeader("Effects"))
 				uiFxInfo(inst);
 		if(obj->m_carPathIndex >=0 || obj->m_pedPathIndex >= 0)
-			if(ImGui::CollapsingHeader("Path"))
+			if(ImGui::CollapsingHeader("Legacy Paths"))
 				uiPathInfo(inst);
 	}else{
 		if(Path::selectedNode)// && Path::selectedNode->isDetached())
-		if(ImGui::CollapsingHeader("Path"))
+		if(ImGui::CollapsingHeader("Legacy Paths"))
 			uiPathInfo(nil);
+		if(SAPaths::HasInfoToShow()){
+			if(gSaNodeJustSelected)
+				ImGui::SetNextItemOpen(true);
+			if(ImGui::CollapsingHeader("San Andreas Streamed Paths"))
+				SAPaths::DrawInfoPanel();
+		}
 
 /*
 		if(Effects::selectedEffect)
@@ -5142,6 +5161,13 @@ gui(void)
 	if(CPad::IsKeyJustDown('X')) showToolsWindow ^= 1;
 	if(showToolsWindow) uiToolsWindow();
 
+	{
+		static SAPaths::Node *prevSaNode = nil;
+		gSaNodeJustSelected = SAPaths::selectedNode != nil && SAPaths::selectedNode != prevSaNode;
+		prevSaNode = SAPaths::selectedNode;
+		if(gSaNodeJustSelected)
+			showInstanceWindow = true;
+	}
 	if(!CPad::IsCtrlDown() && !CPad::IsShiftDown() && CPad::IsKeyJustDown('I')) showInstanceWindow ^= 1;
 	if(showInstanceWindow) uiInstWindow();
 

@@ -2,6 +2,7 @@
 #include "modloader.h"
 
 #include "minilzo/minilzo.h"
+#include <vector>
 
 /*
  * Streaming limits:
@@ -33,6 +34,7 @@ enum
 	FILE_TXD,
 	FILE_COL,
 	FILE_IPL,
+	FILE_DAT,
 };
 
 struct DirEntry
@@ -82,6 +84,7 @@ GetDirEntryExtension(const DirEntry *de)
 	case FILE_TXD: return "txd";
 	case FILE_COL: return "col";
 	case FILE_IPL: return "ipl";
+	case FILE_DAT: return "dat";
 	default: return nil;
 	}
 }
@@ -125,6 +128,29 @@ BuildDirEntryLogicalPath(const CdImage *cdimg, const DirEntry *de, char *dst, si
 	return written >= 0 && (size_t)written < size;
 }
 
+static void
+NormalizeLookupPath(const char *in, char *out, size_t size)
+{
+	size_t i;
+
+	if(out == nil || size == 0)
+		return;
+	if(in == nil){
+		out[0] = '\0';
+		return;
+	}
+
+	for(i = 0; i < size-1 && in[i]; i++){
+		char c = in[i];
+		if(c == '\\')
+			c = '/';
+		if(c >= 'A' && c <= 'Z')
+			c = c - 'A' + 'a';
+		out[i] = c;
+	}
+	out[i] = '\0';
+}
+
 static uint8*
 ReadLooseOverrideBuffer(const char *path, int *size)
 {
@@ -145,7 +171,7 @@ void
 uiShowCdImages(void)
 {
 	static const char *types[] = {
-		"-", "DFF", "TXD", "COL", "IPL"
+		"-", "DFF", "TXD", "COL", "IPL", "DAT"
 	};
 	int i, j;
 	CdImage *cdimg;
@@ -208,6 +234,9 @@ AddDirEntry(CdImage *cdimg, DirEntry *de)
 		de->file = NewGameFile(de->name);
 	}else if(rw::strncmp_ci(ext, "ipl", 3) == 0){
 		de->filetype = FILE_IPL;
+		de->file = NewGameFile(de->name);
+	}else if(rw::strncmp_ci(ext, "dat", 3) == 0){
+		de->filetype = FILE_DAT;
 		de->file = NewGameFile(de->name);
 	}else{
 //		log("warning: unknown file extension: %s %s\n", ext, de->name);
@@ -461,6 +490,247 @@ RefreshCdImageMappings(void)
 //uint8 compressionbuf[4*1024*1024];
 
 static uint8*
+DecompressFile(uint8 *src, int *size);
+
+static uint8*
+ReadDirEntryData(CdImage *cdimg, DirEntry *de, int *size, const char **outLooseOverridePath)
+{
+	if(outLooseOverridePath)
+		*outLooseOverridePath = nil;
+
+	// When the directory entry already resolved to a loose override during
+	// modloader scanning, prefer that exact physical file over reconstructing
+	// the lookup key again here.
+	if(de->file && de->file->sourcePath){
+		uint8 *overrideBuffer = ReadLooseOverrideBuffer(de->file->sourcePath, size);
+		if(overrideBuffer){
+			de->overridden = 1;
+			if(outLooseOverridePath)
+				*outLooseOverridePath = de->file->sourcePath;
+			return overrideBuffer;
+		}
+	}
+
+	char entryFilename[32];
+	if(BuildDirEntryFilename(de, entryFilename, sizeof(entryFilename))){
+		const char *overridePath = ModloaderFindImageEntryOverride(cdimg->logicalName, entryFilename);
+		if(overridePath){
+			uint8 *overrideBuffer = ReadLooseOverrideBuffer(overridePath, size);
+			if(overrideBuffer){
+				de->overridden = 1;
+				if(outLooseOverridePath)
+					*outLooseOverridePath = overridePath;
+				return overrideBuffer;
+			}
+		}
+	}
+
+	de->overridden = 0;
+	fseek(cdimg->file, de->position*2048, SEEK_SET);
+	fread(streamingBuffer, 1, de->archiveSize*2048, cdimg->file);
+	if(*(uint32*)streamingBuffer == 0x67A3A1CE)
+		return DecompressFile(streamingBuffer, size);
+	if(size)
+		*size = de->archiveSize*2048;
+	return streamingBuffer;
+}
+
+static bool
+FindDirEntryByLogicalPath(const char *logicalPath, CdImage **outCdimg, DirEntry **outEntry)
+{
+	char normalizedWant[512];
+
+	NormalizeLookupPath(logicalPath, normalizedWant, sizeof(normalizedWant));
+	if(normalizedWant[0] == '\0')
+		return false;
+
+	for(int imgIdx = 0; imgIdx < numCdImages; imgIdx++){
+		CdImage *cdimg = &cdImages[imgIdx];
+		for(int dirIdx = 0; dirIdx < cdimg->directorySize; dirIdx++){
+			DirEntry *de = &cdimg->directory[dirIdx];
+			char entryLogicalPath[512];
+			char normalizedEntryPath[512];
+
+			if(!BuildDirEntryLogicalPath(cdimg, de, entryLogicalPath, sizeof(entryLogicalPath)))
+				continue;
+			NormalizeLookupPath(entryLogicalPath, normalizedEntryPath, sizeof(normalizedEntryPath));
+			if(strcmp(normalizedWant, normalizedEntryPath) != 0)
+				continue;
+
+			if(outCdimg)
+				*outCdimg = cdimg;
+			if(outEntry)
+				*outEntry = de;
+			return true;
+		}
+	}
+	return false;
+}
+
+bool
+ReadCdImageEntryByLogicalPath(const char *logicalPath, std::vector<uint8> &data,
+                              char *outSourcePath, size_t outSourcePathSize)
+{
+	CdImage *cdimg;
+	DirEntry *de;
+	const char *looseOverridePath = nil;
+	int size = 0;
+	uint8 *buf;
+
+	data.clear();
+	if(outSourcePath && outSourcePathSize > 0)
+		outSourcePath[0] = '\0';
+	if(!FindDirEntryByLogicalPath(logicalPath, &cdimg, &de))
+		return false;
+
+	buf = ReadDirEntryData(cdimg, de, &size, &looseOverridePath);
+	if(buf == nil || size < 0)
+		return false;
+
+	data.assign(buf, buf + size);
+	if(outSourcePath && outSourcePathSize > 0){
+		if(looseOverridePath){
+			strncpy(outSourcePath, looseOverridePath, outSourcePathSize-1);
+			outSourcePath[outSourcePathSize-1] = '\0';
+		}else{
+			char entryFilename[32];
+			if(BuildDirEntryFilename(de, entryFilename, sizeof(entryFilename))){
+				snprintf(outSourcePath, outSourcePathSize, "%s::%s", cdimg->sourcePath, entryFilename);
+			}else{
+				strncpy(outSourcePath, cdimg->sourcePath, outSourcePathSize-1);
+				outSourcePath[outSourcePathSize-1] = '\0';
+			}
+		}
+	}
+	return true;
+}
+
+bool
+ReadCdImageEntryByLogicalPathMinSize(const char *logicalPath, size_t minSize,
+                                     std::vector<uint8> &data,
+                                     char *outSourcePath, size_t outSourcePathSize)
+{
+	CdImage *cdimg;
+	DirEntry *de;
+	const char *looseOverridePath = nil;
+	int size = 0;
+	uint8 *buf;
+
+	data.clear();
+	if(outSourcePath && outSourcePathSize > 0)
+		outSourcePath[0] = '\0';
+	if(!FindDirEntryByLogicalPath(logicalPath, &cdimg, &de))
+		return false;
+
+	buf = ReadDirEntryData(cdimg, de, &size, &looseOverridePath);
+	if(buf == nil || size < 0)
+		return false;
+
+	if(outSourcePath && outSourcePathSize > 0){
+		if(looseOverridePath){
+			strncpy(outSourcePath, looseOverridePath, outSourcePathSize-1);
+			outSourcePath[outSourcePathSize-1] = '\0';
+		}else{
+			char entryFilename[32];
+			if(BuildDirEntryFilename(de, entryFilename, sizeof(entryFilename))){
+				snprintf(outSourcePath, outSourcePathSize, "%s::%s", cdimg->sourcePath, entryFilename);
+			}else{
+				strncpy(outSourcePath, cdimg->sourcePath, outSourcePathSize-1);
+				outSourcePath[outSourcePathSize-1] = '\0';
+			}
+		}
+	}
+
+	if((size_t)size >= minSize || looseOverridePath != nil || de->sizeInArchive != 0){
+		data.assign(buf, buf + size);
+		return true;
+	}
+
+	data.resize(minSize);
+	fseek(cdimg->file, de->position*2048, SEEK_SET);
+	size_t read = fread(&data[0], 1, minSize, cdimg->file);
+	data.resize(read);
+	return read > 0;
+}
+
+bool
+GetCdImageEntryInfoByLogicalPath(const char *logicalPath, int *outEntryBytes,
+                                 bool *outCompressed, bool *outLooseOverride,
+                                 char *outSourcePath, size_t outSourcePathSize)
+{
+	CdImage *cdimg;
+	DirEntry *de;
+	const char *overridePath = nil;
+
+	if(outEntryBytes)
+		*outEntryBytes = 0;
+	if(outCompressed)
+		*outCompressed = false;
+	if(outLooseOverride)
+		*outLooseOverride = false;
+	if(outSourcePath && outSourcePathSize > 0)
+		outSourcePath[0] = '\0';
+	if(!FindDirEntryByLogicalPath(logicalPath, &cdimg, &de))
+		return false;
+
+	char entryFilename[32];
+	if(de->file && de->file->sourcePath && de->file->sourcePath[0] != '\0')
+		overridePath = de->file->sourcePath;
+	else if(BuildDirEntryFilename(de, entryFilename, sizeof(entryFilename)))
+		overridePath = ModloaderFindImageEntryOverride(cdimg->logicalName, entryFilename);
+
+	if(outEntryBytes)
+		*outEntryBytes = de->archiveSize*2048;
+	if(outCompressed)
+		*outCompressed = de->sizeInArchive != 0;
+	if(outLooseOverride)
+		*outLooseOverride = overridePath != nil;
+	if(outSourcePath && outSourcePathSize > 0){
+		if(overridePath){
+			strncpy(outSourcePath, overridePath, outSourcePathSize-1);
+			outSourcePath[outSourcePathSize-1] = '\0';
+		}else if(BuildDirEntryFilename(de, entryFilename, sizeof(entryFilename))){
+			snprintf(outSourcePath, outSourcePathSize, "%s::%s", cdimg->sourcePath, entryFilename);
+		}else{
+			strncpy(outSourcePath, cdimg->sourcePath, outSourcePathSize-1);
+			outSourcePath[outSourcePathSize-1] = '\0';
+		}
+	}
+	return true;
+}
+
+bool
+WriteCdImageEntryByLogicalPath(const char *logicalPath, uint8 *data, int size)
+{
+	CdImage *cdimg;
+	DirEntry *de;
+	const char *overridePath = nil;
+
+	if(!FindDirEntryByLogicalPath(logicalPath, &cdimg, &de))
+		return false;
+
+	char entryFilename[32];
+	if(de->file && de->file->sourcePath && de->file->sourcePath[0] != '\0')
+		overridePath = de->file->sourcePath;
+	else if(BuildDirEntryFilename(de, entryFilename, sizeof(entryFilename)))
+		overridePath = ModloaderFindImageEntryOverride(cdimg->logicalName, entryFilename);
+
+	if(overridePath){
+		if(!EnsureParentDirectoriesForPath(overridePath))
+			return false;
+		FILE *f = fopen(overridePath, "wb");
+		if(f == nil)
+			return false;
+		bool ok = size <= 0 || fwrite(data, 1, size, f) == (size_t)size;
+		fclose(f);
+		return ok;
+	}
+
+	int index = (cdimg->index << 24) | (int)(de - cdimg->directory);
+	return WriteFileToImage(index, data, size);
+}
+
+static uint8*
 DecompressFile(uint8 *src, int *size)
 {
 	static uint8 blockbuf[128*1024];
@@ -525,41 +795,12 @@ ReadFileFromImage(int i, int *size)
 {
 	int img;
 	CdImage *cdimg;
+	const char *looseOverridePath = nil;
 	img = i>>24 & 0xFF;
 	i = i & 0xFFFFFF;
 	cdimg = &cdImages[img];
 	DirEntry *de = &cdimg->directory[i];
-
-	// When the directory entry already resolved to a loose override during
-	// modloader scanning, prefer that exact physical file over reconstructing
-	// the lookup key again here.
-	if(de->file && de->file->sourcePath){
-		uint8 *overrideBuffer = ReadLooseOverrideBuffer(de->file->sourcePath, size);
-		if(overrideBuffer){
-			de->overridden = 1;
-			return overrideBuffer;
-		}
-	}
-
-	char entryFilename[32];
-	if(BuildDirEntryFilename(de, entryFilename, sizeof(entryFilename))){
-		const char *overridePath = ModloaderFindImageEntryOverride(cdimg->logicalName, entryFilename);
-		if(overridePath){
-			uint8 *overrideBuffer = ReadLooseOverrideBuffer(overridePath, size);
-			if(overrideBuffer){
-				de->overridden = 1;
-				return overrideBuffer;
-			}
-		}
-	}
-	de->overridden = 0;
-	fseek(cdimg->file, de->position*2048, SEEK_SET);
-	fread(streamingBuffer, 1, de->archiveSize*2048, cdimg->file);
-	if(*(uint32*)streamingBuffer == 0x67A3A1CE)
-		return DecompressFile(streamingBuffer, size);
-	if(size)
-		*size = de->archiveSize*2048;
-	return streamingBuffer;
+	return ReadDirEntryData(cdimg, de, size, &looseOverridePath);
 }
 
 bool

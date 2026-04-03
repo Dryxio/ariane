@@ -28,6 +28,8 @@ typedef unsigned int uint;
 
 struct ObjectInst;
 
+#include "sapaths.h"
+
 #ifdef RWHALFPIXEL
 #define HALFPX (0.5f)
 #else
@@ -134,8 +136,11 @@ extern bool gRenderNavigZones;
 extern bool gRenderInfoZones;
 extern bool gRenderCullZones;
 extern bool gRenderAttribZones;
-extern bool gRenderPedPaths;
-extern bool gRenderCarPaths;
+extern bool gRenderLegacyPedPaths;
+extern bool gRenderLegacyCarPaths;
+extern bool gRenderSaPedPaths;
+extern bool gRenderSaCarPaths;
+extern bool gRenderSaAreaGrid;
 extern bool gRenderEffects;
 extern bool gRenderTimecycleBoxes;
 
@@ -422,6 +427,7 @@ enum DiffFlags {
 };
 int GetInstanceDiffFlags(ObjectInst *inst);
 void StampChangeSeq(ObjectInst *inst);
+uint32 BumpChangeSeq(void);
 uint32 GetLatestChangeSeq(void);
 
 // Object Spawner
