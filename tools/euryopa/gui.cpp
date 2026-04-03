@@ -5,6 +5,7 @@
 #include "object_categories.h"
 #include "telemetry.h"
 #include "updater.h"
+#include "icons.h"
 #include <string>
 #include <vector>
 
@@ -2302,12 +2303,12 @@ static void
 uiMainmenu(void)
 {
 	if(ImGui::BeginMainMenuBar()){
-		if(ImGui::BeginMenu("File")){
-			if(ImGui::MenuItem("Save All IPLs", "Ctrl+S")){
+		if(ImGui::BeginMenu(ICON_FA_FOLDER_OPEN " File")){
+			if(ImGui::MenuItem(ICON_FA_FLOPPY_DISK " Save All IPLs", "Ctrl+S")){
 				if(saveAllIpls())
 					Toast(TOAST_SAVE, "Saved all IPL files to %s", getSaveDestinationLabel());
 			}
-			if(ImGui::MenuItem("Test in Game", "Ctrl+G")){
+			if(ImGui::MenuItem(ICON_FA_GAMEPAD " Test in Game", "Ctrl+G")){
 				testInGame();
 			}
 			if(ImGui::MenuItem("Save to Modloader", nil,
@@ -2316,37 +2317,37 @@ uiMainmenu(void)
 					SAVE_DESTINATION_ORIGINAL_FILES : SAVE_DESTINATION_MODLOADER;
 				saveSaveSettings();
 			}
-			if(ImGui::MenuItem("Hot Reload", "Ctrl+R")){
+			if(ImGui::MenuItem(ICON_FA_BOLT " Hot Reload", "Ctrl+R")){
 				hotReloadIpls();
 			}
 			ImGui::Separator();
-			if(ImGui::MenuItem("Export Prefab...", "Ctrl+Shift+E", false, selection.first != nil)){
+			if(ImGui::MenuItem(ICON_FA_FILE_EXPORT " Export Prefab...", "Ctrl+Shift+E", false, selection.first != nil)){
 				gOpenExportPrefab = true;
 			}
-			if(ImGui::MenuItem("Import Prefab...", "Ctrl+Shift+I")){
+			if(ImGui::MenuItem(ICON_FA_FILE_IMPORT " Import Prefab...", "Ctrl+Shift+I")){
 				gOpenImportPrefab = true;
 			}
-			if(ImGui::MenuItem("Import Custom Object...")){
+			if(ImGui::MenuItem(ICON_FA_CUBE " Import Custom Object...")){
 				beginEmptyCustomImport();
 			}
 			ImGui::Separator();
-			if(ImGui::MenuItem("Exit", "Alt+F4")) sk::globals.quit = 1;
+			if(ImGui::MenuItem(ICON_FA_RIGHT_FROM_BRACKET " Exit", "Alt+F4")) sk::globals.quit = 1;
 			ImGui::EndMenu();
 		}
-		if(ImGui::BeginMenu("Window")){
-			if(ImGui::MenuItem("Time & Weather", "T", showTimeWeatherWindow)) { showTimeWeatherWindow ^= 1; }
-			if(ImGui::MenuItem("View", "V", showViewWindow)) { showViewWindow ^= 1; }
-			if(ImGui::MenuItem("Rendering", "R", showRenderingWindow)) { showRenderingWindow ^= 1; }
-			if(ImGui::MenuItem("Tools", "X", showToolsWindow)) { showToolsWindow ^= 1; }
-			if(ImGui::MenuItem("Object Info", "I", showInstanceWindow)) { showInstanceWindow ^= 1; }
-			if(ImGui::MenuItem("Editor", "E", showEditorWindow)) { showEditorWindow ^= 1; }
-			if(ImGui::MenuItem("Object Browser", "B", showBrowserWindow)) { showBrowserWindow ^= 1; }
-			if(ImGui::MenuItem("Changes", "F", showDiffWindow)) { showDiffWindow ^= 1; }
-			if(ImGui::MenuItem("Log ", nil, showLogWindow)) { showLogWindow ^= 1; }
+		if(ImGui::BeginMenu(ICON_FA_WINDOW_MAXIMIZE " Window")){
+			if(ImGui::MenuItem(ICON_FA_CLOUD_SUN " Time & Weather", "T", showTimeWeatherWindow)) { showTimeWeatherWindow ^= 1; }
+			if(ImGui::MenuItem(ICON_FA_EYE " View", "V", showViewWindow)) { showViewWindow ^= 1; }
+			if(ImGui::MenuItem(ICON_FA_PAINTBRUSH " Rendering", "R", showRenderingWindow)) { showRenderingWindow ^= 1; }
+			if(ImGui::MenuItem(ICON_FA_WRENCH " Tools", "X", showToolsWindow)) { showToolsWindow ^= 1; }
+			if(ImGui::MenuItem(ICON_FA_CIRCLE_INFO " Object Info", "I", showInstanceWindow)) { showInstanceWindow ^= 1; }
+			if(ImGui::MenuItem(ICON_FA_PEN " Editor", "E", showEditorWindow)) { showEditorWindow ^= 1; }
+			if(ImGui::MenuItem(ICON_FA_MAGNIFYING_GLASS " Object Browser", "B", showBrowserWindow)) { showBrowserWindow ^= 1; }
+			if(ImGui::MenuItem(ICON_FA_CODE_COMPARE " Changes", "F", showDiffWindow)) { showDiffWindow ^= 1; }
+			if(ImGui::MenuItem(ICON_FA_LIST " Log ", nil, showLogWindow)) { showLogWindow ^= 1; }
 			if(ImGui::MenuItem("Demo ", nil, showDemoWindow)) { showDemoWindow ^= 1; }
-			if(ImGui::MenuItem("Help", nil, showHelpWindow)) { showHelpWindow ^= 1; }
+			if(ImGui::MenuItem(ICON_FA_CIRCLE_QUESTION " Help", nil, showHelpWindow)) { showHelpWindow ^= 1; }
 			ImGui::Separator();
-			if(ImGui::BeginMenu("Notifications")){
+			if(ImGui::BeginMenu(ICON_FA_BELL " Notifications")){
 				uiNotificationSettings();
 				ImGui::EndMenu();
 			}
@@ -2996,7 +2997,7 @@ uiCustomImportPopup(void)
 static void
 uiHelpWindow(void)
 {
-	ImGui::Begin("Help", &showHelpWindow);
+	ImGui::Begin(ICON_FA_CIRCLE_QUESTION " Help", &showHelpWindow);
 
 	ImGui::BulletText("Camera controls:\n"
 		"LMB: first person look around\n"
@@ -3943,7 +3944,7 @@ uiEditorWindow(void)
 	ObjectDef *obj;
 	TxdDef *txd;
 
-	ImGui::Begin("Editor Window", &showEditorWindow);
+	ImGui::Begin(ICON_FA_PEN " Editor", &showEditorWindow);
 
 	if(ImGui::TreeNode("Camera")){
 		ImGui::InputFloat3("Cam position", (float*)&TheCamera.m_position);
@@ -4120,7 +4121,7 @@ uiEditorWindow(void)
 static void
 uiToolsWindow(void)
 {
-	ImGui::Begin("Tools", &showToolsWindow);
+	ImGui::Begin(ICON_FA_WRENCH " Tools", &showToolsWindow);
 
 	// Gizmo
 	ImGui::Checkbox("Gizmo", &gGizmoEnabled);
@@ -4489,7 +4490,7 @@ uiWaterWindow(void)
 static void
 uiInstWindow(void)
 {
-	ImGui::Begin("Object Info", &showInstanceWindow);
+	ImGui::Begin(ICON_FA_CIRCLE_INFO " Object Info", &showInstanceWindow);
 
 	if(selection.first){
 		int numSelected = 0;
@@ -4659,7 +4660,7 @@ static void
 uiBrowserWindow(void)
 {
 	ImGui::SetNextWindowSize(ImVec2(420, 700), ImGuiCond_FirstUseEver);
-	ImGui::Begin("Object Browser", &showBrowserWindow);
+	ImGui::Begin(ICON_FA_MAGNIFYING_GLASS " Object Browser", &showBrowserWindow);
 
 	int selId = GetSpawnObjectId();
 	static int filtered[NUMOBJECTDEFS];
@@ -4866,7 +4867,7 @@ uiBrowserWindow(void)
 static void
 uiDiffWindow(void)
 {
-	ImGui::Begin("Changes Since Last Save", &showDiffWindow);
+	ImGui::Begin(ICON_FA_CODE_COMPARE " Changes Since Last Save", &showDiffWindow);
 
 	// Count changes by category
 	int numAdded = 0, numDeleted = 0, numMoved = 0, numRotated = 0, numRestored = 0;
@@ -5138,7 +5139,7 @@ gui(void)
 
 	if(CPad::IsKeyJustDown('T')) showTimeWeatherWindow ^= 1;
 	if(showTimeWeatherWindow){
-		ImGui::Begin("Time & Weather", &showTimeWeatherWindow);
+		ImGui::Begin(ICON_FA_CLOUD_SUN " Time & Weather", &showTimeWeatherWindow);
 		uiTimeWeather();
 		ImGui::End();
 	}
@@ -5146,14 +5147,14 @@ gui(void)
 	if(!CPad::IsCtrlDown() && CPad::IsKeyJustDown('V')) showViewWindow ^= 1;
 	if(showViewWindow){
 		ImGui::SetNextWindowSize(ImVec2(460.0f, 640.0f), ImGuiCond_FirstUseEver);
-		ImGui::Begin("View", &showViewWindow);
+		ImGui::Begin(ICON_FA_EYE " View", &showViewWindow);
 		uiView();
 		ImGui::End();
 	}
 
 	if(!CPad::IsCtrlDown() && CPad::IsKeyJustDown('R')) showRenderingWindow ^= 1;
 	if(showRenderingWindow){
-		ImGui::Begin("Rendering", &showRenderingWindow);
+		ImGui::Begin(ICON_FA_PAINTBRUSH " Rendering", &showRenderingWindow);
 		uiRendering();
 		ImGui::End();
 	}

@@ -8,6 +8,10 @@
 #include <direct.h>
 #else
 #include <sys/stat.h>
+#include <unistd.h>
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 #endif
 
 //#define XINPUT
@@ -112,7 +116,22 @@ GetEditorRootDirectory(char *dir, size_t size)
 
 	len = GetCurrentDirectoryA((DWORD)size, dir);
 	return len > 0 && len < size;
+#elif defined(__APPLE__)
+	uint32_t bufsize = (uint32_t)size;
+	if(_NSGetExecutablePath(dir, &bufsize) == 0){
+		char *slash = strrchr(dir, '/');
+		if(slash){ *slash = '\0'; return true; }
+	}
+	strncpy(dir, ".", size);
+	dir[size - 1] = '\0';
+	return true;
 #else
+	ssize_t len = readlink("/proc/self/exe", dir, size - 1);
+	if(len > 0){
+		dir[len] = '\0';
+		char *slash = strrchr(dir, '/');
+		if(slash){ *slash = '\0'; return true; }
+	}
 	strncpy(dir, ".", size);
 	dir[size - 1] = '\0';
 	return true;
@@ -631,7 +650,8 @@ InitRW(void)
 		ImGuiIO &io = ImGui::GetIO();
 		io.IniFilename = gImGuiIniPath;
 	}
-	ImGui::StyleColorsClassic();
+	SetupFonts();
+	SetupStyle();
 
 	RenderInit();
 

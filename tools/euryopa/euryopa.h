@@ -43,6 +43,8 @@ struct ObjectInst;
 void panic(const char *fmt, ...);
 void debug(const char *fmt, ...);
 void log(const char *fmt, ...);
+void SetupStyle(void);
+void SetupFonts(void);
 bool GetEditorRootDirectory(char *dir, size_t size);
 bool BuildPath(char *dst, size_t size, const char *dir, const char *name);
 bool EnsureParentDirectoriesForPath(const char *path);
