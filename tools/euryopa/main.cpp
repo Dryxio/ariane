@@ -139,6 +139,22 @@ GetEditorRootDirectory(char *dir, size_t size)
 }
 
 bool
+GetGameRootDirectory(char *dir, size_t size)
+{
+	if(size == 0)
+		return false;
+
+#ifdef _WIN32
+	DWORD len = GetCurrentDirectoryA((DWORD)size, dir);
+	return len > 0 && len < size;
+#else
+	if(getcwd(dir, size) == nil)
+		return false;
+	return true;
+#endif
+}
+
+bool
 BuildPath(char *dst, size_t size, const char *dir, const char *name)
 {
 	if(size == 0)

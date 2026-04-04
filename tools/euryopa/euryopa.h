@@ -46,6 +46,7 @@ void log(const char *fmt, ...);
 void SetupStyle(void);
 void SetupFonts(void);
 bool GetEditorRootDirectory(char *dir, size_t size);
+bool GetGameRootDirectory(char *dir, size_t size);
 bool BuildPath(char *dst, size_t size, const char *dir, const char *name);
 bool EnsureParentDirectoriesForPath(const char *path);
 #include "version.h"
