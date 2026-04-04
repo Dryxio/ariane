@@ -1,7 +1,10 @@
 #include "euryopa.h"
 #include "modloader.h"
 #include "sapaths.h"
+#include <cctype>
 #include <cmath>
+#include <cstring>
+#include <string>
 #include <stdio.h>
 #include <vector>
 
@@ -28,6 +31,8 @@ static const float NODE_DRAW_RADIUS = 0.9f;
 static const float LANE_WIDTH = 5.0f;
 static const float AREA_SIZE = 750.0f;
 static const size_t MAX_LENIENT_IMG_OVERREAD_BYTES = 2048;
+static const float PREVIEW_PI = 3.14159265358979323846f;
+static const float PREVIEW_PED_Z_OFFSET = 1.08f;
 
 struct NodeAddress {
 	uint16 areaId;
@@ -187,6 +192,100 @@ static const rw::RGBA magenta = { 255, 0, 255, 255 };
 static const rw::RGBA yellow = { 255, 255, 0, 255 };
 static const rw::RGBA white = { 255, 255, 255, 255 };
 
+enum
+{
+	PREVIEW_HAS_ROT = 1,
+	PREVIEW_HAS_TRANS = 2,
+	PREVIEW_HAS_SCALE = 4
+};
+
+struct IfpChunkHeader {
+	char ident[4];
+	uint32 size;
+};
+
+struct PreviewAnimKeyFrame {
+	rw::Quat rotation;
+	float time;
+	rw::V3d translation;
+};
+
+struct PreviewAnimNode {
+	char name[24];
+	int nodeId;
+	int type;
+	std::vector<PreviewAnimKeyFrame> keyFrames;
+};
+
+struct PreviewAnimation {
+	float duration;
+	std::vector<PreviewAnimNode> nodes;
+};
+
+struct PreviewAnimGroupDef {
+	char groupName[32];
+	char ifpFile[32];
+	char walkAnim[32];
+};
+
+struct PreviewPedDef {
+	char modelName[32];
+	char txdName[32];
+	char animGroup[32];
+};
+
+struct PreviewWalkCycle {
+	bool attempted;
+	bool loaded;
+	char failureReason[128];
+	char groupName[32];
+	char ifpFile[32];
+	char walkAnim[32];
+	PreviewAnimation animation;
+};
+
+struct PreviewPedAssets {
+	bool attempted;
+	bool loaded;
+	char failureReason[128];
+	char modelName[32];
+	char txdName[32];
+	char animGroup[32];
+	int walkCycleIndex;
+	rw::TexDictionary *txd;
+	rw::Clump *clump;
+	std::vector<rw::Matrix> baseLocalMatrices;
+	std::vector<PreviewAnimNode> tracksByNode;
+	float animationDuration;
+};
+
+struct PreviewWalker {
+	bool active;
+	rw::Clump *clump;
+	NodeAddress previous;
+	NodeAddress current;
+	NodeAddress target;
+	uint8 direction;
+	float segmentT;
+	float speed;
+	float animTime;
+	uint32 seed;
+	int assetIndex;
+	rw::V3d fromPos;
+	rw::V3d toPos;
+};
+
+static bool gPreviewMetadataAttempted;
+static bool gPreviewMetadataLoaded;
+static char gPreviewMetadataFailureReason[128];
+static std::vector<PreviewAnimGroupDef> gPreviewAnimGroups;
+static std::vector<PreviewPedDef> gPreviewPedDefs;
+static std::vector<PreviewWalkCycle> gPreviewWalkCycles;
+static std::vector<PreviewPedAssets> gPreviewPedAssetCache;
+static std::vector<PreviewWalker> gPreviewWalkers;
+
+static bool loadLogicalPathData(const char *logicalPath, std::vector<uint8> &data);
+
 static bool
 readExact(const uint8 *data, size_t dataSize, size_t *offset, void *buf, size_t size)
 {
@@ -219,6 +318,413 @@ appendBytes(std::vector<uint8> &out, const std::vector<T> &values)
 		return;
 	const uint8 *src = (const uint8*)&values[0];
 	out.insert(out.end(), src, src + sizeof(T)*values.size());
+}
+
+static void
+copyPreviewString(char *dst, size_t size, const std::string &value)
+{
+	if(size == 0)
+		return;
+	strncpy(dst, value.c_str(), size - 1);
+	dst[size - 1] = '\0';
+}
+
+static std::string
+trimPreviewString(const std::string &value)
+{
+	size_t start = 0;
+	size_t end = value.size();
+	while(start < end && std::isspace((unsigned char)value[start]))
+		start++;
+	while(end > start && std::isspace((unsigned char)value[end - 1]))
+		end--;
+	return value.substr(start, end - start);
+}
+
+static std::string
+lowerPreviewString(const std::string &value)
+{
+	std::string out = value;
+	for(size_t i = 0; i < out.size(); i++)
+		out[i] = (char)std::tolower((unsigned char)out[i]);
+	return out;
+}
+
+static bool
+previewStringEquals(const std::string &a, const char *b)
+{
+	return rw::strcmp_ci(a.c_str(), b) == 0;
+}
+
+static std::vector<std::string>
+splitPreviewCsv(const std::string &line)
+{
+	std::vector<std::string> out;
+	size_t start = 0;
+	while(start <= line.size()){
+		size_t comma = line.find(',', start);
+		if(comma == std::string::npos)
+			comma = line.size();
+		out.push_back(trimPreviewString(line.substr(start, comma - start)));
+		start = comma + 1;
+		if(comma == line.size())
+			break;
+	}
+	return out;
+}
+
+static void
+appendPreviewFallbackData(void)
+{
+	bool haveManGroup = false;
+	for(size_t i = 0; i < gPreviewAnimGroups.size(); i++)
+		if(rw::strcmp_ci(gPreviewAnimGroups[i].groupName, "man") == 0)
+			haveManGroup = true;
+	if(!haveManGroup){
+		PreviewAnimGroupDef group = {};
+		copyPreviewString(group.groupName, sizeof(group.groupName), "man");
+		copyPreviewString(group.ifpFile, sizeof(group.ifpFile), "ped");
+		copyPreviewString(group.walkAnim, sizeof(group.walkAnim), "walk_civi");
+		gPreviewAnimGroups.push_back(group);
+	}
+
+	bool haveMale01 = false;
+	for(size_t i = 0; i < gPreviewPedDefs.size(); i++)
+		if(rw::strcmp_ci(gPreviewPedDefs[i].modelName, "male01") == 0)
+			haveMale01 = true;
+	if(!haveMale01){
+		PreviewPedDef ped = {};
+		copyPreviewString(ped.modelName, sizeof(ped.modelName), "male01");
+		copyPreviewString(ped.txdName, sizeof(ped.txdName), "male01");
+		copyPreviewString(ped.animGroup, sizeof(ped.animGroup), "man");
+		gPreviewPedDefs.push_back(ped);
+	}
+}
+
+static bool
+loadPreviewMetadata(void)
+{
+	if(gPreviewMetadataAttempted)
+		return gPreviewMetadataLoaded;
+
+	gPreviewMetadataAttempted = true;
+	gPreviewMetadataLoaded = false;
+	gPreviewMetadataFailureReason[0] = '\0';
+	gPreviewAnimGroups.clear();
+	gPreviewPedDefs.clear();
+
+	std::vector<uint8> animgrpData;
+	if(!loadLogicalPathData("data/animgrp.dat", animgrpData)){
+		snprintf(gPreviewMetadataFailureReason, sizeof(gPreviewMetadataFailureReason), "missing_animgrp_dat");
+		appendPreviewFallbackData();
+		return false;
+	}
+
+	std::string animgrpText((const char*)&animgrpData[0], animgrpData.size());
+	bool readingGroup = false;
+	bool keepGroup = false;
+	PreviewAnimGroupDef currentGroup = {};
+	for(size_t start = 0; start <= animgrpText.size(); ){
+		size_t end = animgrpText.find('\n', start);
+		if(end == std::string::npos)
+			end = animgrpText.size();
+		std::string line = animgrpText.substr(start, end - start);
+		if(!line.empty() && line[line.size() - 1] == '\r')
+			line.resize(line.size() - 1);
+		size_t comment = line.find('#');
+		if(comment != std::string::npos)
+			line.erase(comment);
+		line = trimPreviewString(line);
+		start = end + 1;
+		if(line.empty())
+			continue;
+
+		if(!readingGroup){
+			std::vector<std::string> parts = splitPreviewCsv(line);
+			if(parts.size() < 4)
+				continue;
+			readingGroup = true;
+			keepGroup = rw::strcmp_ci(parts[2].c_str(), "walkcycle") == 0;
+			currentGroup = {};
+			if(keepGroup){
+				copyPreviewString(currentGroup.groupName, sizeof(currentGroup.groupName), lowerPreviewString(parts[0]));
+				copyPreviewString(currentGroup.ifpFile, sizeof(currentGroup.ifpFile), lowerPreviewString(parts[1]));
+			}
+			continue;
+		}
+
+		if(rw::strcmp_ci(line.c_str(), "end") == 0){
+			if(keepGroup && currentGroup.groupName[0] && currentGroup.walkAnim[0])
+				gPreviewAnimGroups.push_back(currentGroup);
+			readingGroup = false;
+			keepGroup = false;
+			currentGroup = {};
+			continue;
+		}
+
+		if(keepGroup && currentGroup.walkAnim[0] == '\0')
+			copyPreviewString(currentGroup.walkAnim, sizeof(currentGroup.walkAnim), lowerPreviewString(line));
+	}
+
+	std::vector<uint8> pedsData;
+	if(!loadLogicalPathData("data/peds.ide", pedsData)){
+		snprintf(gPreviewMetadataFailureReason, sizeof(gPreviewMetadataFailureReason), "missing_peds_ide");
+		appendPreviewFallbackData();
+		return false;
+	}
+
+	std::string pedsText((const char*)&pedsData[0], pedsData.size());
+	bool inPedsBlock = false;
+	for(size_t start = 0; start <= pedsText.size(); ){
+		size_t end = pedsText.find('\n', start);
+		if(end == std::string::npos)
+			end = pedsText.size();
+		std::string line = pedsText.substr(start, end - start);
+		if(!line.empty() && line[line.size() - 1] == '\r')
+			line.resize(line.size() - 1);
+		size_t comment = line.find('#');
+		if(comment != std::string::npos)
+			line.erase(comment);
+		line = trimPreviewString(line);
+		start = end + 1;
+		if(line.empty())
+			continue;
+
+		if(!inPedsBlock){
+			if(rw::strcmp_ci(line.c_str(), "peds") == 0)
+				inPedsBlock = true;
+			continue;
+		}
+		if(rw::strcmp_ci(line.c_str(), "end") == 0)
+			break;
+
+		std::vector<std::string> parts = splitPreviewCsv(line);
+		if(parts.size() < 6)
+			continue;
+
+		std::string modelName = lowerPreviewString(parts[1]);
+		std::string txdName = lowerPreviewString(parts[2]);
+		std::string animGroup = lowerPreviewString(parts[5]);
+		if(modelName.empty() || txdName.empty() || animGroup.empty())
+			continue;
+		if(modelName == "null" || txdName == "null")
+			continue;
+
+		bool duplicate = false;
+		for(size_t i = 0; i < gPreviewPedDefs.size(); i++)
+			if(rw::strcmp_ci(gPreviewPedDefs[i].modelName, modelName.c_str()) == 0 &&
+			   rw::strcmp_ci(gPreviewPedDefs[i].animGroup, animGroup.c_str()) == 0)
+				duplicate = true;
+		if(duplicate)
+			continue;
+
+		PreviewPedDef ped = {};
+		copyPreviewString(ped.modelName, sizeof(ped.modelName), modelName);
+		copyPreviewString(ped.txdName, sizeof(ped.txdName), txdName);
+		copyPreviewString(ped.animGroup, sizeof(ped.animGroup), animGroup);
+		gPreviewPedDefs.push_back(ped);
+	}
+
+	appendPreviewFallbackData();
+	gPreviewMetadataLoaded = !gPreviewAnimGroups.empty() && !gPreviewPedDefs.empty();
+	if(!gPreviewMetadataLoaded)
+		snprintf(gPreviewMetadataFailureReason, sizeof(gPreviewMetadataFailureReason), "empty_preview_metadata");
+	log("SAPaths: loaded preview metadata (%d ped defs, %d anim groups)\n",
+		(int)gPreviewPedDefs.size(), (int)gPreviewAnimGroups.size());
+	return gPreviewMetadataLoaded;
+}
+
+static int
+findPreviewAnimGroupIndex(const char *groupName)
+{
+	for(size_t i = 0; i < gPreviewAnimGroups.size(); i++)
+		if(rw::strcmp_ci(gPreviewAnimGroups[i].groupName, groupName) == 0)
+			return (int)i;
+	return -1;
+}
+
+static int
+findPreviewWalkCycleIndex(const char *groupName)
+{
+	for(size_t i = 0; i < gPreviewWalkCycles.size(); i++)
+		if(rw::strcmp_ci(gPreviewWalkCycles[i].groupName, groupName) == 0)
+			return (int)i;
+	return -1;
+}
+
+static int
+findPreviewPedAssetIndex(const char *modelName, const char *txdName, const char *animGroup)
+{
+	for(size_t i = 0; i < gPreviewPedAssetCache.size(); i++)
+		if(rw::strcmp_ci(gPreviewPedAssetCache[i].modelName, modelName) == 0 &&
+		   rw::strcmp_ci(gPreviewPedAssetCache[i].txdName, txdName) == 0 &&
+		   rw::strcmp_ci(gPreviewPedAssetCache[i].animGroup, animGroup) == 0)
+			return (int)i;
+	return -1;
+}
+
+static uint32
+advancePreviewSeed(uint32 &seed)
+{
+	seed = seed*1664525u + 1013904223u;
+	return seed;
+}
+
+static float
+previewSeedFloat01(uint32 &seed)
+{
+	return (advancePreviewSeed(seed) & 0x00FFFFFF) / 16777216.0f;
+}
+
+static rw::V3d
+lerpV3d(const rw::V3d &a, const rw::V3d &b, float t)
+{
+	return add(scale(a, 1.0f - t), scale(b, t));
+}
+
+static rw::Quat
+normalizePreviewQuat(const rw::Quat &q)
+{
+	float len = std::sqrt(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
+	if(len < 0.0001f)
+		return rw::makeQuat(1.0f, 0.0f, 0.0f, 0.0f);
+	return scale(q, 1.0f/len);
+}
+
+static bool
+readIfpChunkHeader(const std::vector<uint8> &data, size_t *offset, IfpChunkHeader *header)
+{
+	const uint8 *bytes = data.empty() ? nil : &data[0];
+	return readExact(bytes, data.size(), offset, header, sizeof(*header));
+}
+
+static bool
+readRoundedChunkData(const std::vector<uint8> &data, size_t *offset, uint32 size, std::vector<uint8> &out)
+{
+	size_t rounded = (size + 3) & ~3;
+	out.resize(rounded);
+	if(rounded == 0)
+		return true;
+	const uint8 *bytes = data.empty() ? nil : &data[0];
+	return readExact(bytes, data.size(), offset, &out[0], rounded);
+}
+
+static rw::Clump*
+loadRwClumpFromMemory(rw::Stream *stream)
+{
+	using namespace rw;
+
+	rw::Clump *clump = nil;
+	ChunkHeaderInfo header;
+	readChunkHeaderInfo(stream, &header);
+	UVAnimDictionary *prev = currentUVAnimDictionary;
+	if(header.type == ID_UVANIMDICT){
+		UVAnimDictionary *dict = UVAnimDictionary::streamRead(stream);
+		currentUVAnimDictionary = dict;
+		readChunkHeaderInfo(stream, &header);
+	}
+	if(header.type == ID_CLUMP)
+		clump = Clump::streamRead(stream);
+	currentUVAnimDictionary = prev;
+	return clump;
+}
+
+static void
+setupPreviewAtomic(rw::Atomic *atm)
+{
+	gta::attachCustomPipelines(atm);
+	int32 driver = rw::platform;
+	int32 platform = rw::findPlatform(atm);
+	if(platform){
+		rw::platform = platform;
+		rw::switchPipes(atm, rw::platform);
+	}
+	if(atm->geometry->flags & rw::Geometry::NATIVE)
+		atm->uninstance();
+	rw::ps2::unconvertADC(atm->geometry);
+	rw::platform = driver;
+
+	if(rw::Skin::get(atm->geometry)){
+		rw::Skin::setPipeline(atm, 1);
+		atm->setRenderCB(myRenderCB);
+		return;
+	}
+
+	if(params.neoWorldPipe)
+		atm->pipeline = neoWorldPipe;
+	else if(params.leedsPipe)
+		atm->pipeline = gta::leedsPipe;
+	else if(params.daynightPipe && IsBuildingPipeAttached(atm))
+		SetupBuildingPipe(atm);
+	else if(params.daynightPipe)
+		SetupBuildingPipe(atm);
+	else
+		atm->pipeline = nil;
+	atm->setRenderCB(myRenderCB);
+}
+
+static rw::Frame*
+findHAnimHierarchyCB(rw::Frame *frame, void *data)
+{
+	rw::HAnimData *hd = rw::HAnimData::get(frame);
+	if(hd->hierarchy){
+		*(rw::HAnimHierarchy**)data = hd->hierarchy;
+		return nil;
+	}
+	frame->forAllChildren(findHAnimHierarchyCB, data);
+	return frame;
+}
+
+static rw::HAnimHierarchy*
+getHAnimHierarchyFromClump(rw::Clump *clump)
+{
+	rw::HAnimHierarchy *hier = nil;
+	findHAnimHierarchyCB(clump->getFrame(), &hier);
+	return hier;
+}
+
+static void
+initHierarchyFromFrames(rw::HAnimHierarchy *hier)
+{
+	for(int i = 0; i < hier->numNodes; i++)
+		if(hier->nodeInfo[i].frame)
+			hier->matrices[hier->nodeInfo[i].index] = *hier->nodeInfo[i].frame->getLTM();
+}
+
+static void
+setupPreviewClump(rw::Clump *clump)
+{
+	rw::HAnimHierarchy *hier = getHAnimHierarchyFromClump(clump);
+	if(hier){
+		hier->attach();
+		initHierarchyFromFrames(hier);
+	}
+
+	FORLIST(lnk, clump->atomics){
+		rw::Atomic *atomic = rw::Atomic::fromClump(lnk);
+		setupPreviewAtomic(atomic);
+		if(hier)
+			rw::Skin::setHierarchy(atomic, hier);
+	}
+}
+
+static void
+destroyPreviewWalker(PreviewWalker &walker)
+{
+	if(walker.clump){
+		walker.clump->destroy();
+		walker.clump = nil;
+	}
+	walker.assetIndex = -1;
+	walker.active = false;
+}
+
+static void
+clearPreviewWalkers(void)
+{
+	for(size_t i = 0; i < gPreviewWalkers.size(); i++)
+		destroyPreviewWalker(gPreviewWalkers[i]);
+	gPreviewWalkers.clear();
 }
 
 static bool
@@ -449,6 +955,471 @@ getNodePosition(const Node &node)
 {
 	rw::V3d pos = { node.x(), node.y(), node.z() };
 	return pos;
+}
+
+static rw::V3d
+getPedWanderOffset(const Node &node, uint32 seed)
+{
+	int xoff = (int)(seed & 0xF) - 7;
+	int yoff = (int)((seed >> 4) & 0xF) - 7;
+	float scale = node.raw.pathWidth * 0.00775f;
+	rw::V3d offset = { xoff * scale, yoff * scale, 0.0f };
+	return offset;
+}
+
+static bool
+loadPreviewAnimation(const std::vector<uint8> &data, const char *wantedName, PreviewAnimation &outAnim)
+{
+	size_t offset = 0;
+	IfpChunkHeader root;
+	std::vector<uint8> chunkData;
+
+	outAnim.duration = 0.0f;
+	outAnim.nodes.clear();
+
+	if(!readIfpChunkHeader(data, &offset, &root))
+		return false;
+
+	if(strncmp(root.ident, "ANP3", 4) == 0){
+		char packageName[24];
+		uint32 numAnimations = 0;
+		if(!readExact(&data[0], data.size(), &offset, packageName, sizeof(packageName)) ||
+		   !readExact(&data[0], data.size(), &offset, &numAnimations, sizeof(numAnimations)))
+			return false;
+
+		for(uint32 animIndex = 0; animIndex < numAnimations; animIndex++){
+			char animName[24];
+			uint32 numNodes = 0;
+			uint32 frameDataSize = 0;
+			uint32 flags = 0;
+			if(!readExact(&data[0], data.size(), &offset, animName, sizeof(animName)) ||
+			   !readExact(&data[0], data.size(), &offset, &numNodes, sizeof(numNodes)) ||
+			   !readExact(&data[0], data.size(), &offset, &frameDataSize, sizeof(frameDataSize)) ||
+			   !readExact(&data[0], data.size(), &offset, &flags, sizeof(flags)))
+				return false;
+
+			bool wanted = rw::strcmp_ci(animName, wantedName) == 0;
+			PreviewAnimation anim;
+			anim.duration = 0.0f;
+			if(wanted)
+				anim.nodes.reserve(numNodes);
+
+			for(uint32 nodeIndex = 0; nodeIndex < numNodes; nodeIndex++){
+				char nodeName[24];
+				uint32 frameType = 0;
+				uint32 numKeyFrames = 0;
+				uint32 boneId = 0;
+				if(!readExact(&data[0], data.size(), &offset, nodeName, sizeof(nodeName)) ||
+				   !readExact(&data[0], data.size(), &offset, &frameType, sizeof(frameType)) ||
+				   !readExact(&data[0], data.size(), &offset, &numKeyFrames, sizeof(numKeyFrames)) ||
+				   !readExact(&data[0], data.size(), &offset, &boneId, sizeof(boneId)))
+					return false;
+
+				bool hasTranslation = frameType == 2 || frameType == 4;
+				bool compressed = frameType == 3 || frameType == 4;
+				if(!compressed)
+					return false;
+
+				PreviewAnimNode node = {};
+				if(wanted){
+					strncpy(node.name, nodeName, sizeof(node.name));
+					node.name[sizeof(node.name)-1] = '\0';
+					node.nodeId = boneId;
+					node.type = PREVIEW_HAS_ROT | (hasTranslation ? PREVIEW_HAS_TRANS : 0);
+					node.keyFrames.reserve(numKeyFrames);
+				}
+
+				for(uint32 keyIndex = 0; keyIndex < numKeyFrames; keyIndex++){
+					int16 qx, qy, qz, qw, dt;
+					PreviewAnimKeyFrame keyFrame = {};
+					if(!readExact(&data[0], data.size(), &offset, &qx, sizeof(qx)) ||
+					   !readExact(&data[0], data.size(), &offset, &qy, sizeof(qy)) ||
+					   !readExact(&data[0], data.size(), &offset, &qz, sizeof(qz)) ||
+					   !readExact(&data[0], data.size(), &offset, &qw, sizeof(qw)) ||
+					   !readExact(&data[0], data.size(), &offset, &dt, sizeof(dt)))
+						return false;
+
+					keyFrame.rotation = normalizePreviewQuat(rw::makeQuat(
+						qw / 4096.0f,
+						qx / 4096.0f,
+						qy / 4096.0f,
+						qz / 4096.0f
+					));
+					keyFrame.time = dt / 60.0f;
+
+					if(hasTranslation){
+						int16 tx, ty, tz;
+						if(!readExact(&data[0], data.size(), &offset, &tx, sizeof(tx)) ||
+						   !readExact(&data[0], data.size(), &offset, &ty, sizeof(ty)) ||
+						   !readExact(&data[0], data.size(), &offset, &tz, sizeof(tz)))
+							return false;
+						keyFrame.translation = { tx / 1024.0f, ty / 1024.0f, tz / 1024.0f };
+					}
+
+					if(wanted)
+						node.keyFrames.push_back(keyFrame);
+					anim.duration = max(anim.duration, keyFrame.time);
+				}
+
+				if(wanted)
+					anim.nodes.push_back(node);
+			}
+
+			if(wanted){
+				outAnim = anim;
+				return true;
+			}
+		}
+		return false;
+	}
+
+	int numPackages = 0;
+	if(strncmp(root.ident, "ANLF", 4) == 0){
+		if(!readRoundedChunkData(data, &offset, root.size, chunkData) || chunkData.size() < sizeof(int32))
+			return false;
+		numPackages = *(int32*)&chunkData[0];
+	}else if(strncmp(root.ident, "ANPK", 4) == 0){
+		offset = 0;
+		numPackages = 1;
+	}else
+		return false;
+
+	for(int pkg = 0; pkg < numPackages; pkg++){
+		IfpChunkHeader anpk, info;
+		if(!readIfpChunkHeader(data, &offset, &anpk) ||
+		   !readIfpChunkHeader(data, &offset, &info) ||
+		   !readRoundedChunkData(data, &offset, info.size, chunkData) ||
+		   chunkData.size() < sizeof(int32))
+			return false;
+
+		int numAnimations = *(int32*)&chunkData[0];
+		for(int animIndex = 0; animIndex < numAnimations; animIndex++){
+			IfpChunkHeader nameChunk, dgan, nodeInfoChunk;
+			std::vector<uint8> nameData;
+			if(!readIfpChunkHeader(data, &offset, &nameChunk) ||
+			   !readRoundedChunkData(data, &offset, nameChunk.size, nameData) ||
+			   !readIfpChunkHeader(data, &offset, &dgan) ||
+			   !readIfpChunkHeader(data, &offset, &nodeInfoChunk) ||
+			   !readRoundedChunkData(data, &offset, nodeInfoChunk.size, chunkData) ||
+			   chunkData.size() < 8)
+				return false;
+
+			bool wanted = rw::strcmp_ci((const char*)&nameData[0], wantedName) == 0;
+			int numNodes = *(int32*)&chunkData[0];
+			PreviewAnimation anim;
+			anim.duration = 0.0f;
+			if(wanted)
+				anim.nodes.reserve(numNodes);
+
+			for(int nodeIndex = 0; nodeIndex < numNodes; nodeIndex++){
+				IfpChunkHeader cpan, animChunk;
+				if(!readIfpChunkHeader(data, &offset, &cpan) ||
+				   !readIfpChunkHeader(data, &offset, &animChunk) ||
+				   !readRoundedChunkData(data, &offset, animChunk.size, chunkData) ||
+				   chunkData.size() < 44)
+					return false;
+
+				int numKeyFrames = *(int32*)&chunkData[28];
+				int nodeId = *(int32*)&chunkData[40];
+				int type = 0;
+				PreviewAnimNode node = {};
+				if(wanted){
+					strncpy(node.name, (const char*)&chunkData[0], sizeof(node.name));
+					node.name[sizeof(node.name)-1] = '\0';
+					node.nodeId = nodeId;
+				}
+
+				if(numKeyFrames <= 0)
+					continue;
+
+				IfpChunkHeader keyChunk;
+				if(!readIfpChunkHeader(data, &offset, &keyChunk))
+					return false;
+
+				if(strncmp(keyChunk.ident, "KR00", 4) == 0)
+					type = PREVIEW_HAS_ROT;
+				else if(strncmp(keyChunk.ident, "KRT0", 4) == 0)
+					type = PREVIEW_HAS_ROT | PREVIEW_HAS_TRANS;
+				else if(strncmp(keyChunk.ident, "KRTS", 4) == 0)
+					type = PREVIEW_HAS_ROT | PREVIEW_HAS_TRANS | PREVIEW_HAS_SCALE;
+				else
+					return false;
+
+				if(wanted)
+					node.type = type;
+
+				for(int keyIndex = 0; keyIndex < numKeyFrames; keyIndex++){
+					PreviewAnimKeyFrame keyFrame = {};
+					if(type & PREVIEW_HAS_ROT){
+						if(!readExact(&data[0], data.size(), &offset, &keyFrame.rotation, sizeof(keyFrame.rotation)))
+							return false;
+						keyFrame.rotation.x = -keyFrame.rotation.x;
+						keyFrame.rotation.y = -keyFrame.rotation.y;
+						keyFrame.rotation.z = -keyFrame.rotation.z;
+						keyFrame.rotation = normalizePreviewQuat(keyFrame.rotation);
+					}
+					if(type & PREVIEW_HAS_TRANS){
+						if(!readExact(&data[0], data.size(), &offset, &keyFrame.translation, sizeof(keyFrame.translation)))
+							return false;
+					}
+					if(type & PREVIEW_HAS_SCALE){
+						rw::V3d unusedScale;
+						if(!readExact(&data[0], data.size(), &offset, &unusedScale, sizeof(unusedScale)))
+							return false;
+					}
+					if(!readExact(&data[0], data.size(), &offset, &keyFrame.time, sizeof(keyFrame.time)))
+						return false;
+					if(wanted)
+						node.keyFrames.push_back(keyFrame);
+					anim.duration = max(anim.duration, keyFrame.time);
+				}
+
+				if(wanted)
+					anim.nodes.push_back(node);
+			}
+
+			if(wanted){
+				outAnim = anim;
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+static bool
+samplePreviewTrack(const PreviewAnimNode &track, float time, rw::Quat *rotation, rw::V3d *translation)
+{
+	if(track.keyFrames.empty())
+		return false;
+	if(track.keyFrames.size() == 1){
+		if(rotation) *rotation = track.keyFrames[0].rotation;
+		if(translation) *translation = track.keyFrames[0].translation;
+		return true;
+	}
+
+	const PreviewAnimKeyFrame *prev = &track.keyFrames[0];
+	const PreviewAnimKeyFrame *next = &track.keyFrames[track.keyFrames.size()-1];
+	for(size_t i = 1; i < track.keyFrames.size(); i++){
+		if(time <= track.keyFrames[i].time){
+			next = &track.keyFrames[i];
+			prev = &track.keyFrames[i-1];
+			break;
+		}
+	}
+
+	float span = next->time - prev->time;
+	float t = span > 0.0001f ? (time - prev->time) / span : 0.0f;
+	t = clamp(t, 0.0f, 1.0f);
+	if(rotation) *rotation = slerp(prev->rotation, next->rotation, t);
+	if(translation) *translation = lerpV3d(prev->translation, next->translation, t);
+	return true;
+}
+
+static bool
+loadLogicalPathData(const char *logicalPath, std::vector<uint8> &data)
+{
+	char sourcePath[1024];
+	sourcePath[0] = '\0';
+	if(ReadCdImageEntryByLogicalPath(logicalPath, data, sourcePath, sizeof(sourcePath)))
+		return true;
+
+	const char *redirect = ModloaderGetSourcePath(logicalPath);
+	int size = 0;
+	uint8 *buf = nil;
+	if(redirect)
+		buf = ReadLooseFile(redirect, &size);
+	else
+		buf = ReadLooseFile(logicalPath, &size);
+	if(buf && size > 0){
+		data.assign(buf, buf + size);
+		free(buf);
+		return true;
+	}
+	if(buf)
+		free(buf);
+
+	char gameRoot[1024];
+	char absPath[1024];
+	if(GetGameRootDirectory(gameRoot, sizeof(gameRoot)) &&
+	   BuildPath(absPath, sizeof(absPath), gameRoot, logicalPath)){
+		buf = ReadLooseFile(absPath, &size);
+		if(buf && size > 0){
+			data.assign(buf, buf + size);
+			free(buf);
+			return true;
+		}
+		if(buf)
+			free(buf);
+	}
+	return false;
+}
+
+static int
+ensurePreviewWalkCycleLoaded(const char *groupName)
+{
+	int existing = findPreviewWalkCycleIndex(groupName);
+	if(existing >= 0){
+		PreviewWalkCycle &cycle = gPreviewWalkCycles[existing];
+		return cycle.loaded ? existing : -1;
+	}
+
+	if(!loadPreviewMetadata() && gPreviewAnimGroups.empty())
+		return -1;
+
+	int groupIndex = findPreviewAnimGroupIndex(groupName);
+	if(groupIndex < 0)
+		groupIndex = findPreviewAnimGroupIndex("man");
+	if(groupIndex < 0)
+		return -1;
+
+	PreviewWalkCycle cycle = {};
+	copyPreviewString(cycle.groupName, sizeof(cycle.groupName), gPreviewAnimGroups[groupIndex].groupName);
+	copyPreviewString(cycle.ifpFile, sizeof(cycle.ifpFile), gPreviewAnimGroups[groupIndex].ifpFile);
+	copyPreviewString(cycle.walkAnim, sizeof(cycle.walkAnim), gPreviewAnimGroups[groupIndex].walkAnim);
+	cycle.attempted = true;
+	cycle.loaded = false;
+	cycle.failureReason[0] = '\0';
+	gPreviewWalkCycles.push_back(cycle);
+
+	PreviewWalkCycle &loadedCycle = gPreviewWalkCycles.back();
+	char ifpPath[128];
+	if(snprintf(ifpPath, sizeof(ifpPath), "anim/%s.ifp", loadedCycle.ifpFile) >= (int)sizeof(ifpPath)){
+		snprintf(loadedCycle.failureReason, sizeof(loadedCycle.failureReason), "ifp_path_too_long");
+		return -1;
+	}
+
+	std::vector<uint8> ifpData;
+	if(!loadLogicalPathData(ifpPath, ifpData) ||
+	   !loadPreviewAnimation(ifpData, loadedCycle.walkAnim, loadedCycle.animation)){
+		snprintf(loadedCycle.failureReason, sizeof(loadedCycle.failureReason), "missing_walk_animation");
+		log("SAPaths: failed loading %s/%s for preview walkers\n",
+			loadedCycle.ifpFile, loadedCycle.walkAnim);
+		return -1;
+	}
+
+	loadedCycle.loaded = true;
+	return (int)gPreviewWalkCycles.size() - 1;
+}
+
+static int
+loadPreviewPedAssets(int pedDefIndex)
+{
+	if(pedDefIndex < 0 || pedDefIndex >= (int)gPreviewPedDefs.size())
+		return -1;
+
+	PreviewPedDef &pedDef = gPreviewPedDefs[pedDefIndex];
+	int existing = findPreviewPedAssetIndex(pedDef.modelName, pedDef.txdName, pedDef.animGroup);
+	if(existing >= 0)
+		return gPreviewPedAssetCache[existing].loaded ? existing : -1;
+
+	PreviewPedAssets assets = {};
+	copyPreviewString(assets.modelName, sizeof(assets.modelName), pedDef.modelName);
+	copyPreviewString(assets.txdName, sizeof(assets.txdName), pedDef.txdName);
+	copyPreviewString(assets.animGroup, sizeof(assets.animGroup), pedDef.animGroup);
+	assets.walkCycleIndex = ensurePreviewWalkCycleLoaded(assets.animGroup);
+	assets.attempted = true;
+	assets.loaded = false;
+	assets.failureReason[0] = '\0';
+	assets.animationDuration = 0.0f;
+	gPreviewPedAssetCache.push_back(assets);
+
+	PreviewPedAssets &entry = gPreviewPedAssetCache.back();
+	if(entry.walkCycleIndex < 0){
+		snprintf(entry.failureReason, sizeof(entry.failureReason), "missing_walk_cycle");
+		return -1;
+	}
+
+	char txdPath[128];
+	char dffPath[128];
+	if(snprintf(txdPath, sizeof(txdPath), "models/gta3.img/%s.txd", entry.txdName) >= (int)sizeof(txdPath) ||
+	   snprintf(dffPath, sizeof(dffPath), "models/gta3.img/%s.dff", entry.modelName) >= (int)sizeof(dffPath)){
+		snprintf(entry.failureReason, sizeof(entry.failureReason), "model_path_too_long");
+		return -1;
+	}
+
+	std::vector<uint8> txdData;
+	if(!loadLogicalPathData(txdPath, txdData)){
+		snprintf(entry.failureReason, sizeof(entry.failureReason), "missing_txd");
+		log("SAPaths: preview walker TXD not found: %s\n", txdPath);
+		return -1;
+	}
+
+	rw::StreamMemory txdStream;
+	txdStream.open(&txdData[0], txdData.size());
+	if(findChunk(&txdStream, rw::ID_TEXDICTIONARY, nil, nil)){
+		entry.txd = rw::TexDictionary::streamRead(&txdStream);
+		if(entry.txd)
+			ConvertTxd(entry.txd);
+	}
+	txdStream.close();
+	if(entry.txd == nil){
+		snprintf(entry.failureReason, sizeof(entry.failureReason), "invalid_txd");
+		return -1;
+	}
+
+	std::vector<uint8> dffData;
+	if(!loadLogicalPathData(dffPath, dffData)){
+		snprintf(entry.failureReason, sizeof(entry.failureReason), "missing_dff");
+		log("SAPaths: preview walker DFF not found: %s\n", dffPath);
+		return -1;
+	}
+
+	rw::TexDictionary *prevTxd = rw::TexDictionary::getCurrent();
+	rw::TexDictionary::setCurrent(entry.txd);
+	rw::StreamMemory dffStream;
+	dffStream.open(&dffData[0], dffData.size());
+	entry.clump = loadRwClumpFromMemory(&dffStream);
+	dffStream.close();
+	rw::TexDictionary::setCurrent(prevTxd);
+	if(entry.clump == nil){
+		snprintf(entry.failureReason, sizeof(entry.failureReason), "invalid_dff");
+		return -1;
+	}
+
+	setupPreviewClump(entry.clump);
+	rw::HAnimHierarchy *hier = getHAnimHierarchyFromClump(entry.clump);
+	if(hier == nil){
+		snprintf(entry.failureReason, sizeof(entry.failureReason), "missing_hanim");
+		return -1;
+	}
+
+	entry.baseLocalMatrices.resize(hier->numNodes);
+	entry.tracksByNode.clear();
+	entry.tracksByNode.resize(hier->numNodes);
+	for(int i = 0; i < hier->numNodes; i++){
+		if(hier->nodeInfo[i].frame)
+			entry.baseLocalMatrices[i] = hier->nodeInfo[i].frame->matrix;
+		else
+			entry.baseLocalMatrices[i].setIdentity();
+	}
+
+	PreviewWalkCycle &cycle = gPreviewWalkCycles[entry.walkCycleIndex];
+	entry.animationDuration = max(cycle.animation.duration, 0.001f);
+	for(size_t i = 0; i < cycle.animation.nodes.size(); i++){
+		PreviewAnimNode &track = cycle.animation.nodes[i];
+		int index = hier->getIndex(track.nodeId);
+		if(index < 0){
+			for(int boneIndex = 0; boneIndex < hier->numNodes; boneIndex++){
+				rw::Frame *frame = hier->nodeInfo[boneIndex].frame;
+				if(frame == nil)
+					continue;
+				const char *boneName = gta::getNodeName(frame);
+				if(boneName && rw::strcmp_ci(boneName, track.name) == 0){
+					index = boneIndex;
+					break;
+				}
+			}
+		}
+		if(index >= 0)
+			entry.tracksByNode[index] = track;
+	}
+
+	entry.loaded = true;
+	log("SAPaths: loaded preview walker assets (%s + %s)\n",
+		entry.modelName, cycle.walkAnim);
+	return (int)gPreviewPedAssetCache.size() - 1;
 }
 
 static rw::V2d
@@ -776,6 +1747,7 @@ void
 Reset(void)
 {
 	clearAreas();
+	clearPreviewWalkers();
 	gLoadAttempted = false;
 	gLoadSucceeded = false;
 	gLoadFailed = false;
@@ -1144,6 +2116,354 @@ drawVehicleLanes(void)
 	}
 }
 
+static uint8
+directionToOctant(const rw::V3d &dir)
+{
+	float angle = std::atan2(dir.x, dir.y);
+	int octant = (int)std::floor((angle + PREVIEW_PI/8.0f) / (PREVIEW_PI/4.0f));
+	octant %= 8;
+	if(octant < 0)
+		octant += 8;
+	return (uint8)octant;
+}
+
+static bool
+chooseNextPreviewPedNode(const NodeAddress &currentAddr, const NodeAddress &previousAddr, uint8 direction,
+                        NodeAddress *outTarget, uint8 *outDirection)
+{
+	Node *current = getNode(currentAddr);
+	if(current == nil || current->numLinks() <= 0)
+		return false;
+	*outTarget = { 0xFFFF, 0xFFFF };
+
+	AreaData *area = getArea(current->ownerAreaId);
+	if(area == nil)
+		return false;
+
+	float angle = direction * (PREVIEW_PI/4.0f);
+	rw::V3d wantedDir = { std::sin(angle), std::cos(angle), 0.0f };
+	float bestScore = -999999.0f;
+	NodeAddress fallback = { 0xFFFF, 0xFFFF };
+	rw::V3d fallbackDir = { 0.0f, 1.0f, 0.0f };
+
+	for(int li = 0; li < current->numLinks(); li++){
+		int slot = current->raw.baseLinkId + li;
+		if(slot < 0 || slot >= (int)area->nodeLinks.size())
+			continue;
+		NodeAddress linkedAddr = area->nodeLinks[slot];
+		Node *linked = getNode(linkedAddr);
+		if(linked == nil)
+			continue;
+		if(!current->isSwitchedOff() && linked->isSwitchedOff())
+			continue;
+		if(!current->dontWander() && linked->dontWander())
+			continue;
+
+		rw::V3d delta = sub(getNodePosition(*linked), getNodePosition(*current));
+		delta.z = 0.0f;
+		float len = length(delta);
+		if(len < 0.001f)
+			continue;
+		rw::V3d normalized = scale(delta, 1.0f/len);
+		if(!fallback.isValid()){
+			fallback = linkedAddr;
+			fallbackDir = normalized;
+		}
+		float score = dot(normalized, wantedDir);
+		if(score >= bestScore){
+			bestScore = score;
+			*outTarget = linkedAddr;
+			if(outDirection)
+				*outDirection = directionToOctant(normalized);
+		}
+	}
+
+	if(!outTarget->isValid() && fallback.isValid()){
+		*outTarget = fallback;
+		if(outDirection)
+			*outDirection = directionToOctant(fallbackDir);
+	}
+
+	if(outTarget->isValid() &&
+	   outTarget->areaId == previousAddr.areaId &&
+	   outTarget->nodeId == previousAddr.nodeId &&
+	   fallback.isValid()){
+		*outTarget = fallback;
+		if(outDirection)
+			*outDirection = directionToOctant(fallbackDir);
+	}
+
+	return outTarget->isValid();
+}
+
+static bool
+pickPreviewSpawnNode(uint32 &seed, NodeAddress *outAddr)
+{
+	std::vector<NodeAddress> candidates;
+	candidates.reserve(256);
+
+	for(int areaId = 0; areaId < NUM_PATH_AREAS; areaId++){
+		AreaData &area = gAreas[areaId];
+		if(!area.loaded || !areaInDrawRange(areaId))
+			continue;
+		for(uint32 i = area.numVehicleNodes; i < area.numNodes; i++){
+			Node &node = area.nodes[i];
+			if(node.numLinks() <= 0 || node.dontWander() || node.waterNode())
+				continue;
+			rw::V3d pos = getNodePosition(node);
+			if(TheCamera.distanceTo(pos) > PATH_DRAW_DIST*0.75f)
+				continue;
+			candidates.push_back(node.address());
+		}
+	}
+
+	if(candidates.empty())
+		return false;
+
+	int index = (int)(previewSeedFloat01(seed) * candidates.size());
+	index = clamp(index, 0, (int)candidates.size()-1);
+	*outAddr = candidates[index];
+	return true;
+}
+
+static void
+updatePreviewWalkerEndpoints(PreviewWalker &walker)
+{
+	Node *current = getNode(walker.current);
+	Node *target = getNode(walker.target);
+	if(current == nil || target == nil){
+		walker.active = false;
+		return;
+	}
+
+	uint32 fromSeed = walker.seed ^ (walker.current.areaId << 16) ^ walker.current.nodeId;
+	uint32 toSeed = walker.seed ^ (walker.target.areaId << 16) ^ walker.target.nodeId;
+	walker.fromPos = add(getNodePosition(*current), getPedWanderOffset(*current, fromSeed));
+	walker.toPos = add(getNodePosition(*target), getPedWanderOffset(*target, toSeed));
+}
+
+static void
+applyPreviewWalkerAnimation(PreviewWalker &walker)
+{
+	if(walker.clump == nil || walker.assetIndex < 0 || walker.assetIndex >= (int)gPreviewPedAssetCache.size())
+		return;
+	PreviewPedAssets &assets = gPreviewPedAssetCache[walker.assetIndex];
+	if(!assets.loaded)
+		return;
+
+	rw::HAnimHierarchy *hier = getHAnimHierarchyFromClump(walker.clump);
+	if(hier == nil || hier->numNodes <= 0)
+		return;
+
+	float animTime = walker.animTime;
+	if(assets.animationDuration > 0.001f)
+		animTime = std::fmod(animTime, assets.animationDuration);
+
+	rw::Matrix rootMat;
+	rw::Frame *hierRoot = hier->parentFrame;
+	rw::Frame *rootParent = hierRoot ? hierRoot->getParent() : nil;
+	if(hierRoot && rootParent && !(hier->flags & rw::HAnimHierarchy::LOCALSPACEMATRICES))
+		rootMat = *rootParent->getLTM();
+	else
+		rootMat.setIdentity();
+
+	rw::Matrix *parentMat = &rootMat;
+	rw::Matrix *stack[64];
+	rw::Matrix **sp = stack;
+	*sp++ = parentMat;
+
+	for(int i = 0; i < hier->numNodes; i++){
+		rw::Matrix local = assets.baseLocalMatrices[i];
+		const PreviewAnimNode &track = assets.tracksByNode[i];
+		if(!track.keyFrames.empty()){
+			rw::Quat rotation;
+			rw::V3d translation;
+			if(samplePreviewTrack(track, animTime, &rotation, &translation)){
+				rw::V3d localPos = local.pos;
+				local.rotate(rotation, rw::COMBINEREPLACE);
+				local.pos = localPos;
+				if(track.type & PREVIEW_HAS_TRANS){
+					if(i == 0){
+						local.pos.x = 0.0f;
+						local.pos.y = 0.0f;
+						local.pos.z = translation.z;
+					}else
+						local.pos = translation;
+				}
+			}
+		}
+
+		rw::Matrix::mult(&hier->matrices[i], &local, parentMat);
+		if(hier->nodeInfo[i].flags & rw::HAnimHierarchy::PUSH){
+			if(sp < stack + 64)
+				*sp++ = parentMat;
+		}
+		parentMat = &hier->matrices[i];
+		if(hier->nodeInfo[i].flags & rw::HAnimHierarchy::POP){
+			if(sp > stack)
+				parentMat = *--sp;
+			else
+				parentMat = &rootMat;
+		}
+	}
+}
+
+static bool
+resetPreviewWalker(PreviewWalker &walker, uint32 seed)
+{
+	destroyPreviewWalker(walker);
+	if(!loadPreviewMetadata() && gPreviewPedDefs.empty())
+		return false;
+
+	walker.seed = seed;
+	walker.active = true;
+	walker.previous = { 0xFFFF, 0xFFFF };
+	walker.current = { 0xFFFF, 0xFFFF };
+	walker.target = { 0xFFFF, 0xFFFF };
+	walker.assetIndex = -1;
+	walker.direction = (uint8)(advancePreviewSeed(walker.seed) & 7);
+	walker.segmentT = previewSeedFloat01(walker.seed);
+	walker.speed = 1.0f + previewSeedFloat01(walker.seed)*0.45f;
+
+	for(int attempts = 0; attempts < 16; attempts++){
+		int pedIndex = (int)(previewSeedFloat01(walker.seed) * gPreviewPedDefs.size());
+		pedIndex = clamp(pedIndex, 0, (int)gPreviewPedDefs.size()-1);
+		walker.assetIndex = loadPreviewPedAssets(pedIndex);
+		if(walker.assetIndex >= 0)
+			break;
+	}
+	if(walker.assetIndex < 0)
+		return false;
+
+	PreviewPedAssets &assets = gPreviewPedAssetCache[walker.assetIndex];
+	walker.clump = assets.clump->clone();
+	if(walker.clump == nil)
+		return false;
+	setupPreviewClump(walker.clump);
+	walker.animTime = previewSeedFloat01(walker.seed) * assets.animationDuration;
+
+	if(!pickPreviewSpawnNode(walker.seed, &walker.current))
+		return false;
+	if(!chooseNextPreviewPedNode(walker.current, walker.previous, walker.direction, &walker.target, &walker.direction))
+		return false;
+
+	updatePreviewWalkerEndpoints(walker);
+	return true;
+}
+
+static void
+advancePreviewWalkerSegment(PreviewWalker &walker)
+{
+	walker.previous = walker.current;
+	walker.current = walker.target;
+	walker.target = { 0xFFFF, 0xFFFF };
+	walker.segmentT = 0.0f;
+	if(!chooseNextPreviewPedNode(walker.current, walker.previous, walker.direction, &walker.target, &walker.direction))
+		walker.active = false;
+	else
+		updatePreviewWalkerEndpoints(walker);
+}
+
+static void
+updatePreviewWalker(PreviewWalker &walker)
+{
+	if(!walker.active){
+		resetPreviewWalker(walker, walker.seed + 1);
+		return;
+	}
+
+	rw::V3d approxPos = lerpV3d(walker.fromPos, walker.toPos, clamp(walker.segmentT, 0.0f, 1.0f));
+	if(TheCamera.distanceTo(approxPos) > PATH_DRAW_DIST*1.5f){
+		walker.active = false;
+		resetPreviewWalker(walker, walker.seed + 31);
+		return;
+	}
+
+	if(gPlayAnimations)
+		walker.animTime += timeStep;
+
+	for(int steps = 0; steps < 4; steps++){
+		rw::V3d delta = sub(walker.toPos, walker.fromPos);
+		float segmentLength = length(delta);
+		if(segmentLength < 0.01f){
+			advancePreviewWalkerSegment(walker);
+			if(!walker.active){
+				resetPreviewWalker(walker, walker.seed + 17);
+				return;
+			}
+			continue;
+		}
+
+		walker.segmentT += (walker.speed * timeStep) / segmentLength;
+		if(walker.segmentT < 1.0f)
+			break;
+		walker.segmentT -= 1.0f;
+		advancePreviewWalkerSegment(walker);
+		if(!walker.active){
+			resetPreviewWalker(walker, walker.seed + 17);
+			return;
+		}
+	}
+
+	rw::V3d pos = lerpV3d(walker.fromPos, walker.toPos, clamp(walker.segmentT, 0.0f, 1.0f));
+	pos.z += PREVIEW_PED_Z_OFFSET;
+	rw::V3d dir = sub(walker.toPos, walker.fromPos);
+	dir.z = 0.0f;
+	float dirLen = length(dir);
+	if(dirLen < 0.001f)
+		dir = { 0.0f, 1.0f, 0.0f };
+	else
+		dir = scale(dir, 1.0f/dirLen);
+
+	rw::Matrix world;
+	world.setIdentity();
+	world.lookAt({ 0.0f, 0.0f, 1.0f }, dir);
+	world.pos = pos;
+	walker.clump->getFrame()->matrix = world;
+	walker.clump->getFrame()->updateObjects();
+	applyPreviewWalkerAnimation(walker);
+}
+
+static void
+renderPreviewWalkers(void)
+{
+	if(!gRenderSaPedPathWalkers || gSaPedPathWalkerCount <= 0)
+		return;
+	if(!loadPreviewMetadata() && gPreviewPedDefs.empty())
+		return;
+
+	int wantedCount = clamp(gSaPedPathWalkerCount, 0, 32);
+	while((int)gPreviewWalkers.size() > wantedCount){
+		destroyPreviewWalker(gPreviewWalkers.back());
+		gPreviewWalkers.pop_back();
+	}
+	while((int)gPreviewWalkers.size() < wantedCount){
+		PreviewWalker walker = {};
+		walker.seed = 0x12345678u + (uint32)gPreviewWalkers.size()*0x1020304u;
+		resetPreviewWalker(walker, walker.seed);
+		gPreviewWalkers.push_back(walker);
+	}
+
+	rw::SetRenderState(rw::ZTESTENABLE, 1);
+	rw::SetRenderState(rw::ZWRITEENABLE, 1);
+	rw::SetRenderState(rw::FOGENABLE, 0);
+	rw::SetRenderState(rw::CULLMODE, rw::CULLBACK);
+	rw::RGBAf savedAmbient = pAmbient->color;
+	rw::RGBAf savedDirect = pDirect->color;
+	pAmbient->setColor(0.75f, 0.75f, 0.75f);
+	pDirect->setColor(0.55f, 0.55f, 0.55f);
+
+	for(size_t i = 0; i < gPreviewWalkers.size(); i++){
+		updatePreviewWalker(gPreviewWalkers[i]);
+		if(gPreviewWalkers[i].active && gPreviewWalkers[i].clump)
+			gPreviewWalkers[i].clump->render();
+	}
+
+	pAmbient->setColor(savedAmbient.red, savedAmbient.green, savedAmbient.blue);
+	pDirect->setColor(savedDirect.red, savedDirect.green, savedDirect.blue);
+	rw::SetRenderState(rw::CULLMODE, rw::CULLNONE);
+}
+
 void
 RenderCarPaths(void)
 {
@@ -1161,6 +2481,7 @@ RenderPedPaths(void)
 	if(!gLoadSucceeded)
 		return;
 	drawNodeSet(false);
+	renderPreviewWalkers();
 }
 
 void

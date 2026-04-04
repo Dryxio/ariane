@@ -68,10 +68,12 @@ bool gRenderAttribZones;
 bool gRenderLegacyPedPaths;
 bool gRenderLegacyCarPaths;
 bool gRenderSaPedPaths;
+bool gRenderSaPedPathWalkers;
 bool gRenderSaCarPaths;
 bool gRenderSaAreaGrid;
 bool gRenderEffects;
 bool gRenderTimecycleBoxes;
+int gSaPedPathWalkerCount = 12;
 
 // SA postfx
 int  gColourFilter;

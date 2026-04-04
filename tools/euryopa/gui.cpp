@@ -3211,6 +3211,13 @@ uiView(void)
 		ImGui::SeparatorText("San Andreas Streamed Paths");
 		ImGui::Checkbox("Draw SA Car Paths", &gRenderSaCarPaths);
 		ImGui::Checkbox("Draw SA Ped Paths", &gRenderSaPedPaths);
+		if(gRenderSaPedPaths){
+			ImGui::Indent();
+			ImGui::Checkbox("Show Preview Walkers", &gRenderSaPedPathWalkers);
+			if(gRenderSaPedPathWalkers)
+				ImGui::SliderInt("Preview Walker Count", &gSaPedPathWalkerCount, 1, 32);
+			ImGui::Unindent();
+		}
 		ImGui::Checkbox("Draw SA Area Grid", &gRenderSaAreaGrid);
 		ImGui::SetItemTooltip("Show the 8x8 area grid boundaries (750 unit cells).\nNodes cannot be moved across these boundaries.");
 	}
