@@ -2308,28 +2308,35 @@ uiMainmenu(void)
 				if(saveAllIpls())
 					Toast(TOAST_SAVE, "Saved all IPL files to %s", getSaveDestinationLabel());
 			}
+			ImGui::SetItemTooltip("Saves all modified objects in their respective placement files (.ipl).");
 			if(ImGui::MenuItem(ICON_FA_GAMEPAD " Test in Game", "Ctrl+G")){
 				testInGame();
 			}
+			ImGui::SetItemTooltip("Launches your game and spawns you to the current camera position.\nRequires ariane.asi installed in your game folder.");
 			if(ImGui::MenuItem("Save to Modloader", nil,
 			                   gSaveDestination == SAVE_DESTINATION_MODLOADER)){
 				gSaveDestination = gSaveDestination == SAVE_DESTINATION_MODLOADER ?
 					SAVE_DESTINATION_ORIGINAL_FILES : SAVE_DESTINATION_MODLOADER;
 				saveSaveSettings();
 			}
+			ImGui::SetItemTooltip("When enabled, saves go to modloader/Ariane/ instead of\noverwriting original game files.");
 			if(ImGui::MenuItem(ICON_FA_BOLT " Hot Reload", "Ctrl+R")){
 				hotReloadIpls();
 			}
+			ImGui::SetItemTooltip("Instantly apply your changes in a running SA game without restarting.\nRequires ariane.asi.");
 			ImGui::Separator();
 			if(ImGui::MenuItem(ICON_FA_FILE_EXPORT " Export Prefab...", "Ctrl+Shift+E", false, selection.first != nil)){
 				gOpenExportPrefab = true;
 			}
+			ImGui::SetItemTooltip("Saves the selected objects as a reusable prefab file (.ariane)\nthat you can import later or share.");
 			if(ImGui::MenuItem(ICON_FA_FILE_IMPORT " Import Prefab...", "Ctrl+Shift+I")){
 				gOpenImportPrefab = true;
 			}
+			ImGui::SetItemTooltip("Loads a previously exported prefab file and places those\nobjects into the current map.");
 			if(ImGui::MenuItem(ICON_FA_CUBE " Import Custom Object...")){
 				beginEmptyCustomImport();
 			}
+			ImGui::SetItemTooltip("Import a custom DFF/TXD into the editor as a new placeable object.\nAutomatically registers it in your game files, ready to use in game.");
 			ImGui::Separator();
 			if(ImGui::MenuItem(ICON_FA_RIGHT_FROM_BRACKET " Exit", "Alt+F4")) sk::globals.quit = 1;
 			ImGui::EndMenu();
@@ -4134,6 +4141,7 @@ uiToolsWindow(void)
 			gGizmoMode = GIZMO_ROTATE;
 
 		ImGui::Checkbox("Grid Snap", &gGizmoSnap);
+		ImGui::SetItemTooltip("Snap gizmo movements to fixed increments.");
 		if(gGizmoSnap){
 			char buf[32];
 			ImGui::SameLine();
@@ -4176,16 +4184,20 @@ uiToolsWindow(void)
 	// Placement
 	ImGui::Text("Placement");
 	ImGui::Checkbox("Snap to object", &gPlaceSnapToObjects);
+	ImGui::SetItemTooltip("When placing objects, snap to the surface of existing objects under the cursor.");
 	ImGui::Checkbox("Snap to ground", &gPlaceSnapToGround);
+	ImGui::SetItemTooltip("When placing objects, snap to the ground below the cursor.");
 
 	ImGui::Separator();
 
 	// Dragging
 	ImGui::Text("Dragging");
 	ImGui::Checkbox("Follow ground", &gDragFollowGround);
+	ImGui::SetItemTooltip("While dragging objects, keep them glued to the ground surface.");
 	ImGui::BeginDisabled(!gDragFollowGround);
 	ImGui::Indent();
 	ImGui::Checkbox("Align to surface", &gDragAlignToSurface);
+	ImGui::SetItemTooltip("While dragging, rotate the object to match the ground slope.");
 	ImGui::Unindent();
 	ImGui::EndDisabled();
 
@@ -4196,10 +4208,13 @@ uiToolsWindow(void)
 	bool backupSettingsChanged = false;
 	if(ImGui::Checkbox("Enabled", &gAutomaticBackupsEnabled))
 		backupSettingsChanged = true;
+	ImGui::SetItemTooltip("Periodically save a backup of all modified IPLs.");
 	if(ImGui::InputInt("Interval (sec)", &gAutomaticBackupIntervalSeconds))
 		backupSettingsChanged = true;
+	ImGui::SetItemTooltip("Seconds between automatic backup snapshots.");
 	if(ImGui::InputInt("Keep snapshots", &gAutomaticBackupKeepCount))
 		backupSettingsChanged = true;
+	ImGui::SetItemTooltip("Number of backup snapshots to keep. Oldest are deleted first.");
 	sanitizeAutomaticBackupSettings();
 	if(backupSettingsChanged)
 		saveSaveSettings();
