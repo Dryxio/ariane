@@ -35,7 +35,7 @@ static const float AREA_SIZE = 750.0f;
 static const size_t MAX_LENIENT_IMG_OVERREAD_BYTES = 2048;
 static const float PREVIEW_PI = 3.14159265358979323846f;
 static const float PREVIEW_PED_Z_OFFSET = 1.08f;
-static const float PREVIEW_CAR_Z_OFFSET = 0.35f;
+static const float PREVIEW_CAR_Z_OFFSET = 0.50f;
 static const int PREVIEW_POP_GROUP_COUNT = 18;
 static const int PREVIEW_POP_ZONE_COUNT = 20;
 static const int PREVIEW_POP_DAYSETS = 2;
@@ -43,6 +43,7 @@ static const int PREVIEW_POP_TIMESLOTS = 12;
 static const int PREVIEW_CAR_GROUP_OTHER_COUNT = 18;
 static const int PREVIEW_CAR_GROUP_GANG_BASE = 18;
 static const int PREVIEW_CAR_GROUP_DEALERS = 28;
+static const int PREVIEW_TRAFFIC_CURVE_SAMPLES = 24;
 
 struct NodeAddress {
 	uint16 areaId;
@@ -93,6 +94,9 @@ static_assert(sizeof(NodeAddress) == 4, "NodeAddress size mismatch");
 static_assert(sizeof(CarPathLinkAddress) == 2, "CarPathLinkAddress size mismatch");
 static_assert(sizeof(DiskNode) == 28, "DiskNode size mismatch");
 static_assert(sizeof(DiskCarPathLink) == 14, "DiskCarPathLink size mismatch");
+
+static int getNaviOppositeLanes(const DiskCarPathLink &link);
+static int getNaviSameLanes(const DiskCarPathLink &link);
 
 struct Node {
 	DiskNode raw;
@@ -283,6 +287,7 @@ struct PreviewVehicleDef {
 	char txdName[32];
 	char type[16];
 	bool heavy;
+	std::vector<uint32> colorPairs;
 };
 
 struct PreviewPopcycleSlot {
@@ -370,30 +375,56 @@ struct PreviewVehicleAssets {
 	bool heavy;
 	rw::TexDictionary *txd;
 	rw::Clump *clump;
+	std::vector<uint8> materialColorRoles;
 };
 
 struct PreviewTrafficCar {
 	bool active;
 	bool heavy;
 	rw::Clump *clump;
+	uint8 colorIndices[4];
+	std::vector<uint8> materialColorRoles;
+	uint32 stableId;
 	NodeAddress previous;
 	NodeAddress current;
 	NodeAddress target;
-	CarPathLinkAddress naviAddr;
-	int prevLaneIndex;
-	int prevLaneCount;
-	int laneIndex;
-	int laneCount;
-	float segmentT;
+	CarPathLinkAddress currentLinkAddr;
+	CarPathLinkAddress nextLinkAddr;
+	bool currentSameDirection;
+	bool nextSameDirection;
+	int currentLaneIndex;
+	int currentLaneCount;
+	int nextLaneIndex;
+	int nextLaneCount;
+	float distanceOnCurve;
 	float speed;
+	float preferredSpawnDistance;
 	uint32 seed;
 	int assetIndex;
-	bool hasCarryStart;
-	rw::V3d carryStart;
 	rw::V3d curveP0;
 	rw::V3d curveP1;
 	rw::V3d curveP2;
 	float curveLength;
+	float curveSampleDistances[PREVIEW_TRAFFIC_CURVE_SAMPLES + 1];
+};
+
+struct PreviewParkedCar {
+	bool active;
+	bool heavy;
+	rw::Clump *clump;
+	uint8 colorIndices[4];
+	std::vector<uint8> materialColorRoles;
+	uint32 stableId;
+	uint32 seed;
+	int assetIndex;
+	NodeAddress current;
+	NodeAddress target;
+	CarPathLinkAddress naviAddr;
+	bool sameDirection;
+	float sideSign;
+	float preferredSpawnDistance;
+	rw::V3d pos;
+	rw::V3d forward;
 };
 
 static bool gPreviewMetadataAttempted;
@@ -404,6 +435,10 @@ static std::vector<PreviewPedDef> gPreviewPedDefs;
 static bool gPreviewVehicleMetadataAttempted;
 static bool gPreviewVehicleMetadataLoaded;
 static char gPreviewVehicleMetadataFailureReason[128];
+static bool gPreviewVehicleColorsAttempted;
+static bool gPreviewVehicleColorsLoaded;
+static char gPreviewVehicleColorsFailureReason[128];
+static CRGBA gPreviewVehicleColourTable[128];
 static std::vector<PreviewVehicleDef> gPreviewVehicleDefs;
 static std::vector<PreviewWalkCycle> gPreviewWalkCycles;
 static std::vector<PreviewPedAssets> gPreviewPedAssetCache;
@@ -422,12 +457,21 @@ static std::vector<PreviewZoneBox> gPreviewMapZones;
 static std::vector<PreviewZoneState> gPreviewZoneStates;
 static std::vector<PreviewVehicleAssets> gPreviewVehicleAssetCache;
 static std::vector<PreviewTrafficCar> gPreviewTrafficCars;
+static std::vector<PreviewParkedCar> gPreviewParkedCars;
+static uint32 gPreviewTrafficLastSeenChangeSeq;
+static bool gPreviewTrafficLastFreezeRoutes;
+static float gPreviewTrafficLightTimeMs;
+static uint32 gPreviewParkedLastSeenChangeSeq;
 
 #include "sa_zone_population_init.inc"
 
 static bool loadLogicalPathData(const char *logicalPath, std::vector<uint8> &data);
 static float previewSeedFloat01(uint32 &seed);
 static void clearPreviewTrafficCars(void);
+static void clearPreviewParkedCars(void);
+static bool resetPreviewTrafficCar(PreviewTrafficCar &car, uint32 seed);
+static bool getRoadCross(uint8 info);
+static bool loadPreviewVehicleColorData(void);
 
 static bool
 readExact(const uint8 *data, size_t dataSize, size_t *offset, void *buf, size_t size)
@@ -586,6 +630,28 @@ splitPreviewCsv(const std::string &line)
 		if(comma == line.size())
 			break;
 	}
+	return out;
+}
+
+static std::vector<int>
+extractPreviewInts(const std::string &line)
+{
+	std::vector<int> out;
+	int current = 0;
+	bool inNumber = false;
+	for(size_t i = 0; i < line.size(); i++){
+		unsigned char ch = (unsigned char)line[i];
+		if(std::isdigit(ch)){
+			current = current*10 + (ch - '0');
+			inNumber = true;
+		}else if(inNumber){
+			out.push_back(current);
+			current = 0;
+			inNumber = false;
+		}
+	}
+	if(inNumber)
+		out.push_back(current);
 	return out;
 }
 
@@ -906,6 +972,112 @@ loadPreviewVehicleMetadata(void)
 		log("SAPaths: loaded preview vehicle metadata (%d supported vehicle defs)\n",
 			(int)gPreviewVehicleDefs.size());
 	return gPreviewVehicleMetadataLoaded;
+}
+
+static bool
+loadPreviewVehicleColorData(void)
+{
+	if(gPreviewVehicleColorsAttempted)
+		return gPreviewVehicleColorsLoaded;
+
+	gPreviewVehicleColorsAttempted = true;
+	gPreviewVehicleColorsLoaded = false;
+	gPreviewVehicleColorsFailureReason[0] = '\0';
+	for(int i = 0; i < 128; i++)
+		gPreviewVehicleColourTable[i] = { 245, 245, 245, 255 };
+	if(!loadPreviewVehicleMetadata() || gPreviewVehicleDefs.empty()){
+		snprintf(gPreviewVehicleColorsFailureReason, sizeof(gPreviewVehicleColorsFailureReason), "missing_vehicle_metadata");
+		return false;
+	}
+	for(size_t i = 0; i < gPreviewVehicleDefs.size(); i++)
+		gPreviewVehicleDefs[i].colorPairs.clear();
+
+	std::vector<uint8> carcolsData;
+	if(!loadLogicalPathData("data/carcols.dat", carcolsData)){
+		snprintf(gPreviewVehicleColorsFailureReason, sizeof(gPreviewVehicleColorsFailureReason), "missing_carcols_dat");
+		return false;
+	}
+
+	enum {
+		PREVIEW_CARCOLS_NONE,
+		PREVIEW_CARCOLS_COL,
+		PREVIEW_CARCOLS_CAR
+	} mode = PREVIEW_CARCOLS_NONE;
+	std::string carcolsText((const char*)&carcolsData[0], carcolsData.size());
+	int paletteIndex = 0;
+	int vehiclesWithColors = 0;
+	for(size_t start = 0; start <= carcolsText.size(); ){
+		size_t end = carcolsText.find('\n', start);
+		if(end == std::string::npos)
+			end = carcolsText.size();
+		std::string line = carcolsText.substr(start, end - start);
+		if(!line.empty() && line[line.size() - 1] == '\r')
+			line.resize(line.size() - 1);
+		line = trimPreviewString(stripPreviewLineComment(line));
+		start = end + 1;
+		if(line.empty())
+			continue;
+
+		if(rw::strcmp_ci(line.c_str(), "col") == 0){
+			mode = PREVIEW_CARCOLS_COL;
+			continue;
+		}
+		if(rw::strcmp_ci(line.c_str(), "car") == 0){
+			mode = PREVIEW_CARCOLS_CAR;
+			continue;
+		}
+		if(rw::strcmp_ci(line.c_str(), "end") == 0){
+			mode = PREVIEW_CARCOLS_NONE;
+			continue;
+		}
+
+		if(mode == PREVIEW_CARCOLS_COL){
+			std::vector<int> numbers = extractPreviewInts(line);
+			if(numbers.size() < 3 || paletteIndex >= 128)
+				continue;
+			gPreviewVehicleColourTable[paletteIndex++] = {
+				(uint8)clamp(numbers[0], 0, 255),
+				(uint8)clamp(numbers[1], 0, 255),
+				(uint8)clamp(numbers[2], 0, 255),
+				255
+			};
+			continue;
+		}
+
+		if(mode == PREVIEW_CARCOLS_CAR){
+			size_t comma = line.find(',');
+			if(comma == std::string::npos)
+				continue;
+			std::string modelName = lowerPreviewString(trimPreviewString(line.substr(0, comma)));
+			if(modelName.empty())
+				continue;
+			int vehicleDefIndex = findPreviewVehicleDefIndexByModelName(modelName.c_str());
+			if(vehicleDefIndex < 0)
+				continue;
+			std::vector<int> numbers = extractPreviewInts(line.substr(comma + 1));
+			PreviewVehicleDef &vehicleDef = gPreviewVehicleDefs[vehicleDefIndex];
+			size_t previousCount = vehicleDef.colorPairs.size();
+			for(size_t i = 0; i + 1 < numbers.size(); i += 2){
+				uint8 primary = (uint8)clamp(numbers[i], 0, 127);
+				uint8 secondary = (uint8)clamp(numbers[i + 1], 0, 127);
+				uint32 packed = (uint32)primary |
+					((uint32)secondary << 8) |
+					((uint32)primary << 16) |
+					((uint32)secondary << 24);
+				vehicleDef.colorPairs.push_back(packed);
+			}
+			if(previousCount == 0 && !vehicleDef.colorPairs.empty())
+				vehiclesWithColors++;
+		}
+	}
+
+	gPreviewVehicleColorsLoaded = paletteIndex > 0;
+	if(!gPreviewVehicleColorsLoaded)
+		snprintf(gPreviewVehicleColorsFailureReason, sizeof(gPreviewVehicleColorsFailureReason), "empty_vehicle_color_data");
+	else
+		log("SAPaths: loaded preview vehicle colors (%d palette entries, %d vehicle models)\n",
+			paletteIndex, vehiclesWithColors);
+	return gPreviewVehicleColorsLoaded;
 }
 
 static PreviewZoneState*
@@ -1637,6 +1809,107 @@ choosePreviewVehicleDefForPosition(const rw::V3d &pos, uint32 &seed)
 	return -1;
 }
 
+static float
+getPreviewTrafficVehicleFitWeight(const PreviewVehicleDef &vehicleDef, const Node *node, const DiskCarPathLink *navi)
+{
+	if(node == nil)
+		return 1.0f;
+
+	float roadWidth = node->width();
+	int totalLanes = 0;
+	if(navi)
+		totalLanes = getNaviSameLanes(*navi) + getNaviOppositeLanes(*navi);
+
+	bool narrowRoad = roadWidth <= 7.5f || totalLanes <= 2;
+	bool wideRoad = roadWidth >= 12.0f || totalLanes >= 4;
+	bool industrialRoad = node->highway();
+	bool localRoad = node->notHighway();
+
+	float weight = 1.0f;
+	if(vehicleDef.heavy){
+		if(narrowRoad)
+			weight *= 0.12f;
+		else if(localRoad)
+			weight *= 0.35f;
+		else if(wideRoad)
+			weight *= 1.15f;
+		if(industrialRoad)
+			weight *= 1.25f;
+	}else{
+		if(narrowRoad)
+			weight *= 1.15f;
+		if(localRoad)
+			weight *= 1.10f;
+		if(wideRoad)
+			weight *= 0.9f;
+	}
+
+	return weight;
+}
+
+static int
+choosePreviewVehicleDefForTrafficContext(const rw::V3d &pos, const Node *node, const DiskCarPathLink *navi, uint32 &seed)
+{
+	int fallback = -1;
+	for(int attempts = 0; attempts < 12; attempts++){
+		int vehicleDefIndex = choosePreviewVehicleDefForPosition(pos, seed);
+		if(vehicleDefIndex < 0)
+			break;
+		if(fallback < 0)
+			fallback = vehicleDefIndex;
+		const PreviewVehicleDef &vehicleDef = gPreviewVehicleDefs[vehicleDefIndex];
+		float fitWeight = getPreviewTrafficVehicleFitWeight(vehicleDef, node, navi);
+		if(fitWeight >= 0.999f || previewSeedFloat01(seed) < fitWeight)
+			return vehicleDefIndex;
+	}
+
+	float totalWeight = 0.0f;
+	for(size_t i = 0; i < gPreviewVehicleDefs.size(); i++)
+		totalWeight += getPreviewTrafficVehicleFitWeight(gPreviewVehicleDefs[i], node, navi);
+	if(totalWeight > 0.001f){
+		float roll = previewSeedFloat01(seed) * totalWeight;
+		for(size_t i = 0; i < gPreviewVehicleDefs.size(); i++){
+			float weight = getPreviewTrafficVehicleFitWeight(gPreviewVehicleDefs[i], node, navi);
+			if(roll < weight)
+				return (int)i;
+			roll -= weight;
+		}
+	}
+
+	return fallback;
+}
+
+static uint8
+choosePreviewFallbackVehicleColorIndex(uint32 &seed)
+{
+	int colorIndex = 1 + (int)(previewSeedFloat01(seed) * 125.0f);
+	colorIndex = clamp(colorIndex, 1, 125);
+	if(colorIndex == 126)
+		colorIndex = 1;
+	return (uint8)colorIndex;
+}
+
+static void
+choosePreviewVehicleColorIndices(const PreviewVehicleDef &vehicleDef, uint32 &seed, uint8 outColors[4])
+{
+	if(outColors == nil)
+		return;
+	if(loadPreviewVehicleColorData() && !vehicleDef.colorPairs.empty()){
+		int pairIndex = clamp((int)(previewSeedFloat01(seed) * vehicleDef.colorPairs.size()), 0, (int)vehicleDef.colorPairs.size() - 1);
+		uint32 packed = vehicleDef.colorPairs[pairIndex];
+		outColors[0] = (uint8)(packed & 0xFF);
+		outColors[1] = (uint8)((packed >> 8) & 0xFF);
+		outColors[2] = (uint8)((packed >> 16) & 0xFF);
+		outColors[3] = (uint8)((packed >> 24) & 0xFF);
+		return;
+	}
+
+	outColors[0] = choosePreviewFallbackVehicleColorIndex(seed);
+	outColors[1] = choosePreviewFallbackVehicleColorIndex(seed);
+	outColors[2] = outColors[0];
+	outColors[3] = outColors[1];
+}
+
 static uint32
 advancePreviewSeed(uint32 &seed)
 {
@@ -1782,6 +2055,160 @@ setupPreviewClump(rw::Clump *clump)
 	}
 }
 
+struct PreviewFrameFindData {
+	const char *name;
+	rw::Frame *found;
+};
+
+static rw::Frame*
+findPreviewFrameByNameCB(rw::Frame *frame, void *data)
+{
+	PreviewFrameFindData *find = (PreviewFrameFindData*)data;
+	if(find == nil || find->found)
+		return nil;
+
+	const char *nodeName = gta::getNodeName(frame);
+	if(nodeName && rw::strcmp_ci(nodeName, find->name) == 0){
+		find->found = frame;
+		return nil;
+	}
+	frame->forAllChildren(findPreviewFrameByNameCB, data);
+	return frame;
+}
+
+static rw::Frame*
+findPreviewFrameByName(rw::Clump *clump, const char *name)
+{
+	if(clump == nil || name == nil)
+		return nil;
+	PreviewFrameFindData find = { name, nil };
+	findPreviewFrameByNameCB(clump->getFrame(), &find);
+	return find.found;
+}
+
+static rw::Atomic*
+findPreviewVehicleWheelSourceAtomic(rw::Clump *clump)
+{
+	if(clump == nil)
+		return nil;
+
+	rw::Atomic *fallback = nil;
+	FORLIST(lnk, clump->atomics){
+		rw::Atomic *atomic = rw::Atomic::fromClump(lnk);
+		if(atomic == nil)
+			continue;
+		rw::Frame *frame = atomic->getFrame();
+		const char *nodeName = frame ? gta::getNodeName(frame) : nil;
+		if(nodeName == nil)
+			continue;
+		if(rw::strcmp_ci(nodeName, "wheel") == 0)
+			return atomic;
+		if(strncmp(nodeName, "wheel_rf", 8) == 0 && strstr(nodeName, "dummy") == nil)
+			return atomic;
+		if(fallback == nil && rw::strcmp_ci(nodeName, "wheel_rf_dummy") == 0)
+			fallback = atomic;
+	}
+	return fallback;
+}
+
+static bool
+previewFrameHasAtomic(rw::Clump *clump, rw::Frame *frame)
+{
+	if(clump == nil || frame == nil)
+		return false;
+	FORLIST(lnk, clump->atomics){
+		rw::Atomic *atomic = rw::Atomic::fromClump(lnk);
+		if(atomic && atomic->getFrame() == frame)
+			return true;
+	}
+	return false;
+}
+
+static void
+ensurePreviewVehicleWheelAtomics(rw::Clump *clump)
+{
+	static const char *wheelDummyNames[] = {
+		"wheel_lf_dummy",
+		"wheel_rf_dummy",
+		"wheel_lb_dummy",
+		"wheel_rb_dummy"
+	};
+
+	if(clump == nil)
+		return;
+	rw::Atomic *sourceAtomic = findPreviewVehicleWheelSourceAtomic(clump);
+	if(sourceAtomic == nil)
+		return;
+
+	rw::HAnimHierarchy *hier = getHAnimHierarchyFromClump(clump);
+	for(size_t i = 0; i < sizeof(wheelDummyNames)/sizeof(wheelDummyNames[0]); i++){
+		rw::Frame *dummyFrame = findPreviewFrameByName(clump, wheelDummyNames[i]);
+		if(dummyFrame == nil || previewFrameHasAtomic(clump, dummyFrame))
+			continue;
+
+		rw::Atomic *clone = sourceAtomic->clone();
+		if(clone == nil)
+			continue;
+		clone->setFrame(dummyFrame);
+		setupPreviewAtomic(clone);
+		if(hier)
+			rw::Skin::setHierarchy(clone, hier);
+		clump->addAtomic(clone);
+	}
+}
+
+static uint8
+getPreviewVehicleMaterialColorRole(const rw::RGBA &color)
+{
+	if(color.red == 60 && color.green == 255 && color.blue == 0)
+		return 1;
+	if(color.red == 255 && color.green == 0 && color.blue == 175)
+		return 2;
+	if(color.red == 0 && color.green == 255 && color.blue == 255)
+		return 3;
+	if(color.red == 255 && color.green == 0 && color.blue == 255)
+		return 4;
+	return 0;
+}
+
+static bool
+isPreviewVehicleLightMarkerColor(const rw::RGBA &color)
+{
+	return (color.red == 255 && color.green == 175 && color.blue == 0) ||
+	       (color.red == 0 && color.green == 255 && color.blue == 200) ||
+	       (color.red == 185 && color.green == 255 && color.blue == 0) ||
+	       (color.red == 255 && color.green == 60 && color.blue == 0);
+}
+
+static void
+collectPreviewVehicleMaterials(rw::Clump *clump, std::vector<rw::Material*> &materials)
+{
+	materials.clear();
+	if(clump == nil)
+		return;
+
+	FORLIST(lnk, clump->atomics){
+		rw::Atomic *atomic = rw::Atomic::fromClump(lnk);
+		if(atomic == nil || atomic->geometry == nil)
+			continue;
+		for(int i = 0; i < atomic->geometry->matList.numMaterials; i++){
+			rw::Material *mat = atomic->geometry->matList.materials[i];
+			if(mat)
+				materials.push_back(mat);
+		}
+	}
+}
+
+static void
+buildPreviewVehicleMaterialColorRoles(rw::Clump *clump, std::vector<uint8> &roles)
+{
+	std::vector<rw::Material*> materials;
+	collectPreviewVehicleMaterials(clump, materials);
+	roles.resize(materials.size());
+	for(size_t i = 0; i < materials.size(); i++)
+		roles[i] = getPreviewVehicleMaterialColorRole(materials[i]->color);
+}
+
 static void
 normalizePreviewVehicleMaterialColors(rw::Clump *clump)
 {
@@ -1794,12 +2221,37 @@ normalizePreviewVehicleMaterialColors(rw::Clump *clump)
 			continue;
 		for(int i = 0; i < atomic->geometry->matList.numMaterials; i++){
 			rw::Material *mat = atomic->geometry->matList.materials[i];
-			if(mat && mat->texture){
+			if(mat && mat->texture &&
+			   getPreviewVehicleMaterialColorRole(mat->color) == 0 &&
+			   !isPreviewVehicleLightMarkerColor(mat->color)){
 				mat->color.red = 255;
 				mat->color.green = 255;
 				mat->color.blue = 255;
 			}
 		}
+	}
+}
+
+static void
+applyPreviewVehicleColorIndices(rw::Clump *clump, const std::vector<uint8> &roles, const uint8 colorIndices[4])
+{
+	if(clump == nil || colorIndices == nil)
+		return;
+
+	std::vector<rw::Material*> materials;
+	collectPreviewVehicleMaterials(clump, materials);
+	size_t count = min(materials.size(), roles.size());
+	for(size_t i = 0; i < count; i++){
+		int colorSlot = (int)roles[i] - 1;
+		if(colorSlot < 0 || colorSlot >= 4)
+			continue;
+		int paletteIndex = colorIndices[colorSlot];
+		if(paletteIndex < 0 || paletteIndex >= 128)
+			continue;
+		const CRGBA &color = gPreviewVehicleColourTable[paletteIndex];
+		materials[i]->color.red = color.r;
+		materials[i]->color.green = color.g;
+		materials[i]->color.blue = color.b;
 	}
 }
 
@@ -1865,6 +2317,19 @@ destroyPreviewTrafficCar(PreviewTrafficCar &car)
 	}
 	car.assetIndex = -1;
 	car.active = false;
+	car.materialColorRoles.clear();
+}
+
+static void
+destroyPreviewParkedCar(PreviewParkedCar &car)
+{
+	if(car.clump){
+		car.clump->destroy();
+		car.clump = nil;
+	}
+	car.assetIndex = -1;
+	car.active = false;
+	car.materialColorRoles.clear();
 }
 
 static void
@@ -1873,6 +2338,16 @@ clearPreviewTrafficCars(void)
 	for(size_t i = 0; i < gPreviewTrafficCars.size(); i++)
 		destroyPreviewTrafficCar(gPreviewTrafficCars[i]);
 	gPreviewTrafficCars.clear();
+	gPreviewTrafficLastSeenChangeSeq = GetLatestChangeSeq();
+}
+
+static void
+clearPreviewParkedCars(void)
+{
+	for(size_t i = 0; i < gPreviewParkedCars.size(); i++)
+		destroyPreviewParkedCar(gPreviewParkedCars[i]);
+	gPreviewParkedCars.clear();
+	gPreviewParkedLastSeenChangeSeq = GetLatestChangeSeq();
 }
 
 static bool
@@ -1880,6 +2355,20 @@ buildAreaImgLogicalPath(int areaId, char *dst, size_t size)
 {
 	int written = snprintf(dst, size, "models/gta3.img/nodes%d.dat", areaId);
 	return written >= 0 && (size_t)written < size;
+}
+
+static uint32
+getPreviewTrafficBaseSeed(const PreviewTrafficCar &car)
+{
+	return 0x2468ACE1u + car.stableId*0x01020305u;
+}
+
+static uint32
+getPreviewTrafficResetSeed(const PreviewTrafficCar &car, uint32 salt)
+{
+	if(gSaCarPathTrafficFreezeRoutes)
+		return getPreviewTrafficBaseSeed(car);
+	return car.seed + salt;
 }
 
 static bool
@@ -2626,7 +3115,9 @@ loadPreviewVehicleAssets(int vehicleDefIndex)
 	setupPreviewClump(entry.clump);
 	stripPreviewVehicleDamageAtomics(entry.clump);
 	stripPreviewVehicleLowDetailAtomics(entry.clump);
+	ensurePreviewVehicleWheelAtomics(entry.clump);
 	normalizePreviewVehicleMaterialColors(entry.clump);
+	buildPreviewVehicleMaterialColorRoles(entry.clump, entry.materialColorRoles);
 	entry.loaded = true;
 	log("SAPaths: loaded preview vehicle assets (%s)\n", entry.modelName);
 	return (int)gPreviewVehicleAssetCache.size() - 1;
@@ -2730,6 +3221,88 @@ quadraticBezierTangent(const rw::V3d &a, const rw::V3d &b, const rw::V3d &c, flo
 	return add(scale(sub(b, a), 2.0f*(1.0f - t)), scale(sub(c, b), 2.0f*t));
 }
 
+static void
+buildPreviewTrafficCurveSamples(PreviewTrafficCar &car)
+{
+	car.curveSampleDistances[0] = 0.0f;
+	rw::V3d prev = car.curveP0;
+	float cumulative = 0.0f;
+	for(int i = 1; i <= PREVIEW_TRAFFIC_CURVE_SAMPLES; i++){
+		float t = (float)i / (float)PREVIEW_TRAFFIC_CURVE_SAMPLES;
+		rw::V3d p = quadraticBezierV3d(car.curveP0, car.curveP1, car.curveP2, t);
+		cumulative += length(sub(p, prev));
+		car.curveSampleDistances[i] = cumulative;
+		prev = p;
+	}
+	car.curveLength = max(0.01f, cumulative);
+}
+
+static float
+getPreviewTrafficCurveTForDistance(const PreviewTrafficCar &car, float distance)
+{
+	float d = clamp(distance, 0.0f, car.curveLength);
+	for(int i = 1; i <= PREVIEW_TRAFFIC_CURVE_SAMPLES; i++){
+		float nextDistance = car.curveSampleDistances[i];
+		if(d <= nextDistance){
+			float prevDistance = car.curveSampleDistances[i - 1];
+			float segLen = nextDistance - prevDistance;
+			float segT = segLen > 0.0001f ? (d - prevDistance) / segLen : 0.0f;
+			return ((float)(i - 1) + segT) / (float)PREVIEW_TRAFFIC_CURVE_SAMPLES;
+		}
+	}
+	return 1.0f;
+}
+
+static rw::V3d
+getPreviewTrafficTravelDirection(const DiskCarPathLink &navi, bool sameDirection)
+{
+	rw::V3d dir = { (float)navi.dirX, (float)navi.dirY, 0.0f };
+	dir.z = 0.0f;
+	float len = length(dir);
+	if(len < 0.001f)
+		dir = { 0.0f, 1.0f, 0.0f };
+	else
+		dir = scale(dir, 1.0f/len);
+	if(!sameDirection)
+		dir = scale(dir, -1.0f);
+	return dir;
+}
+
+static rw::V3d
+getPreviewTrafficCurveControlPoint(const rw::V3d &startPos, const rw::V3d &startDir,
+                                   const rw::V3d &endPos, const rw::V3d &endDir, float z)
+{
+	rw::V3d chord = sub(endPos, startPos);
+	chord.z = 0.0f;
+	float chordLen = length(chord);
+	rw::V3d mid = lerpV3d(startPos, endPos, 0.5f);
+	mid.z = z;
+
+	if(chordLen < 0.001f)
+		return mid;
+
+	float dirDot = dot(startDir, endDir);
+	if(dirDot > 0.985f)
+		return mid;
+
+	float denom = startDir.x * endDir.y - startDir.y * endDir.x;
+	if(std::fabs(denom) < 0.001f)
+		return mid;
+
+	float dx = endPos.x - startPos.x;
+	float dy = endPos.y - startPos.y;
+	float s = (dx * endDir.y - dy * endDir.x) / denom;
+	float u = (dx * startDir.y - dy * startDir.x) / denom;
+	if(s < 0.0f || u < 0.0f)
+		return mid;
+
+	rw::V3d control = add(startPos, scale(startDir, s));
+	control.z = z;
+	if(length(sub(control, mid)) > chordLen * 1.5f)
+		return mid;
+	return control;
+}
+
 static bool
 getPreviewDirectedVehicleLink(const NodeAddress &from, const NodeAddress &to,
                               CarPathLinkAddress *outNaviAddr, DiskCarPathLink **outNavi,
@@ -2804,6 +3377,17 @@ getPreviewDirectedVehicleLink(const NodeAddress &from, const NodeAddress &to,
 	return false;
 }
 
+static DiskCarPathLink*
+getPreviewTrafficNavi(CarPathLinkAddress addr)
+{
+	if(!addr.isValid())
+		return nil;
+	AreaData *naviArea = getArea(addr.areaId());
+	if(naviArea == nil || !naviArea->loaded || addr.nodeId() >= naviArea->naviNodes.size())
+		return nil;
+	return &naviArea->naviNodes[addr.nodeId()];
+}
+
 static bool
 hasPreviewTrafficLink(const NodeAddress &addr)
 {
@@ -2836,7 +3420,7 @@ getPreviewTrafficLanePointAtNavi(const DiskCarPathLink &navi, bool sameDirection
 		dir = scale(dir, 1.0f/len);
 	if(!sameDirection)
 		dir = scale(dir, -1.0f);
-	float laneOffsetUnits;
+	float laneOffsetUnits = 0.0f;
 	if(getNaviOppositeLanes(navi) > 0 && getNaviSameLanes(navi) > 0)
 		laneOffsetUnits = laneIndex + 0.5f;
 	else
@@ -2848,6 +3432,40 @@ getPreviewTrafficLanePointAtNavi(const DiskCarPathLink &navi, bool sameDirection
 		pos.y - laneOffset * dir.x,
 		z
 	};
+}
+
+static float
+getPreviewTrafficLaneOffsetUnits(const DiskCarPathLink &navi, bool sameDirection, int laneIndex)
+{
+	int laneCount = sameDirection ? getNaviSameLanes(navi) : getNaviOppositeLanes(navi);
+	if(laneCount <= 0)
+		return 0.0f;
+	laneIndex = clamp(laneIndex, 0, laneCount - 1);
+	if(getNaviOppositeLanes(navi) > 0 && getNaviSameLanes(navi) > 0)
+		return laneIndex + 0.5f;
+	return getLaneOffset(navi) + laneIndex;
+}
+
+static int
+mapPreviewTrafficLaneIndex(const DiskCarPathLink &fromNavi, bool fromSameDirection, int fromLaneIndex,
+                           const DiskCarPathLink &toNavi, bool toSameDirection)
+{
+	int toLaneCount = toSameDirection ? getNaviSameLanes(toNavi) : getNaviOppositeLanes(toNavi);
+	if(toLaneCount <= 0)
+		return 0;
+
+	float wantedOffset = getPreviewTrafficLaneOffsetUnits(fromNavi, fromSameDirection, fromLaneIndex);
+	int bestLane = 0;
+	float bestDistance = 999999.0f;
+	for(int lane = 0; lane < toLaneCount; lane++){
+		float candidateOffset = getPreviewTrafficLaneOffsetUnits(toNavi, toSameDirection, lane);
+		float distance = std::fabs(candidateOffset - wantedOffset);
+		if(distance < bestDistance){
+			bestDistance = distance;
+			bestLane = lane;
+		}
+	}
+	return bestLane;
 }
 
 static bool
@@ -2879,8 +3497,15 @@ getPreviewTrafficLaneEndpoint(const NodeAddress &from, const NodeAddress &to,
 		if(laneCount <= 0)
 			return false;
 		if(laneCountHint > 0){
-			float lanePos = (laneIndex + 0.5f) / laneCountHint;
-			laneIndex = clamp((int)(lanePos * laneCount), 0, laneCount - 1);
+			CarPathLinkAddress fromNaviAddr = { 0xFFFF };
+			DiskCarPathLink *fromNavi = nil;
+			bool fromSameDirection = false;
+			int fromLaneCount = 0;
+			if(getPreviewDirectedVehicleLink(from, to, &fromNaviAddr, &fromNavi, &fromSameDirection, &fromLaneCount) &&
+			   fromNavi && fromLaneCount > 0)
+				laneIndex = mapPreviewTrafficLaneIndex(*fromNavi, fromSameDirection, laneIndex, *navi, sameDirection);
+			else
+				laneIndex = clamp((int)(((laneIndex + 0.5f) / laneCountHint) * laneCount), 0, laneCount - 1);
 		}else
 			laneIndex = clamp(laneIndex, 0, laneCount - 1);
 	}
@@ -2890,7 +3515,238 @@ getPreviewTrafficLaneEndpoint(const NodeAddress &from, const NodeAddress &to,
 }
 
 static bool
-pickPreviewTrafficSpawnNode(uint32 &seed, NodeAddress *outAddr)
+getPreviewTrafficCarApproxPosition(const PreviewTrafficCar &car, rw::V3d *outPos)
+{
+	if(outPos == nil || !car.active)
+		return false;
+	float t = getPreviewTrafficCurveTForDistance(car, car.distanceOnCurve);
+	*outPos = quadraticBezierV3d(car.curveP0, car.curveP1, car.curveP2, t);
+	return true;
+}
+
+static bool
+getPreviewParkedCarApproxPosition(const PreviewParkedCar &car, rw::V3d *outPos)
+{
+	if(outPos == nil || !car.active)
+		return false;
+	*outPos = car.pos;
+	return true;
+}
+
+static bool
+isPreviewVehiclePositionOccupied(const rw::V3d &pos, float minSeparation)
+{
+	for(size_t i = 0; i < gPreviewTrafficCars.size(); i++){
+		rw::V3d carPos;
+		if(!getPreviewTrafficCarApproxPosition(gPreviewTrafficCars[i], &carPos))
+			continue;
+		if(length(sub(carPos, pos)) < minSeparation)
+			return true;
+	}
+	for(size_t i = 0; i < gPreviewParkedCars.size(); i++){
+		rw::V3d carPos;
+		if(!getPreviewParkedCarApproxPosition(gPreviewParkedCars[i], &carPos))
+			continue;
+		if(length(sub(carPos, pos)) < minSeparation)
+			return true;
+	}
+	return false;
+}
+
+enum {
+	PREVIEW_LIGHT_GREEN = 0,
+	PREVIEW_LIGHT_YELLOW = 1,
+	PREVIEW_LIGHT_RED = 2,
+};
+
+static int
+getPreviewTrafficLightCycleState(int trafficLightDir)
+{
+	int cycleTime = ((int)gPreviewTrafficLightTimeMs / 2) & 16383;
+	if(trafficLightDir == 1){
+		if(cycleTime < 5000)
+			return PREVIEW_LIGHT_GREEN;
+		if(cycleTime < 6000)
+			return PREVIEW_LIGHT_YELLOW;
+		return PREVIEW_LIGHT_RED;
+	}
+	if(trafficLightDir == 2){
+		if(cycleTime < 6000)
+			return PREVIEW_LIGHT_RED;
+		if(cycleTime < 11000)
+			return PREVIEW_LIGHT_GREEN;
+		if(cycleTime < 12000)
+			return PREVIEW_LIGHT_YELLOW;
+		return PREVIEW_LIGHT_RED;
+	}
+	return PREVIEW_LIGHT_GREEN;
+}
+
+static bool
+shouldPreviewTrafficCarStopForLight(const PreviewTrafficCar &car)
+{
+	DiskCarPathLink *nextNavi = getPreviewTrafficNavi(car.nextLinkAddr);
+	if(nextNavi == nil)
+		return false;
+
+	int trafficLightState = getNaviTrafficLightState(*nextNavi);
+	if(trafficLightState == 0)
+		return false;
+
+	bool attachedToCurrent =
+		nextNavi->attachedAreaId == car.current.areaId &&
+		nextNavi->attachedNodeId == car.current.nodeId;
+	if(attachedToCurrent != getNaviTrafficLightDir(*nextNavi))
+		return false;
+
+	return getPreviewTrafficLightCycleState(trafficLightState) != PREVIEW_LIGHT_GREEN;
+}
+
+static float
+getPreviewTrafficNodeCrossDistance(const PreviewTrafficCar &car)
+{
+	Node *current = getNode(car.current);
+	if(current == nil)
+		return car.curveLength;
+
+	rw::V3d nodePos = getNodePosition(*current);
+	float bestDistance = car.curveLength;
+	float bestNodeDist = 999999.0f;
+	for(int i = 0; i <= PREVIEW_TRAFFIC_CURVE_SAMPLES; i++){
+		float t = (float)i / (float)PREVIEW_TRAFFIC_CURVE_SAMPLES;
+		rw::V3d sample = quadraticBezierV3d(car.curveP0, car.curveP1, car.curveP2, t);
+		float nodeDist = length(sub(sample, nodePos));
+		if(nodeDist < bestNodeDist){
+			bestNodeDist = nodeDist;
+			bestDistance = car.curveSampleDistances[i];
+		}
+	}
+
+	return bestDistance;
+}
+
+static float
+getPreviewTrafficLightStopDistance(const PreviewTrafficCar &car)
+{
+	float stopBackoff = max(2.5f, car.heavy ? 4.5f : 3.5f);
+	return clamp(getPreviewTrafficNodeCrossDistance(car) - stopBackoff, 0.0f, car.curveLength);
+}
+
+static bool
+isPreviewTrafficCarDirectlyAheadOnRoute(const PreviewTrafficCar &car, const PreviewTrafficCar &other, float *outDistanceAhead)
+{
+	if(outDistanceAhead)
+		*outDistanceAhead = 0.0f;
+	if(!car.active || !other.active)
+		return false;
+	if(&car == &other)
+		return false;
+
+	float distanceAhead = 0.0f;
+	if(other.current.areaId == car.current.areaId &&
+	   other.current.nodeId == car.current.nodeId &&
+	   other.target.areaId == car.target.areaId &&
+	   other.target.nodeId == car.target.nodeId &&
+	   other.nextLinkAddr.raw == car.nextLinkAddr.raw &&
+	   other.nextLaneIndex == car.nextLaneIndex){
+		distanceAhead = other.distanceOnCurve - car.distanceOnCurve;
+	}else if(other.previous.areaId == car.current.areaId &&
+	         other.previous.nodeId == car.current.nodeId &&
+	         other.current.areaId == car.target.areaId &&
+	         other.current.nodeId == car.target.nodeId &&
+	         other.currentLinkAddr.raw == car.nextLinkAddr.raw &&
+	         other.currentLaneIndex == car.nextLaneIndex){
+		distanceAhead = (car.curveLength - car.distanceOnCurve) + other.distanceOnCurve;
+	}else{
+		return false;
+	}
+
+	if(distanceAhead <= 0.001f)
+		return false;
+	if(outDistanceAhead)
+		*outDistanceAhead = distanceAhead;
+	return true;
+}
+
+static float
+getPreviewTrafficSpacingStopDistance(const PreviewTrafficCar &car)
+{
+	float wantedGap = car.heavy ? 9.0f : 7.0f;
+	float bestDistanceAhead = 999999.0f;
+	bool foundAhead = false;
+	for(size_t i = 0; i < gPreviewTrafficCars.size(); i++){
+		float distanceAhead = 0.0f;
+		if(!isPreviewTrafficCarDirectlyAheadOnRoute(car, gPreviewTrafficCars[i], &distanceAhead))
+			continue;
+		if(distanceAhead < bestDistanceAhead){
+			bestDistanceAhead = distanceAhead;
+			foundAhead = true;
+		}
+	}
+
+	if(!foundAhead)
+		return car.curveLength;
+	return clamp(car.distanceOnCurve + max(0.0f, bestDistanceAhead - wantedGap), 0.0f, car.curveLength);
+}
+
+static bool
+arePreviewTrafficCarsInConflictingJunctionState(const PreviewTrafficCar &car, const PreviewTrafficCar &other)
+{
+	if(!car.active || !other.active || &car == &other)
+		return false;
+	if(car.current.areaId != other.current.areaId || car.current.nodeId != other.current.nodeId)
+		return false;
+	if(car.nextLinkAddr.raw == other.nextLinkAddr.raw && car.nextLaneIndex == other.nextLaneIndex)
+		return false;
+	if(car.previous.areaId == other.previous.areaId &&
+	   car.previous.nodeId == other.previous.nodeId &&
+	   car.target.areaId == other.target.areaId &&
+	   car.target.nodeId == other.target.nodeId)
+		return false;
+	return true;
+}
+
+static bool
+shouldPreviewTrafficCarYieldAtJunction(const PreviewTrafficCar &car)
+{
+	DiskCarPathLink *nextNavi = getPreviewTrafficNavi(car.nextLinkAddr);
+	if(nextNavi && getNaviTrafficLightState(*nextNavi) != 0)
+		return false;
+
+	float ownCrossDistance = getPreviewTrafficNodeCrossDistance(car);
+	float ownDistanceToNode = ownCrossDistance - car.distanceOnCurve;
+	if(ownDistanceToNode < -3.0f || ownDistanceToNode > 12.0f)
+		return false;
+
+	for(size_t i = 0; i < gPreviewTrafficCars.size(); i++){
+		const PreviewTrafficCar &other = gPreviewTrafficCars[i];
+		if(!arePreviewTrafficCarsInConflictingJunctionState(car, other))
+			continue;
+
+		float otherCrossDistance = getPreviewTrafficNodeCrossDistance(other);
+		float otherDistanceToNode = otherCrossDistance - other.distanceOnCurve;
+		if(otherDistanceToNode < -3.0f || otherDistanceToNode > 12.0f)
+			continue;
+
+		if(otherDistanceToNode + 0.75f < ownDistanceToNode)
+			return true;
+		if(std::fabs(otherDistanceToNode - ownDistanceToNode) <= 0.75f &&
+		   other.stableId < car.stableId)
+			return true;
+	}
+
+	return false;
+}
+
+static float
+getPreviewTrafficYieldStopDistance(const PreviewTrafficCar &car)
+{
+	float stopBackoff = max(2.0f, car.heavy ? 4.0f : 3.0f);
+	return clamp(getPreviewTrafficNodeCrossDistance(car) - stopBackoff, 0.0f, car.curveLength);
+}
+
+static bool
+pickPreviewTrafficSpawnNode(uint32 &seed, NodeAddress *outAddr, float preferredDistance, float minSeparation)
 {
 	std::vector<NodeAddress> candidates;
 	std::vector<float> weights;
@@ -2908,13 +3764,25 @@ pickPreviewTrafficSpawnNode(uint32 &seed, NodeAddress *outAddr)
 			if(!hasPreviewTrafficLink(node.address()))
 				continue;
 			rw::V3d pos = getNodePosition(node);
-			if(TheCamera.distanceTo(pos) > PATH_DRAW_DIST*0.8f)
+			float cameraDistance = TheCamera.distanceTo(pos);
+			if(cameraDistance > PATH_DRAW_DIST*0.85f)
 				continue;
+
+			if(isPreviewVehiclePositionOccupied(pos, minSeparation))
+				continue;
+
 			candidates.push_back(node.address());
 			const PreviewPopcycleSlot *slot = getPreviewPopcycleSlotForPosition(pos, nil);
 			float weight = (float)max(1, node.spawnProbability() + 1);
 			if(slot)
 				weight *= max(1.0f, (float)slot->maxCars);
+			float distanceBias = 1.0f;
+			if(preferredDistance > 0.0f){
+				float distanceDelta = std::fabs(cameraDistance - preferredDistance);
+				float normalizedDelta = distanceDelta / max(40.0f, PATH_DRAW_DIST*0.35f);
+				distanceBias = 1.25f / (1.0f + normalizedDelta*normalizedDelta*4.0f);
+			}
+			weight *= distanceBias;
 			weights.push_back(weight);
 		}
 	}
@@ -2939,9 +3807,163 @@ pickPreviewTrafficSpawnNode(uint32 &seed, NodeAddress *outAddr)
 	return true;
 }
 
+struct PreviewParkedSpawnState {
+	NodeAddress current;
+	NodeAddress target;
+	CarPathLinkAddress naviAddr;
+	bool sameDirection;
+	float sideSign;
+	rw::V3d pos;
+	rw::V3d forward;
+};
+
+static bool
+pickPreviewParkedSpawnState(uint32 &seed, PreviewParkedSpawnState *outState, float preferredDistance, float minSeparation)
+{
+	if(outState == nil)
+		return false;
+
+	std::vector<PreviewParkedSpawnState> candidates;
+	std::vector<float> weights;
+	for(int areaId = 0; areaId < NUM_PATH_AREAS; areaId++){
+		AreaData *area = getArea(areaId);
+		if(area == nil || !area->loaded || !areaInDrawRange(areaId))
+			continue;
+
+		for(uint32 ni = 0; ni < area->numVehicleNodes && ni < area->nodes.size(); ni++){
+			Node &node = area->nodes[ni];
+			if(node.numLinks() <= 0 || node.waterNode() || node.width() < 5.0f)
+				continue;
+			if(node.highway() && !node.notHighway())
+				continue;
+
+			for(int li = 0; li < node.numLinks(); li++){
+				int slot = node.raw.baseLinkId + li;
+				if(slot < 0 || slot >= (int)area->nodeLinks.size())
+					continue;
+				NodeAddress targetAddr = area->nodeLinks[slot];
+				Node *target = getNode(targetAddr);
+				if(target == nil || target->waterNode())
+					continue;
+
+				CarPathLinkAddress naviAddr = { 0xFFFF };
+				DiskCarPathLink *navi = nil;
+				bool sameDirection = false;
+				int laneCount = 0;
+				if(!getPreviewDirectedVehicleLink(node.address(), targetAddr, &naviAddr, &navi, &sameDirection, &laneCount) ||
+				   navi == nil || laneCount <= 0)
+					continue;
+				if(slot < (int)area->intersections.size() && getRoadCross(area->intersections[slot]))
+					continue;
+				if(node.numLinks() > 2 || target->numLinks() > 2)
+					continue;
+
+				rw::V3d baseDir = getPreviewTrafficTravelDirection(*navi, sameDirection);
+				rw::V3d right = cross(baseDir, { 0.0f, 0.0f, 1.0f });
+				float rightLen = length(right);
+				if(rightLen < 0.001f)
+					continue;
+				right = scale(right, 1.0f/rightLen);
+
+				rw::V3d startPos = getNodePosition(node);
+				rw::V3d endPos = getNodePosition(*target);
+				rw::V3d segment = sub(endPos, startPos);
+				segment.z = 0.0f;
+				float segmentLength = length(segment);
+				if(segmentLength < 10.0f)
+					continue;
+				float nodeWidth = node.width();
+				float targetWidth = target->width();
+				float avgWidth = max(5.0f, (nodeWidth + targetWidth)*0.5f);
+				int sameLanes = getNaviSameLanes(*navi);
+				int oppositeLanes = getNaviOppositeLanes(*navi);
+				int totalLanes = max(1, sameLanes + oppositeLanes);
+				float carriageHalfWidth = max(avgWidth*0.45f, totalLanes * (LANE_WIDTH*0.5f));
+				float curbClearance = node.notHighway() ? 1.2f : 2.0f;
+				float shoulderOffset = carriageHalfWidth + curbClearance;
+				float minProgress = 0.20f;
+				float maxProgress = 0.80f;
+				for(int sideIdx = 0; sideIdx < 2; sideIdx++){
+					float sideSign = sideIdx == 0 ? 1.0f : -1.0f;
+					float progress = minProgress + previewSeedFloat01(seed) * (maxProgress - minProgress);
+					rw::V3d center = lerpV3d(startPos, endPos, progress);
+					rw::V3d forward = baseDir;
+					if(sideSign < 0.0f && oppositeLanes > 0)
+						forward = scale(baseDir, -1.0f);
+					rw::V3d pos = {
+						center.x + right.x * shoulderOffset * sideSign,
+						center.y + right.y * shoulderOffset * sideSign,
+						center.z
+					};
+					float cameraDistance = TheCamera.distanceTo(pos);
+					if(cameraDistance > PATH_DRAW_DIST*0.90f)
+						continue;
+					if(isPreviewVehiclePositionOccupied(pos, minSeparation))
+						continue;
+
+					PreviewParkedSpawnState state = {};
+					state.current = node.address();
+					state.target = targetAddr;
+					state.naviAddr = naviAddr;
+					state.sameDirection = sameDirection;
+					state.sideSign = sideSign;
+					state.pos = pos;
+					state.forward = forward;
+					candidates.push_back(state);
+
+					float weight = (float)max(1, node.spawnProbability() + 1);
+					if(node.notHighway())
+						weight *= 1.9f;
+					if(node.highway())
+						weight *= 0.20f;
+					if(node.width() < 7.0f)
+						weight *= 1.25f;
+					if(totalLanes <= 2)
+						weight *= 1.20f;
+					else if(totalLanes >= 4)
+						weight *= 0.70f;
+					if(segmentLength > 40.0f)
+						weight *= 1.10f;
+					if(preferredDistance > 0.0f){
+						float distanceDelta = std::fabs(cameraDistance - preferredDistance);
+						float normalizedDelta = distanceDelta / max(35.0f, PATH_DRAW_DIST*0.30f);
+						weight *= 1.25f / (1.0f + normalizedDelta*normalizedDelta*4.0f);
+					}
+					weights.push_back(weight);
+				}
+			}
+		}
+	}
+
+	if(candidates.empty())
+		return false;
+
+	float totalWeight = 0.0f;
+	for(size_t i = 0; i < weights.size(); i++)
+		totalWeight += weights[i];
+	if(totalWeight <= 0.001f){
+		int index = clamp((int)(previewSeedFloat01(seed) * candidates.size()), 0, (int)candidates.size() - 1);
+		*outState = candidates[index];
+		return true;
+	}
+
+	float roll = previewSeedFloat01(seed) * totalWeight;
+	for(size_t i = 0; i < candidates.size(); i++){
+		if(roll < weights[i]){
+			*outState = candidates[i];
+			return true;
+		}
+		roll -= weights[i];
+	}
+
+	*outState = candidates.back();
+	return true;
+}
+
 static bool
 chooseNextPreviewTrafficLink(const NodeAddress &currentAddr, const NodeAddress &previousAddr, uint32 &seed,
                              NodeAddress *outTarget, CarPathLinkAddress *outNaviAddr, int *outLaneIndex,
+                             int *outLaneCount = nil, bool *outSameDirection = nil,
                              int previousLaneIndex = -1, int previousLaneCount = 0)
 {
 	Node *current = getNode(currentAddr);
@@ -3001,9 +4023,181 @@ chooseNextPreviewTrafficLink(const NodeAddress &currentAddr, const NodeAddress &
 			bestScore = score;
 			*outTarget = targetAddr;
 			*outNaviAddr = naviAddr;
+			if(outLaneCount)
+				*outLaneCount = laneCount;
+			if(outSameDirection)
+				*outSameDirection = sameDirection;
 			if(previousLaneIndex >= 0 && previousLaneCount > 0){
-				float lanePos = (previousLaneIndex + 0.5f) / previousLaneCount;
-				*outLaneIndex = clamp((int)(lanePos * laneCount), 0, laneCount - 1);
+				CarPathLinkAddress previousNaviAddr = { 0xFFFF };
+				DiskCarPathLink *previousNavi = nil;
+				bool previousSameDirection = false;
+				int resolvedPreviousLaneCount = 0;
+				if(getPreviewDirectedVehicleLink(previousAddr, currentAddr, &previousNaviAddr, &previousNavi,
+					&previousSameDirection, &resolvedPreviousLaneCount) &&
+				   previousNavi && resolvedPreviousLaneCount > 0)
+					*outLaneIndex = mapPreviewTrafficLaneIndex(*previousNavi, previousSameDirection, previousLaneIndex, *navi, sameDirection);
+				else
+					*outLaneIndex = clamp((int)(((previousLaneIndex + 0.5f) / previousLaneCount) * laneCount), 0, laneCount - 1);
+			}else
+				*outLaneIndex = clamp((int)(previewSeedFloat01(seed) * laneCount), 0, laneCount - 1);
+			found = true;
+		}
+	}
+
+	return found;
+}
+
+static bool
+chooseNextPreviewTrafficLinkFromCurrentLink(const NodeAddress &currentAddr, const NodeAddress &previousAddr,
+                                            CarPathLinkAddress currentLinkAddr, bool currentSameDirection,
+                                            uint32 &seed, NodeAddress *outTarget, CarPathLinkAddress *outNaviAddr,
+                                            int *outLaneIndex, int *outLaneCount = nil, bool *outSameDirection = nil,
+                                            int previousLaneIndex = -1, int previousLaneCount = 0)
+{
+	DiskCarPathLink *currentNavi = getPreviewTrafficNavi(currentLinkAddr);
+	if(currentNavi == nil)
+		return chooseNextPreviewTrafficLink(currentAddr, previousAddr, seed, outTarget, outNaviAddr,
+			outLaneIndex, outLaneCount, outSameDirection, previousLaneIndex, previousLaneCount);
+
+	Node *current = getNode(currentAddr);
+	AreaData *area = getArea(currentAddr.areaId);
+	if(current == nil || area == nil || !area->loaded || current->numLinks() <= 0)
+		return false;
+
+	rw::V3d wantedDir = getPreviewTrafficTravelDirection(*currentNavi, currentSameDirection);
+	float bestScore = -999999.0f;
+	bool found = false;
+	for(int li = 0; li < current->numLinks(); li++){
+		int slot = current->raw.baseLinkId + li;
+		if(slot < 0 || slot >= (int)area->nodeLinks.size())
+			continue;
+		NodeAddress targetAddr = area->nodeLinks[slot];
+		Node *target = getNode(targetAddr);
+		if(target == nil || target->waterNode())
+			continue;
+
+		CarPathLinkAddress naviAddr = { 0xFFFF };
+		DiskCarPathLink *navi = nil;
+		bool sameDirection = false;
+		int laneCount = 0;
+		if(!getPreviewDirectedVehicleLink(currentAddr, targetAddr, &naviAddr, &navi, &sameDirection, &laneCount) || laneCount <= 0)
+			continue;
+
+		rw::V3d candidateDir = getPreviewTrafficTravelDirection(*navi, sameDirection);
+		float score = dot(candidateDir, wantedDir);
+
+		if(targetAddr.isValid() &&
+		   targetAddr.areaId == previousAddr.areaId &&
+		   targetAddr.nodeId == previousAddr.nodeId)
+			score -= 1.0f;
+
+		Node *previous = getNode(previousAddr);
+		if(previous && target){
+			rw::V3d nodeDir = sub(getNodePosition(*target), getNodePosition(*current));
+			nodeDir.z = 0.0f;
+			float nodeLen = length(nodeDir);
+			if(nodeLen > 0.001f){
+				nodeDir = scale(nodeDir, 1.0f/nodeLen);
+				score += dot(nodeDir, wantedDir) * 0.2f;
+			}
+		}
+
+		score += previewSeedFloat01(seed) * 0.12f;
+		score += laneCount * 0.05f;
+
+		if(!found || score > bestScore){
+			bestScore = score;
+			*outTarget = targetAddr;
+			*outNaviAddr = naviAddr;
+			if(outLaneCount)
+				*outLaneCount = laneCount;
+			if(outSameDirection)
+				*outSameDirection = sameDirection;
+			if(previousLaneIndex >= 0 && previousLaneCount > 0)
+				*outLaneIndex = mapPreviewTrafficLaneIndex(*currentNavi, currentSameDirection, previousLaneIndex, *navi, sameDirection);
+			else
+				*outLaneIndex = clamp((int)(previewSeedFloat01(seed) * laneCount), 0, laneCount - 1);
+			found = true;
+		}
+	}
+
+	return found;
+}
+
+static bool
+choosePreviewIncomingTrafficLink(const NodeAddress &currentAddr, const NodeAddress &outgoingTargetAddr,
+                                 uint32 &seed, NodeAddress *outPrevious,
+                                 CarPathLinkAddress *outNaviAddr, int *outLaneIndex,
+                                 int desiredLaneIndex = -1, int desiredLaneCount = 0,
+                                 int *outLaneCount = nil, bool *outSameDirection = nil)
+{
+	Node *current = getNode(currentAddr);
+	AreaData *area = getArea(currentAddr.areaId);
+	Node *outgoing = getNode(outgoingTargetAddr);
+	if(current == nil || area == nil || !area->loaded || current->numLinks() <= 0)
+		return false;
+
+	rw::V3d outgoingDir = { 0.0f, 1.0f, 0.0f };
+	if(outgoing){
+		outgoingDir = sub(getNodePosition(*outgoing), getNodePosition(*current));
+		outgoingDir.z = 0.0f;
+		float len = length(outgoingDir);
+		if(len > 0.001f)
+			outgoingDir = scale(outgoingDir, 1.0f/len);
+	}
+
+	float bestScore = -999999.0f;
+	bool found = false;
+	for(int li = 0; li < current->numLinks(); li++){
+		int slot = current->raw.baseLinkId + li;
+		if(slot < 0 || slot >= (int)area->nodeLinks.size())
+			continue;
+
+		NodeAddress prevAddr = area->nodeLinks[slot];
+		if(prevAddr.areaId == outgoingTargetAddr.areaId && prevAddr.nodeId == outgoingTargetAddr.nodeId)
+			continue;
+
+		Node *previous = getNode(prevAddr);
+		if(previous == nil || previous->waterNode())
+			continue;
+
+		CarPathLinkAddress naviAddr = { 0xFFFF };
+		DiskCarPathLink *navi = nil;
+		bool sameDirection = false;
+		int laneCount = 0;
+		if(!getPreviewDirectedVehicleLink(prevAddr, currentAddr, &naviAddr, &navi, &sameDirection, &laneCount) || laneCount <= 0)
+			continue;
+
+		rw::V3d incomingDir = sub(getNodePosition(*current), getNodePosition(*previous));
+		incomingDir.z = 0.0f;
+		float len = length(incomingDir);
+		if(len < 0.001f)
+			continue;
+		incomingDir = scale(incomingDir, 1.0f/len);
+
+		float score = dot(incomingDir, outgoingDir);
+		score += previewSeedFloat01(seed) * 0.15f;
+		score += laneCount * 0.05f;
+
+		if(!found || score > bestScore){
+			bestScore = score;
+			*outPrevious = prevAddr;
+			*outNaviAddr = naviAddr;
+			if(outLaneCount)
+				*outLaneCount = laneCount;
+			if(outSameDirection)
+				*outSameDirection = sameDirection;
+			if(desiredLaneIndex >= 0 && desiredLaneCount > 0){
+				CarPathLinkAddress desiredNaviAddr = { 0xFFFF };
+				DiskCarPathLink *desiredNavi = nil;
+				bool desiredSameDirection = false;
+				int resolvedDesiredLaneCount = 0;
+				if(getPreviewDirectedVehicleLink(currentAddr, outgoingTargetAddr, &desiredNaviAddr, &desiredNavi,
+					&desiredSameDirection, &resolvedDesiredLaneCount) &&
+				   desiredNavi && resolvedDesiredLaneCount > 0)
+					*outLaneIndex = mapPreviewTrafficLaneIndex(*desiredNavi, desiredSameDirection, desiredLaneIndex, *navi, sameDirection);
+				else
+					*outLaneIndex = clamp((int)(((desiredLaneIndex + 0.5f) / desiredLaneCount) * laneCount), 0, laneCount - 1);
 			}else
 				*outLaneIndex = clamp((int)(previewSeedFloat01(seed) * laneCount), 0, laneCount - 1);
 			found = true;
@@ -3255,6 +4449,7 @@ Reset(void)
 	clearAreas();
 	clearPreviewWalkers();
 	clearPreviewTrafficCars();
+	clearPreviewParkedCars();
 	gLoadAttempted = false;
 	gLoadSucceeded = false;
 	gLoadFailed = false;
@@ -3978,6 +5173,7 @@ renderPreviewWalkers(void)
 	rw::SetRenderState(rw::ZWRITEENABLE, 1);
 	rw::SetRenderState(rw::FOGENABLE, 0);
 	rw::SetRenderState(rw::CULLMODE, rw::CULLBACK);
+	gPreviewTrafficLightTimeMs += timeStep * (1000.0f/60.0f);
 	rw::RGBAf savedAmbient = pAmbient->color;
 	rw::RGBAf savedDirect = pDirect->color;
 	pAmbient->setColor(0.75f, 0.75f, 0.75f);
@@ -3997,47 +5193,112 @@ renderPreviewWalkers(void)
 static bool
 updatePreviewTrafficCarCurve(PreviewTrafficCar &car)
 {
+	Node *previous = getNode(car.previous);
 	Node *current = getNode(car.current);
 	Node *target = getNode(car.target);
-	if(current == nil || target == nil){
+	if(previous == nil || current == nil || target == nil){
 		car.active = false;
 		return false;
 	}
 
-	CarPathLinkAddress naviAddr = { 0xFFFF };
-	DiskCarPathLink *navi = nil;
-	bool sameDirection = false;
-	int laneCount = 0;
-	if(!getPreviewDirectedVehicleLink(car.current, car.target, &naviAddr, &navi, &sameDirection, &laneCount) || navi == nil){
+	DiskCarPathLink *currentNavi = getPreviewTrafficNavi(car.currentLinkAddr);
+	DiskCarPathLink *nextNavi = getPreviewTrafficNavi(car.nextLinkAddr);
+	if(currentNavi == nil || nextNavi == nil){
 		car.active = false;
 		return false;
 	}
 
-	car.naviAddr = naviAddr;
-	car.laneCount = laneCount;
-	car.laneIndex = clamp(car.laneIndex, 0, max(0, laneCount - 1));
-
-	rw::V3d linkStart;
-	rw::V3d linkEnd;
-	float midZ = (current->z() + target->z()) * 0.5f;
-	if(!getPreviewTrafficLaneEndpoint(car.current, car.target, car.laneIndex, car.laneCount, false, &linkStart) ||
-	   !getPreviewTrafficLaneEndpoint(car.current, car.target, car.laneIndex, car.laneCount, true, &linkEnd)){
+	car.currentLaneCount = car.currentSameDirection ? getNaviSameLanes(*currentNavi) : getNaviOppositeLanes(*currentNavi);
+	car.nextLaneCount = car.nextSameDirection ? getNaviSameLanes(*nextNavi) : getNaviOppositeLanes(*nextNavi);
+	if(car.currentLaneCount <= 0 || car.nextLaneCount <= 0){
 		car.active = false;
 		return false;
 	}
-	if(car.hasCarryStart){
-		car.curveP0 = car.carryStart;
-		car.curveP1 = linkStart;
-		car.hasCarryStart = false;
-	}else{
-		car.curveP0 = linkStart;
-		car.curveP1 = getPreviewTrafficLanePointAtNavi(*navi, sameDirection, car.laneIndex, midZ);
-	}
-	car.curveP2 = linkEnd;
-	car.curveLength = max(1.0f,
-		length(sub(car.curveP1, car.curveP0)) +
-		length(sub(car.curveP2, car.curveP1)));
+	car.currentLaneIndex = clamp(car.currentLaneIndex, 0, car.currentLaneCount - 1);
+	car.nextLaneIndex = clamp(car.nextLaneIndex, 0, car.nextLaneCount - 1);
+
+	float startZ = (previous->z() + current->z()) * 0.5f;
+	float endZ = (current->z() + target->z()) * 0.5f;
+	float controlZ = (startZ + endZ) * 0.5f;
+	car.curveP0 = getPreviewTrafficLanePointAtNavi(*currentNavi, car.currentSameDirection, car.currentLaneIndex, startZ);
+	car.curveP2 = getPreviewTrafficLanePointAtNavi(*nextNavi, car.nextSameDirection, car.nextLaneIndex, endZ);
+	rw::V3d currentDir = getPreviewTrafficTravelDirection(*currentNavi, car.currentSameDirection);
+	rw::V3d nextDir = getPreviewTrafficTravelDirection(*nextNavi, car.nextSameDirection);
+	car.curveP1 = getPreviewTrafficCurveControlPoint(car.curveP0, currentDir, car.curveP2, nextDir, controlZ);
+	buildPreviewTrafficCurveSamples(car);
 	return true;
+}
+
+static bool
+previewTrafficCarTouchesDirtyArea(const PreviewTrafficCar &car)
+{
+	auto areaIsDirty = [](uint16 areaId) {
+		AreaData *area = getArea(areaId);
+		return area && area->loaded && area->dirty;
+	};
+
+	return (car.previous.isValid() && areaIsDirty(car.previous.areaId)) ||
+	       (car.current.isValid() && areaIsDirty(car.current.areaId)) ||
+	       (car.target.isValid() && areaIsDirty(car.target.areaId)) ||
+	       (car.currentLinkAddr.isValid() && areaIsDirty(car.currentLinkAddr.areaId())) ||
+	       (car.nextLinkAddr.isValid() && areaIsDirty(car.nextLinkAddr.areaId()));
+}
+
+static bool
+isPreviewTrafficCarPathStateValid(const PreviewTrafficCar &car)
+{
+	if(!car.previous.isValid() || !car.current.isValid() || !car.target.isValid())
+		return false;
+
+	CarPathLinkAddress resolvedCurrentLinkAddr = { 0xFFFF };
+	bool resolvedCurrentSameDirection = false;
+	int resolvedCurrentLaneCount = 0;
+	if(!getPreviewDirectedVehicleLink(car.previous, car.current, &resolvedCurrentLinkAddr, nil,
+		&resolvedCurrentSameDirection, &resolvedCurrentLaneCount))
+		return false;
+	if(resolvedCurrentLinkAddr.raw != car.currentLinkAddr.raw ||
+	   resolvedCurrentSameDirection != car.currentSameDirection ||
+	   resolvedCurrentLaneCount <= 0)
+		return false;
+
+	CarPathLinkAddress resolvedNextLinkAddr = { 0xFFFF };
+	bool resolvedNextSameDirection = false;
+	int resolvedNextLaneCount = 0;
+	if(!getPreviewDirectedVehicleLink(car.current, car.target, &resolvedNextLinkAddr, nil,
+		&resolvedNextSameDirection, &resolvedNextLaneCount))
+		return false;
+	if(resolvedNextLinkAddr.raw != car.nextLinkAddr.raw ||
+	   resolvedNextSameDirection != car.nextSameDirection ||
+	   resolvedNextLaneCount <= 0)
+		return false;
+
+	return true;
+}
+
+static void
+refreshPreviewTrafficCarForLiveEdit(PreviewTrafficCar &car)
+{
+	if(!car.active || !previewTrafficCarTouchesDirtyArea(car))
+		return;
+
+	if(!isPreviewTrafficCarPathStateValid(car)){
+		resetPreviewTrafficCar(car, getPreviewTrafficResetSeed(car, 53));
+		return;
+	}
+
+	float distanceRatio = car.curveLength > 0.001f ? car.distanceOnCurve / car.curveLength : 0.0f;
+	if(!updatePreviewTrafficCarCurve(car)){
+		resetPreviewTrafficCar(car, getPreviewTrafficResetSeed(car, 53));
+		return;
+	}
+	car.distanceOnCurve = clamp(distanceRatio * car.curveLength, 0.0f, car.curveLength);
+}
+
+static void
+refreshPreviewTrafficCarsForLiveEdit(void)
+{
+	for(size_t i = 0; i < gPreviewTrafficCars.size(); i++)
+		refreshPreviewTrafficCarForLiveEdit(gPreviewTrafficCars[i]);
 }
 
 static float
@@ -4059,6 +5320,51 @@ choosePreviewTrafficSpeed(const PreviewVehicleAssets &assets, const Node *curren
 	return minSpeed + previewSeedFloat01(seed) * (maxSpeed - minSpeed);
 }
 
+static float
+getPreviewTrafficSegmentSpeedScale(const PreviewTrafficCar &car)
+{
+	Node *current = getNode(car.current);
+	DiskCarPathLink *currentNavi = getPreviewTrafficNavi(car.currentLinkAddr);
+	DiskCarPathLink *nextNavi = getPreviewTrafficNavi(car.nextLinkAddr);
+	if(current == nil || currentNavi == nil || nextNavi == nil)
+		return 1.0f;
+
+	float scale = 1.0f;
+
+	int currentTotalLanes = getNaviSameLanes(*currentNavi) + getNaviOppositeLanes(*currentNavi);
+	int nextTotalLanes = getNaviSameLanes(*nextNavi) + getNaviOppositeLanes(*nextNavi);
+	int laneCount = max(currentTotalLanes, nextTotalLanes);
+	float roadWidth = current->width();
+	if(current->highway())
+		scale *= 1.12f;
+	else if(current->notHighway())
+		scale *= 0.92f;
+	if(laneCount >= 4 || roadWidth >= 12.0f)
+		scale *= 1.08f;
+	else if(laneCount <= 2 || roadWidth <= 7.5f)
+		scale *= 0.90f;
+
+	rw::V3d currentDir = getPreviewTrafficTravelDirection(*currentNavi, car.currentSameDirection);
+	rw::V3d nextDir = getPreviewTrafficTravelDirection(*nextNavi, car.nextSameDirection);
+	float turnDot = clamp(dot(currentDir, nextDir), -1.0f, 1.0f);
+	if(turnDot < 0.35f)
+		scale *= 0.58f;
+	else if(turnDot < 0.60f)
+		scale *= 0.72f;
+	else if(turnDot < 0.82f)
+		scale *= 0.84f;
+	else if(turnDot > 0.97f)
+		scale *= 1.04f;
+
+	float curveLengthFactor = car.curveLength > 24.0f ? 1.04f : car.curveLength < 12.0f ? 0.92f : 1.0f;
+	scale *= curveLengthFactor;
+
+	if(car.heavy)
+		scale *= turnDot < 0.82f ? 0.88f : 0.94f;
+
+	return clamp(scale, 0.45f, 1.35f);
+}
+
 static bool
 resetPreviewTrafficCar(PreviewTrafficCar &car, uint32 seed)
 {
@@ -4071,92 +5377,276 @@ resetPreviewTrafficCar(PreviewTrafficCar &car, uint32 seed)
 	car.previous = { 0xFFFF, 0xFFFF };
 	car.current = { 0xFFFF, 0xFFFF };
 	car.target = { 0xFFFF, 0xFFFF };
-	car.naviAddr = { 0xFFFF };
-	car.prevLaneIndex = -1;
-	car.prevLaneCount = 0;
-	car.laneIndex = 0;
-	car.laneCount = 0;
+	car.currentLinkAddr = { 0xFFFF };
+	car.nextLinkAddr = { 0xFFFF };
+	car.currentSameDirection = false;
+	car.nextSameDirection = false;
+	car.currentLaneIndex = 0;
+	car.currentLaneCount = 0;
+	car.nextLaneIndex = 0;
+	car.nextLaneCount = 0;
+	car.colorIndices[0] = 1;
+	car.colorIndices[1] = 1;
+	car.colorIndices[2] = 1;
+	car.colorIndices[3] = 1;
+	car.materialColorRoles.clear();
 	car.assetIndex = -1;
-	car.hasCarryStart = false;
-	car.segmentT = previewSeedFloat01(car.seed);
-	car.curveLength = 1.0f;
+	car.distanceOnCurve = 0.0f;
+	car.curveLength = 0.01f;
+	if(car.preferredSpawnDistance <= 0.0f){
+		float preferredMin = PATH_DRAW_DIST*0.28f;
+		float preferredMax = PATH_DRAW_DIST*0.72f;
+		car.preferredSpawnDistance = preferredMin + previewSeedFloat01(car.seed) * (preferredMax - preferredMin);
+	}
 
-	if(!pickPreviewTrafficSpawnNode(car.seed, &car.current))
-		return false;
-	if(!chooseNextPreviewTrafficLink(car.current, car.previous, car.seed, &car.target, &car.naviAddr, &car.laneIndex))
+	bool foundPathState = false;
+	for(int pathAttempts = 0; pathAttempts < 24; pathAttempts++){
+		NodeAddress spawnNode = { 0xFFFF, 0xFFFF };
+		NodeAddress outgoingTarget = { 0xFFFF, 0xFFFF };
+		NodeAddress incomingSource = { 0xFFFF, 0xFFFF };
+		CarPathLinkAddress currentLinkAddr = { 0xFFFF };
+		CarPathLinkAddress nextLinkAddr = { 0xFFFF };
+		int currentLaneIndex = 0;
+		int currentLaneCount = 0;
+		int nextLaneIndex = 0;
+		int nextLaneCount = 0;
+		bool currentSameDirection = false;
+		bool nextSameDirection = false;
+
+		if(!pickPreviewTrafficSpawnNode(car.seed, &spawnNode, car.preferredSpawnDistance, 25.0f))
+			continue;
+		if(!chooseNextPreviewTrafficLink(spawnNode, { 0xFFFF, 0xFFFF }, car.seed,
+			&outgoingTarget, &nextLinkAddr, &nextLaneIndex, &nextLaneCount, &nextSameDirection))
+			continue;
+		if(!choosePreviewIncomingTrafficLink(spawnNode, outgoingTarget, car.seed,
+			&incomingSource, &currentLinkAddr, &currentLaneIndex,
+			nextLaneIndex, nextLaneCount, &currentLaneCount, &currentSameDirection))
+			continue;
+
+		car.previous = incomingSource;
+		car.current = spawnNode;
+		car.target = outgoingTarget;
+		car.currentLinkAddr = currentLinkAddr;
+		car.nextLinkAddr = nextLinkAddr;
+		car.currentSameDirection = currentSameDirection;
+		car.nextSameDirection = nextSameDirection;
+		car.currentLaneIndex = currentLaneIndex;
+		car.currentLaneCount = currentLaneCount;
+		car.nextLaneIndex = nextLaneIndex;
+		car.nextLaneCount = nextLaneCount;
+		foundPathState = true;
+		break;
+	}
+	if(!foundPathState)
 		return false;
 
 	rw::V3d spawnPos = getNodePosition(*getNode(car.current));
+	Node *spawnNode = getNode(car.current);
+	DiskCarPathLink *spawnNavi = getPreviewTrafficNavi(car.nextLinkAddr);
+	int chosenVehicleIndex = -1;
 	for(int attempts = 0; attempts < 24; attempts++){
-		int vehicleIndex = choosePreviewVehicleDefForPosition(spawnPos, car.seed);
+		int vehicleIndex = choosePreviewVehicleDefForTrafficContext(spawnPos, spawnNode, spawnNavi, car.seed);
 		if(vehicleIndex < 0){
 			vehicleIndex = (int)(previewSeedFloat01(car.seed) * gPreviewVehicleDefs.size());
 			vehicleIndex = clamp(vehicleIndex, 0, (int)gPreviewVehicleDefs.size() - 1);
 		}
 		car.assetIndex = loadPreviewVehicleAssets(vehicleIndex);
-		if(car.assetIndex >= 0)
+		if(car.assetIndex >= 0){
+			chosenVehicleIndex = vehicleIndex;
 			break;
+		}
 	}
-	if(car.assetIndex < 0)
+	if(car.assetIndex < 0 || chosenVehicleIndex < 0)
 		return false;
 
 	PreviewVehicleAssets &assets = gPreviewVehicleAssetCache[car.assetIndex];
+	choosePreviewVehicleColorIndices(gPreviewVehicleDefs[chosenVehicleIndex], car.seed, car.colorIndices);
 	car.heavy = assets.heavy;
 	car.speed = choosePreviewTrafficSpeed(assets, getNode(car.current), car.seed);
 	car.clump = assets.clump->clone();
 	if(car.clump == nil)
 		return false;
+	car.materialColorRoles = assets.materialColorRoles;
 	setupPreviewClump(car.clump);
-	return updatePreviewTrafficCarCurve(car);
+	if(!updatePreviewTrafficCarCurve(car))
+		return false;
+	car.distanceOnCurve = previewSeedFloat01(car.seed) * car.curveLength;
+	return true;
+}
+
+static bool
+resetPreviewParkedCar(PreviewParkedCar &car, uint32 seed)
+{
+	destroyPreviewParkedCar(car);
+	if(!loadPreviewVehicleMetadata() || gPreviewVehicleDefs.empty())
+		return false;
+
+	car.seed = seed;
+	car.active = true;
+	car.current = { 0xFFFF, 0xFFFF };
+	car.target = { 0xFFFF, 0xFFFF };
+	car.naviAddr = { 0xFFFF };
+	car.sameDirection = false;
+	car.sideSign = 1.0f;
+	car.colorIndices[0] = 1;
+	car.colorIndices[1] = 1;
+	car.colorIndices[2] = 1;
+	car.colorIndices[3] = 1;
+	car.materialColorRoles.clear();
+	car.assetIndex = -1;
+	if(car.preferredSpawnDistance <= 0.0f){
+		float preferredMin = PATH_DRAW_DIST*0.30f;
+		float preferredMax = PATH_DRAW_DIST*0.75f;
+		car.preferredSpawnDistance = preferredMin + previewSeedFloat01(car.seed) * (preferredMax - preferredMin);
+	}
+
+	PreviewParkedSpawnState spawn = {};
+	if(!pickPreviewParkedSpawnState(car.seed, &spawn, car.preferredSpawnDistance, 12.0f))
+		return false;
+
+	car.current = spawn.current;
+	car.target = spawn.target;
+	car.naviAddr = spawn.naviAddr;
+	car.sameDirection = spawn.sameDirection;
+	car.sideSign = spawn.sideSign;
+	car.pos = spawn.pos;
+	car.forward = spawn.forward;
+
+	Node *spawnNode = getNode(car.current);
+	DiskCarPathLink *spawnNavi = getPreviewTrafficNavi(car.naviAddr);
+	int chosenVehicleIndex = -1;
+	for(int attempts = 0; attempts < 24; attempts++){
+		int vehicleIndex = choosePreviewVehicleDefForTrafficContext(car.pos, spawnNode, spawnNavi, car.seed);
+		if(vehicleIndex < 0){
+			vehicleIndex = (int)(previewSeedFloat01(car.seed) * gPreviewVehicleDefs.size());
+			vehicleIndex = clamp(vehicleIndex, 0, (int)gPreviewVehicleDefs.size() - 1);
+		}
+		car.assetIndex = loadPreviewVehicleAssets(vehicleIndex);
+		if(car.assetIndex >= 0){
+			chosenVehicleIndex = vehicleIndex;
+			break;
+		}
+	}
+	if(car.assetIndex < 0 || chosenVehicleIndex < 0)
+		return false;
+
+	PreviewVehicleAssets &assets = gPreviewVehicleAssetCache[car.assetIndex];
+	choosePreviewVehicleColorIndices(gPreviewVehicleDefs[chosenVehicleIndex], car.seed, car.colorIndices);
+	car.heavy = assets.heavy;
+	car.clump = assets.clump->clone();
+	if(car.clump == nil)
+		return false;
+	car.materialColorRoles = assets.materialColorRoles;
+	setupPreviewClump(car.clump);
+	return true;
 }
 
 static void
 advancePreviewTrafficCarSegment(PreviewTrafficCar &car)
 {
-	rw::V3d carryStart = car.curveP2;
-	car.prevLaneIndex = car.laneIndex;
-	car.prevLaneCount = car.laneCount;
 	car.previous = car.current;
 	car.current = car.target;
+	car.currentLinkAddr = car.nextLinkAddr;
+	car.currentSameDirection = car.nextSameDirection;
+	car.currentLaneIndex = car.nextLaneIndex;
+	car.currentLaneCount = car.nextLaneCount;
 	car.target = { 0xFFFF, 0xFFFF };
-	car.segmentT = 0.0f;
-	car.hasCarryStart = true;
-	car.carryStart = carryStart;
-	if(!chooseNextPreviewTrafficLink(car.current, car.previous, car.seed,
-		&car.target, &car.naviAddr, &car.laneIndex, car.prevLaneIndex, car.prevLaneCount))
+	car.distanceOnCurve = 0.0f;
+	if(!chooseNextPreviewTrafficLinkFromCurrentLink(car.current, car.previous,
+		car.currentLinkAddr, car.currentSameDirection, car.seed,
+		&car.target, &car.nextLinkAddr, &car.nextLaneIndex, &car.nextLaneCount, &car.nextSameDirection,
+		car.currentLaneIndex, car.currentLaneCount))
 		car.active = false;
 	else
 		updatePreviewTrafficCarCurve(car);
 }
 
 static void
+updatePreviewParkedCar(PreviewParkedCar &car)
+{
+	if(!car.active){
+		resetPreviewParkedCar(car, car.seed + 1);
+		return;
+	}
+	if(TheCamera.distanceTo(car.pos) > PATH_DRAW_DIST*1.55f){
+		resetPreviewParkedCar(car, car.seed + 17);
+		return;
+	}
+
+	rw::V3d dir = car.forward;
+	dir.z = 0.0f;
+	float dirLen = length(dir);
+	if(dirLen < 0.001f)
+		dir = { 0.0f, 1.0f, 0.0f };
+	else
+		dir = scale(dir, 1.0f/dirLen);
+
+	rw::V3d groundNormal = { 0.0f, 0.0f, 1.0f };
+	rw::V3d right = cross(dir, groundNormal);
+	float rightLen = length(right);
+	if(rightLen < 0.001f)
+		right = { 1.0f, 0.0f, 0.0f };
+	else
+		right = scale(right, 1.0f/rightLen);
+	rw::V3d forward = cross(groundNormal, right);
+	float forwardLen = length(forward);
+	if(forwardLen < 0.001f)
+		forward = dir;
+	else
+		forward = scale(forward, 1.0f/forwardLen);
+
+	rw::Matrix world;
+	world.right = right;
+	world.up = forward;
+	world.at = groundNormal;
+	world.pos = car.pos;
+	world.pos.z += PREVIEW_CAR_Z_OFFSET;
+	car.clump->getFrame()->matrix = world;
+	car.clump->getFrame()->updateObjects();
+}
+
+static void
 updatePreviewTrafficCar(PreviewTrafficCar &car)
 {
 	if(!car.active){
-		resetPreviewTrafficCar(car, car.seed + 1);
+		resetPreviewTrafficCar(car, getPreviewTrafficResetSeed(car, 1));
 		return;
 	}
 
-	rw::V3d approxPos = quadraticBezierV3d(car.curveP0, car.curveP1, car.curveP2, clamp(car.segmentT, 0.0f, 1.0f));
+	float approxT = getPreviewTrafficCurveTForDistance(car, car.distanceOnCurve);
+	rw::V3d approxPos = quadraticBezierV3d(car.curveP0, car.curveP1, car.curveP2, approxT);
 	if(TheCamera.distanceTo(approxPos) > PATH_DRAW_DIST*1.6f){
 		car.active = false;
-		resetPreviewTrafficCar(car, car.seed + 31);
+		resetPreviewTrafficCar(car, getPreviewTrafficResetSeed(car, 31));
 		return;
 	}
 
-	for(int steps = 0; steps < 4; steps++){
-		car.segmentT += (car.speed * timeStep) / max(1.0f, car.curveLength);
-		if(car.segmentT < 1.0f)
+	float segmentSpeedScale = getPreviewTrafficSegmentSpeedScale(car);
+	float remainingDistance = car.speed * segmentSpeedScale * gSaCarPathTrafficSpeedScale * timeStep;
+	float lightStopDistance = shouldPreviewTrafficCarStopForLight(car) ? getPreviewTrafficLightStopDistance(car) : car.curveLength;
+	float spacingStopDistance = getPreviewTrafficSpacingStopDistance(car);
+	float yieldStopDistance = shouldPreviewTrafficCarYieldAtJunction(car) ? getPreviewTrafficYieldStopDistance(car) : car.curveLength;
+	for(int steps = 0; steps < 8 && remainingDistance > 0.0f; steps++){
+		float distanceLimit = min(car.curveLength, min(lightStopDistance, min(spacingStopDistance, yieldStopDistance)));
+		float distanceLeftOnCurve = max(0.0f, distanceLimit - car.distanceOnCurve);
+		if(distanceLeftOnCurve <= 0.001f){
+			remainingDistance = 0.0f;
 			break;
-		car.segmentT -= 1.0f;
+		}
+		if(remainingDistance < distanceLeftOnCurve){
+			car.distanceOnCurve += remainingDistance;
+			remainingDistance = 0.0f;
+			break;
+		}
+		remainingDistance -= distanceLeftOnCurve;
 		advancePreviewTrafficCarSegment(car);
 		if(!car.active){
-			resetPreviewTrafficCar(car, car.seed + 17);
+			resetPreviewTrafficCar(car, getPreviewTrafficResetSeed(car, 17));
 			return;
 		}
 	}
 
-	float t = clamp(car.segmentT, 0.0f, 1.0f);
+	float t = getPreviewTrafficCurveTForDistance(car, car.distanceOnCurve);
 	rw::V3d pos = quadraticBezierV3d(car.curveP0, car.curveP1, car.curveP2, t);
 	rw::V3d dir = quadraticBezierTangent(car.curveP0, car.curveP1, car.curveP2, t);
 	dir.z = 0.0f;
@@ -4200,6 +5690,11 @@ renderPreviewTrafficCars(void)
 	if(!loadPreviewVehicleMetadata() || gPreviewVehicleDefs.empty())
 		return;
 
+	if(gPreviewTrafficLastFreezeRoutes != gSaCarPathTrafficFreezeRoutes){
+		clearPreviewTrafficCars();
+		gPreviewTrafficLastFreezeRoutes = gSaCarPathTrafficFreezeRoutes;
+	}
+
 	int wantedCount = clamp(gSaCarPathTrafficCount, 0, 32);
 	while((int)gPreviewTrafficCars.size() > wantedCount){
 		destroyPreviewTrafficCar(gPreviewTrafficCars.back());
@@ -4207,9 +5702,20 @@ renderPreviewTrafficCars(void)
 	}
 	while((int)gPreviewTrafficCars.size() < wantedCount){
 		PreviewTrafficCar car = {};
+		car.stableId = (uint32)gPreviewTrafficCars.size();
 		car.seed = 0x2468ACE1u + (uint32)gPreviewTrafficCars.size()*0x01020305u;
+		float preferredMin = PATH_DRAW_DIST*0.28f;
+		float preferredMax = PATH_DRAW_DIST*0.72f;
+		float slotT = wantedCount > 1 ? (float)gPreviewTrafficCars.size() / (float)(wantedCount - 1) : 0.5f;
+		car.preferredSpawnDistance = preferredMin + slotT * (preferredMax - preferredMin);
 		resetPreviewTrafficCar(car, car.seed);
 		gPreviewTrafficCars.push_back(car);
+	}
+
+	uint32 latestChangeSeq = GetLatestChangeSeq();
+	if(gPreviewTrafficLastSeenChangeSeq != latestChangeSeq){
+		refreshPreviewTrafficCarsForLiveEdit();
+		gPreviewTrafficLastSeenChangeSeq = latestChangeSeq;
 	}
 
 	rw::SetRenderState(rw::ZTESTENABLE, 1);
@@ -4223,8 +5729,69 @@ renderPreviewTrafficCars(void)
 
 	for(size_t i = 0; i < gPreviewTrafficCars.size(); i++){
 		updatePreviewTrafficCar(gPreviewTrafficCars[i]);
-		if(gPreviewTrafficCars[i].active && gPreviewTrafficCars[i].clump)
+		if(gPreviewTrafficCars[i].active && gPreviewTrafficCars[i].clump){
+			applyPreviewVehicleColorIndices(gPreviewTrafficCars[i].clump,
+				gPreviewTrafficCars[i].materialColorRoles,
+				gPreviewTrafficCars[i].colorIndices);
 			gPreviewTrafficCars[i].clump->render();
+		}
+	}
+
+	pAmbient->setColor(savedAmbient.red, savedAmbient.green, savedAmbient.blue);
+	pDirect->setColor(savedDirect.red, savedDirect.green, savedDirect.blue);
+	rw::SetRenderState(rw::CULLMODE, rw::CULLNONE);
+}
+
+static void
+renderPreviewParkedCars(void)
+{
+	if(!gRenderSaCarPathParkedCars || gSaCarPathParkedCarCount <= 0){
+		clearPreviewParkedCars();
+		return;
+	}
+	if(!loadPreviewVehicleMetadata() || gPreviewVehicleDefs.empty())
+		return;
+
+	uint32 latestChangeSeq = GetLatestChangeSeq();
+	if(gPreviewParkedLastSeenChangeSeq != latestChangeSeq){
+		clearPreviewParkedCars();
+		gPreviewParkedLastSeenChangeSeq = latestChangeSeq;
+	}
+
+	int wantedCount = clamp(gSaCarPathParkedCarCount, 0, 24);
+	while((int)gPreviewParkedCars.size() > wantedCount){
+		destroyPreviewParkedCar(gPreviewParkedCars.back());
+		gPreviewParkedCars.pop_back();
+	}
+	while((int)gPreviewParkedCars.size() < wantedCount){
+		PreviewParkedCar car = {};
+		car.stableId = (uint32)gPreviewParkedCars.size();
+		car.seed = 0x3579BDF1u + (uint32)gPreviewParkedCars.size()*0x01040811u;
+		float preferredMin = PATH_DRAW_DIST*0.30f;
+		float preferredMax = PATH_DRAW_DIST*0.75f;
+		float slotT = wantedCount > 1 ? (float)gPreviewParkedCars.size() / (float)(wantedCount - 1) : 0.5f;
+		car.preferredSpawnDistance = preferredMin + slotT * (preferredMax - preferredMin);
+		resetPreviewParkedCar(car, car.seed);
+		gPreviewParkedCars.push_back(car);
+	}
+
+	rw::SetRenderState(rw::ZTESTENABLE, 1);
+	rw::SetRenderState(rw::ZWRITEENABLE, 1);
+	rw::SetRenderState(rw::FOGENABLE, 0);
+	rw::SetRenderState(rw::CULLMODE, rw::CULLBACK);
+	rw::RGBAf savedAmbient = pAmbient->color;
+	rw::RGBAf savedDirect = pDirect->color;
+	pAmbient->setColor(0.80f, 0.80f, 0.80f);
+	pDirect->setColor(0.65f, 0.65f, 0.65f);
+
+	for(size_t i = 0; i < gPreviewParkedCars.size(); i++){
+		updatePreviewParkedCar(gPreviewParkedCars[i]);
+		if(gPreviewParkedCars[i].active && gPreviewParkedCars[i].clump){
+			applyPreviewVehicleColorIndices(gPreviewParkedCars[i].clump,
+				gPreviewParkedCars[i].materialColorRoles,
+				gPreviewParkedCars[i].colorIndices);
+			gPreviewParkedCars[i].clump->render();
+		}
 	}
 
 	pAmbient->setColor(savedAmbient.red, savedAmbient.green, savedAmbient.blue);
@@ -4241,6 +5808,7 @@ RenderCarPaths(void)
 	drawNodeSet(true);
 	drawVehicleLanes();
 	renderPreviewTrafficCars();
+	renderPreviewParkedCars();
 }
 
 void

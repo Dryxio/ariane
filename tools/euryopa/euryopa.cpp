@@ -72,10 +72,15 @@ bool gRenderSaPedPathWalkers;
 bool gRenderSaCarPaths;
 bool gRenderSaCarPathTraffic;
 bool gRenderSaAreaGrid;
+bool gRenderLightEffects = true;
 bool gRenderEffects;
 bool gRenderTimecycleBoxes;
 int gSaPedPathWalkerCount = 12;
 int gSaCarPathTrafficCount = 10;
+float gSaCarPathTrafficSpeedScale = 1.0f;
+bool gSaCarPathTrafficFreezeRoutes = false;
+bool gRenderSaCarPathParkedCars = false;
+int gSaCarPathParkedCarCount = 8;
 
 // SA postfx
 int  gColourFilter;
@@ -1909,6 +1914,8 @@ Draw(void)
 	if(gRenderWater)
 		WaterLevel::Render();
 	RenderTransparent();
+	if(gRenderLightEffects)
+		Effects::RenderLights();
 	// DEBUG render object picking
 	//RenderEverythingColourCoded();
 

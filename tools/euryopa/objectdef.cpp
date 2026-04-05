@@ -16,6 +16,153 @@ destroyDetachedAtomic(rw::Atomic *atomic)
 	atomic->destroy();
 }
 
+static void
+appendGeometry2dEffects(ObjectDef *obj, rw::Atomic *atomic, rw::Matrix *localXform)
+{
+	gta::Effect2d *srcEffects;
+	int numEffects;
+
+	if(obj == nil || atomic == nil || atomic->geometry == nil)
+		return;
+
+	numEffects = gta::getNum2dEffects(atomic->geometry);
+	if(numEffects <= 0)
+		return;
+	srcEffects = gta::get2dEffects(atomic->geometry);
+	if(srcEffects == nil)
+		return;
+
+	for(int i = 0; i < numEffects; i++){
+		const gta::Effect2d *src = &srcEffects[i];
+		Effect dst = {};
+		rw::V3d tmp;
+
+		dst.id = obj->m_id;
+		dst.col = { 255, 255, 255, 255 };
+		if(localXform)
+			rw::V3d::transformPoints(&dst.pos, &src->posn, 1, localXform);
+		else
+			dst.pos = src->posn;
+
+		switch(src->type){
+		case gta::ET_LIGHT:
+			dst.type = FX_LIGHT;
+			dst.col = src->attr.l.col;
+			dst.light.lodDist = src->attr.l.lodDist;
+			dst.light.size = src->attr.l.size;
+			dst.light.coronaSize = src->attr.l.coronaSize;
+			dst.light.shadowSize = src->attr.l.shadowSize;
+			dst.light.flashiness = src->attr.l.flashiness;
+			dst.light.reflection = src->attr.l.reflectionType;
+			dst.light.lensFlareType = src->attr.l.lensFlareType;
+			dst.light.shadowAlpha = src->attr.l.shadowAlpha;
+			dst.light.flags = src->attr.l.flags;
+			strncpy(dst.light.coronaTex, src->attr.l.coronaTex, sizeof(dst.light.coronaTex)-1);
+			strncpy(dst.light.shadowTex, src->attr.l.shadowTex, sizeof(dst.light.shadowTex)-1);
+			break;
+		case gta::ET_PARTICLE:
+			dst.type = FX_PARTICLE;
+			dst.col = { 255, 0, 255, 255 };
+			strncpy(dst.prtcl.name, src->attr.p.name, sizeof(dst.prtcl.name)-1);
+			dst.prtcl.size = 1.0f;
+			break;
+		case gta::ET_PEDQUEUE:
+			dst.type = FX_PEDQUEUE;
+			dst.col = { 255, 255, 0, 255 };
+			if(localXform){
+				rw::V3d::transformVectors(&dst.queue.queueDir, &src->attr.q.queueDir, 1, localXform);
+				rw::V3d::transformVectors(&dst.queue.useDir, &src->attr.q.useDir, 1, localXform);
+				rw::V3d::transformVectors(&dst.queue.forwardDir, &src->attr.q.forwardDir, 1, localXform);
+			}else{
+				dst.queue.queueDir = src->attr.q.queueDir;
+				dst.queue.useDir = src->attr.q.useDir;
+				dst.queue.forwardDir = src->attr.q.forwardDir;
+			}
+			dst.queue.type = src->attr.q.type;
+			dst.queue.interest = src->attr.q.interest;
+			dst.queue.lookAt = src->attr.q.lookAt;
+			dst.queue.flags = src->attr.q.flags;
+			strncpy(dst.queue.scriptName, src->attr.q.scriptName, sizeof(dst.queue.scriptName)-1);
+			break;
+		case gta::ET_SUNGLARE:
+			dst.type = FX_SUNGLARE;
+			dst.col = { 255, 255, 0, 255 };
+			break;
+		case gta::ET_INTERIOR:
+			dst.type = FX_INTERIOR;
+			dst.col = { 255, 255, 255, 255 };
+			dst.interior.type = src->attr.i.type;
+			dst.interior.group = src->attr.i.group;
+			dst.interior.width = src->attr.i.width;
+			dst.interior.depth = src->attr.i.depth;
+			dst.interior.height = src->attr.i.height;
+			dst.interior.rot = src->attr.i.rot;
+			break;
+		case gta::ET_ENTRYEXIT:
+			dst.type = FX_ENTRYEXIT;
+			dst.col = { 255, 128, 0, 255 };
+			dst.entryExit.enterAngle = src->attr.e.prot;
+			dst.entryExit.radiusX = src->attr.e.wx;
+			dst.entryExit.radiusY = src->attr.e.wy;
+			tmp = add(src->posn, src->attr.e.spawn);
+			if(localXform)
+				rw::V3d::transformPoints(&dst.entryExit.exitPos, &tmp, 1, localXform);
+			else
+				dst.entryExit.exitPos = tmp;
+			dst.entryExit.exitAngle = src->attr.e.spawnrot;
+			dst.entryExit.areaCode = src->attr.e.areacode;
+			dst.entryExit.flags = src->attr.e.flags;
+			dst.entryExit.extraColor = src->attr.e.extracol;
+			dst.entryExit.openTime = src->attr.e.openTime;
+			dst.entryExit.shutTime = src->attr.e.shutTime;
+			dst.entryExit.extraFlags = src->attr.e.extraFlags;
+			strncpy(dst.entryExit.title, src->attr.e.title, sizeof(dst.entryExit.title)-1);
+			break;
+		case gta::ET_ROADSIGN:
+			dst.type = FX_ROADSIGN;
+			dst.col = { 0, 255, 0, 255 };
+			dst.roadsign.width = src->attr.rs.width;
+			dst.roadsign.height = src->attr.rs.height;
+			dst.roadsign.rotX = src->attr.rs.rotX;
+			dst.roadsign.rotY = src->attr.rs.rotY;
+			dst.roadsign.rotZ = src->attr.rs.rotZ;
+			dst.roadsign.flags = src->attr.rs.flags;
+			memcpy(dst.roadsign.text, src->attr.rs.text, sizeof(dst.roadsign.text));
+			break;
+		case gta::ET_TRIGGERPOINT:
+			dst.type = FX_TRIGGERPOINT;
+			dst.col = { 255, 0, 0, 255 };
+			dst.triggerPoint.index = src->attr.t.index;
+			break;
+		case gta::ET_COVERPOINT:
+			dst.type = FX_COVERPOINT;
+			dst.col = { 0, 192, 255, 255 };
+			dst.coverPoint.dirX = src->attr.c.dirOfCoverX;
+			dst.coverPoint.dirY = src->attr.c.dirOfCoverY;
+			dst.coverPoint.usage = src->attr.c.usage;
+			break;
+		case gta::ET_ESCALATOR:
+			dst.type = FX_ESCALATOR;
+			dst.col = { 255, 0, 255, 255 };
+			if(localXform){
+				rw::V3d::transformPoints(&dst.escalator.bottom, &src->attr.es.coords[0], 1, localXform);
+				rw::V3d::transformPoints(&dst.escalator.top, &src->attr.es.coords[1], 1, localXform);
+				rw::V3d::transformPoints(&dst.escalator.end, &src->attr.es.coords[2], 1, localXform);
+			}else{
+				dst.escalator.bottom = src->attr.es.coords[0];
+				dst.escalator.top = src->attr.es.coords[1];
+				dst.escalator.end = src->attr.es.coords[2];
+			}
+			dst.escalator.goingUp = src->attr.es.goingUp;
+			break;
+		default:
+			continue;
+		}
+
+		Effects::AddEffect(dst);
+	}
+}
+
 float
 ObjectDef::GetLargestDrawDist(void)
 {
@@ -168,6 +315,7 @@ ObjectDef::LoadAtomic(void)
 	char *nodename;
 	char name[MODELNAMELEN];
 	int n;
+	bool populate2dfx = m_effectIndex < 0 && m_numEffects == 0;
 
 	const char *loosePath = ModloaderFindOverride(this->m_name, "dff");
 	if(loosePath){
@@ -179,11 +327,18 @@ ObjectDef::LoadAtomic(void)
 	stream.open((uint8*)buffer, size);
 	clump = loadclump(&stream);
 	if(clump){
+		rw::Matrix invRoot;
+		clump->getFrame()->updateObjects();
+		rw::Matrix::invert(&invRoot, clump->getFrame()->getLTM());
 		FORLIST(lnk, clump->atomics){
+			rw::Matrix effectLocal;
 			atomic = rw::Atomic::fromClump(lnk);
+			rw::Matrix::mult(&effectLocal, atomic->getFrame()->getLTM(), &invRoot);
+			if(populate2dfx)
+				appendGeometry2dEffects(this, atomic, &effectLocal);
 			nodename = gta::getNodeName(atomic->getFrame());
-			if(!isSA())
-				GetNameAndLOD(nodename, name, &n);
+				if(!isSA())
+					GetNameAndLOD(nodename, name, &n);
 			else
 				GetNameAndDamage(nodename, name, &n);
 			SetAtomic(n, atomic);
@@ -208,6 +363,7 @@ ObjectDef::LoadClump(void)
 	rw::StreamMemory stream;
 	rw::Clump *clump;
 	rw::Atomic *atomic;
+	bool populate2dfx = m_effectIndex < 0 && m_numEffects == 0;
 
 	const char *loosePath = ModloaderFindOverride(this->m_name, "dff");
 	if(loosePath){
@@ -219,8 +375,16 @@ ObjectDef::LoadClump(void)
 	stream.open((uint8*)buffer, size);
 	clump = loadclump(&stream);
 	if(clump){
+		rw::Matrix invRoot;
+		clump->getFrame()->updateObjects();
+		rw::Matrix::invert(&invRoot, clump->getFrame()->getLTM());
 		FORLIST(lnk, clump->atomics){
+			rw::Matrix effectLocal;
 			atomic = rw::Atomic::fromClump(lnk);
+			if(populate2dfx){
+				rw::Matrix::mult(&effectLocal, atomic->getFrame()->getLTM(), &invRoot);
+				appendGeometry2dEffects(this, atomic, &effectLocal);
+			}
 			SetupAtomic(atomic);
 		}
 		SetClump(clump);

@@ -3208,7 +3208,8 @@ uiView(void)
 		ImGui::Checkbox("Attrib Zones", &gRenderAttribZones);
 		ImGui::Unindent();
 	}
-	if(!isSA()) ImGui::Checkbox("Draw 2dfx", &gRenderEffects);
+	ImGui::Checkbox("Render 2dfx Lights", &gRenderLightEffects);
+	ImGui::Checkbox("Show 2dfx Markers", &gRenderEffects);
 	ImGui::SeparatorText("Legacy Paths");
 	ImGui::Checkbox("Draw Legacy Car Paths", &gRenderLegacyCarPaths);
 	ImGui::Checkbox("Draw Legacy Ped Paths", &gRenderLegacyPedPaths);
@@ -3218,8 +3219,14 @@ uiView(void)
 		if(gRenderSaCarPaths){
 			ImGui::Indent();
 			ImGui::Checkbox("Show Preview Traffic", &gRenderSaCarPathTraffic);
-			if(gRenderSaCarPathTraffic)
+			if(gRenderSaCarPathTraffic){
 				ImGui::SliderInt("Preview Traffic Count", &gSaCarPathTrafficCount, 1, 32);
+				ImGui::SliderFloat("Preview Traffic Speed", &gSaCarPathTrafficSpeedScale, 0.25f, 3.0f, "%.2fx");
+				ImGui::Checkbox("Freeze Preview Routes", &gSaCarPathTrafficFreezeRoutes);
+			}
+			ImGui::Checkbox("Show Parked Preview Cars", &gRenderSaCarPathParkedCars);
+			if(gRenderSaCarPathParkedCars)
+				ImGui::SliderInt("Parked Preview Count", &gSaCarPathParkedCarCount, 1, 24);
 			ImGui::Unindent();
 		}
 		ImGui::Checkbox("Draw SA Ped Paths", &gRenderSaPedPaths);
@@ -3584,8 +3591,28 @@ uiPathInfo(ObjectInst *inst)
 	}
 }
 
-static const char *fxTypeNames[] = { "Light", "Particle", "LookAtPoint", "PedQueue", "SunGlare"};
+static const char *fxTypeNames[] = {
+	"Light",
+	"Particle",
+	"LookAtPoint",
+	"PedQueue",
+	"SunGlare",
+	"Interior",
+	"EntryExit",
+	"Roadsign",
+	"TriggerPoint",
+	"CoverPoint",
+	"Escalator"
+};
 static const char *flareTypeNames[] = { "None", "Sun", "Headlight" };
+
+static const char*
+GetEffectTypeName(int type)
+{
+	if(type < 0 || type >= (int)IM_ARRAYSIZE(fxTypeNames))
+		return "Unknown";
+	return fxTypeNames[type];
+}
 
 void
 uiOneEffect(Effect *e)
@@ -3637,7 +3664,47 @@ uiOneEffect(Effect *e)
 	case FX_PEDQUEUE:
 		ImGui::DragFloat3("Queue dir", &e->queue.queueDir.x, 0.01f);
 		ImGui::DragFloat3("Use dir",   &e->queue.useDir.x,   0.01f);
+		ImGui::DragFloat3("Forward dir", &e->queue.forwardDir.x, 0.01f);
 		ImGui::DragInt   ("Type",      &e->queue.type);
+		break;
+
+	case FX_INTERIOR:
+		ImGui::TextDisabled("Render-only preview");
+		ImGui::Text("Type: %d", e->interior.type);
+		ImGui::Text("Group: %d", e->interior.group);
+		ImGui::Text("Size: %.1f x %.1f x %.1f", e->interior.width, e->interior.depth, e->interior.height);
+		break;
+
+	case FX_ENTRYEXIT:
+		ImGui::TextDisabled("Render-only preview");
+		ImGui::Text("Area: %d", e->entryExit.areaCode);
+		ImGui::Text("Radius: %.2f x %.2f", e->entryExit.radiusX, e->entryExit.radiusY);
+		ImGui::Text("Title: %.8s", e->entryExit.title);
+		break;
+
+	case FX_ROADSIGN:
+		ImGui::TextDisabled("Render-only preview");
+		ImGui::Text("Size: %.2f x %.2f", e->roadsign.width, e->roadsign.height);
+		ImGui::Text("Line 1: %.16s", e->roadsign.text[0]);
+		ImGui::Text("Line 2: %.16s", e->roadsign.text[1]);
+		ImGui::Text("Line 3: %.16s", e->roadsign.text[2]);
+		ImGui::Text("Line 4: %.16s", e->roadsign.text[3]);
+		break;
+
+	case FX_TRIGGERPOINT:
+		ImGui::TextDisabled("Render-only preview");
+		ImGui::Text("Index: %d", e->triggerPoint.index);
+		break;
+
+	case FX_COVERPOINT:
+		ImGui::TextDisabled("Render-only preview");
+		ImGui::Text("Direction: %.2f %.2f", e->coverPoint.dirX, e->coverPoint.dirY);
+		ImGui::Text("Usage: %d", e->coverPoint.usage);
+		break;
+
+	case FX_ESCALATOR:
+		ImGui::TextDisabled("Render-only preview");
+		ImGui::Text("Direction: %s", e->escalator.goingUp ? "Up" : "Down");
 		break;
 	}
 }
@@ -3668,7 +3735,7 @@ uiFxTable(ObjectInst *inst)
 		ImGui::SameLine();
 
 		char label[64];
-		snprintf(label, sizeof(label), "%s##eff%d", fxTypeNames[e->type], i);
+		snprintf(label, sizeof(label), "%s##eff%d", GetEffectTypeName(e->type), i);
 
 		if(ImGui::Selectable(label, e == Effects::selectedEffect, ImGuiSelectableFlags_None, ImVec2(0, 0)))
 			Effects::selectedEffect = e;

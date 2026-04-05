@@ -146,10 +146,15 @@ extern bool gRenderSaPedPathWalkers;
 extern bool gRenderSaCarPaths;
 extern bool gRenderSaCarPathTraffic;
 extern bool gRenderSaAreaGrid;
+extern bool gRenderLightEffects;
 extern bool gRenderEffects;
 extern bool gRenderTimecycleBoxes;
 extern int gSaPedPathWalkerCount;
 extern int gSaCarPathTrafficCount;
+extern float gSaCarPathTrafficSpeedScale;
+extern bool gSaCarPathTrafficFreezeRoutes;
+extern bool gRenderSaCarPathParkedCars;
+extern int gSaCarPathParkedCarCount;
 
 // SA postfx
 extern int  gColourFilter;
@@ -698,7 +703,13 @@ enum EffectType {
 	FX_PARTICLE,
 	FX_LOOKATPOINT,
 	FX_PEDQUEUE,
-	FX_SUNGLARE
+	FX_SUNGLARE,
+	FX_INTERIOR,
+	FX_ENTRYEXIT,
+	FX_ROADSIGN,
+	FX_TRIGGERPOINT,
+	FX_COVERPOINT,
+	FX_ESCALATOR
 };
 
 enum FlareType {
@@ -728,6 +739,7 @@ struct Effect {
 	};
 	struct Particle {
 		int particleType;
+		char name[24];
 		rw::V3d dir;
 		float size;
 	};
@@ -739,13 +751,69 @@ struct Effect {
 	struct PedQueue {
 		rw::V3d queueDir;
 		rw::V3d useDir;
+		rw::V3d forwardDir;
 		int type;
+		int interest;
+		int lookAt;
+		int flags;
+		char scriptName[8];
+	};
+	struct Interior {
+		int type;
+		int group;
+		float width;
+		float depth;
+		float height;
+		float rot;
+	};
+	struct EntryExit {
+		float enterAngle;
+		float radiusX;
+		float radiusY;
+		rw::V3d exitPos;
+		float exitAngle;
+		int areaCode;
+		int flags;
+		int extraColor;
+		int openTime;
+		int shutTime;
+		int extraFlags;
+		char title[8];
+	};
+	struct Roadsign {
+		float width;
+		float height;
+		float rotX;
+		float rotY;
+		float rotZ;
+		int flags;
+		char text[4][16];
+	};
+	struct TriggerPoint {
+		int index;
+	};
+	struct CoverPoint {
+		float dirX;
+		float dirY;
+		int usage;
+	};
+	struct Escalator {
+		rw::V3d bottom;
+		rw::V3d top;
+		rw::V3d end;
+		bool goingUp;
 	};
 	union {
 		Light light;
 		Particle prtcl;
 		LookAtPoint look;
 		PedQueue queue;
+		Interior interior;
+		EntryExit entryExit;
+		Roadsign roadsign;
+		TriggerPoint triggerPoint;
+		CoverPoint coverPoint;
+		Escalator escalator;
 		// glare has no extra data
 	};
 
@@ -757,6 +825,7 @@ extern Effect *hoveredEffect, *guiHoveredEffect;
 extern Effect *selectedEffect;
 void AddEffect(Effect e);
 Effect *GetEffect(int idx);
+void RenderLights(void);
 void Render(void);
 }
 
