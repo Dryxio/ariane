@@ -129,6 +129,38 @@ SetupFonts(void)
 	ImGuiIO &io = ImGui::GetIO();
 	float fontSize = 15.0f;
 
+	// Only bake the exact icons used by Ariane. Packing the entire private-use
+	// area creates a very large atlas, which can fail on some D3D9 GPUs during
+	// startup even though the rest of the app is fine.
+	static const ImWchar iconRanges[] = {
+		0xe13a, 0xe13a, // code-compare
+		0xf002, 0xf005, // magnifying-glass, star
+		0xf00d, 0xf00d, // xmark
+		0xf017, 0xf017, // clock
+		0xf03a, 0xf03a, // list
+		0xf043, 0xf043, // droplet
+		0xf047, 0xf047, // arrows-up-down-left-right
+		0xf059, 0xf05a, // circle-question, circle-info
+		0xf06e, 0xf06e, // eye
+		0xf07c, 0xf07c, // folder-open
+		0xf0ad, 0xf0ad, // wrench
+		0xf0c5, 0xf0c7, // copy, floppy-disk
+		0xf0e7, 0xf0ea, // bolt, paste
+		0xf0f3, 0xf0f3, // bell
+		0xf11b, 0xf11b, // gamepad
+		0xf185, 0xf185, // sun
+		0xf1b2, 0xf1b2, // cube
+		0xf1f8, 0xf1fc, // trash, paintbrush
+		0xf2d0, 0xf2d0, // window-maximize
+		0xf2ea, 0xf2f1, // rotate-left, rotate
+		0xf2f5, 0xf2f9, // right-from-bracket, rotate-right
+		0xf304, 0xf304, // pen
+		0xf56e, 0xf56f, // file-export, file-import
+		0xf6c4, 0xf6c4, // cloud-sun
+		0xf773, 0xf773, // water
+		0,
+	};
+
 	// --- Main font: Inter (embedded) ---
 	ImFontConfig fontCfg;
 	fontCfg.FontDataOwnedByAtlas = false;
@@ -142,7 +174,6 @@ SetupFonts(void)
 	iconCfg.PixelSnapH = true;
 	iconCfg.GlyphMinAdvanceX = fontSize;
 	iconCfg.FontDataOwnedByAtlas = false;
-	static const ImWchar iconRanges[] = { 0xe000, 0xf8ff, 0 };
 	io.Fonts->AddFontFromMemoryTTF(
 		(void *)fa_solid_font_data, fa_solid_font_size,
 		fontSize - 1.0f, &iconCfg, iconRanges);
