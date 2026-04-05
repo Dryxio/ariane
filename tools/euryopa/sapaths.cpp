@@ -2,7 +2,9 @@
 #include "modloader.h"
 #include "sapaths.h"
 #include <cctype>
+#include <cstdlib>
 #include <cmath>
+#include <ctime>
 #include <cstring>
 #include <string>
 #include <stdio.h>
@@ -33,6 +35,14 @@ static const float AREA_SIZE = 750.0f;
 static const size_t MAX_LENIENT_IMG_OVERREAD_BYTES = 2048;
 static const float PREVIEW_PI = 3.14159265358979323846f;
 static const float PREVIEW_PED_Z_OFFSET = 1.08f;
+static const float PREVIEW_CAR_Z_OFFSET = 0.35f;
+static const int PREVIEW_POP_GROUP_COUNT = 18;
+static const int PREVIEW_POP_ZONE_COUNT = 20;
+static const int PREVIEW_POP_DAYSETS = 2;
+static const int PREVIEW_POP_TIMESLOTS = 12;
+static const int PREVIEW_CAR_GROUP_OTHER_COUNT = 18;
+static const int PREVIEW_CAR_GROUP_GANG_BASE = 18;
+static const int PREVIEW_CAR_GROUP_DEALERS = 28;
 
 struct NodeAddress {
 	uint16 areaId;
@@ -192,6 +202,39 @@ static const rw::RGBA magenta = { 255, 0, 255, 255 };
 static const rw::RGBA yellow = { 255, 255, 0, 255 };
 static const rw::RGBA white = { 255, 255, 255, 255 };
 
+enum PreviewZonePopulationType
+{
+	PREVIEW_ZONE_BUSINESS = 0,
+	PREVIEW_ZONE_DESERT,
+	PREVIEW_ZONE_ENTERTAINMENT,
+	PREVIEW_ZONE_COUNTRYSIDE,
+	PREVIEW_ZONE_RESIDENTIAL_RICH,
+	PREVIEW_ZONE_RESIDENTIAL_AVERAGE,
+	PREVIEW_ZONE_RESIDENTIAL_POOR,
+	PREVIEW_ZONE_GANGLAND,
+	PREVIEW_ZONE_BEACH,
+	PREVIEW_ZONE_SHOPPING,
+	PREVIEW_ZONE_PARK,
+	PREVIEW_ZONE_INDUSTRY,
+	PREVIEW_ZONE_ENTERTAINMENT_BUSY,
+	PREVIEW_ZONE_SHOPPING_BUSY,
+	PREVIEW_ZONE_SHOPPING_POSH,
+	PREVIEW_ZONE_RESIDENTIAL_RICH_SECLUDED,
+	PREVIEW_ZONE_AIRPORT,
+	PREVIEW_ZONE_GOLF_CLUB,
+	PREVIEW_ZONE_OUT_OF_TOWN_FACTORY,
+	PREVIEW_ZONE_AIRPORT_RUNWAY,
+};
+
+enum PreviewPedRace
+{
+	PREVIEW_RACE_DEFAULT = 0,
+	PREVIEW_RACE_BLACK = 1,
+	PREVIEW_RACE_WHITE = 2,
+	PREVIEW_RACE_ORIENTAL = 3,
+	PREVIEW_RACE_HISPANIC = 4,
+};
+
 enum
 {
 	PREVIEW_HAS_ROT = 1,
@@ -232,6 +275,49 @@ struct PreviewPedDef {
 	char modelName[32];
 	char txdName[32];
 	char animGroup[32];
+	uint8 race;
+};
+
+struct PreviewVehicleDef {
+	char modelName[32];
+	char txdName[32];
+	char type[16];
+	bool heavy;
+};
+
+struct PreviewPopcycleSlot {
+	uint8 maxPeds;
+	uint8 maxCars;
+	uint8 percDealers;
+	uint8 percGang;
+	uint8 percCops;
+	uint8 percOther;
+	uint8 groupPerc[PREVIEW_POP_GROUP_COUNT];
+};
+
+struct PreviewPedGroup {
+	std::vector<std::string> modelNames;
+};
+
+struct PreviewCarGroup {
+	std::vector<std::string> modelNames;
+};
+
+struct PreviewZoneBox {
+	char label[16];
+	float minx, miny, minz;
+	float maxx, maxy, maxz;
+	float area;
+	int level;
+};
+
+struct PreviewZoneState {
+	char label[16];
+	int popType;
+	uint8 raceMask;
+	bool noCops;
+	uint8 dealerStrength;
+	uint8 gangStrength[10];
 };
 
 struct PreviewWalkCycle {
@@ -275,16 +361,73 @@ struct PreviewWalker {
 	rw::V3d toPos;
 };
 
+struct PreviewVehicleAssets {
+	bool attempted;
+	bool loaded;
+	char failureReason[128];
+	char modelName[32];
+	char txdName[32];
+	bool heavy;
+	rw::TexDictionary *txd;
+	rw::Clump *clump;
+};
+
+struct PreviewTrafficCar {
+	bool active;
+	bool heavy;
+	rw::Clump *clump;
+	NodeAddress previous;
+	NodeAddress current;
+	NodeAddress target;
+	CarPathLinkAddress naviAddr;
+	int prevLaneIndex;
+	int prevLaneCount;
+	int laneIndex;
+	int laneCount;
+	float segmentT;
+	float speed;
+	uint32 seed;
+	int assetIndex;
+	bool hasCarryStart;
+	rw::V3d carryStart;
+	rw::V3d curveP0;
+	rw::V3d curveP1;
+	rw::V3d curveP2;
+	float curveLength;
+};
+
 static bool gPreviewMetadataAttempted;
 static bool gPreviewMetadataLoaded;
 static char gPreviewMetadataFailureReason[128];
 static std::vector<PreviewAnimGroupDef> gPreviewAnimGroups;
 static std::vector<PreviewPedDef> gPreviewPedDefs;
+static bool gPreviewVehicleMetadataAttempted;
+static bool gPreviewVehicleMetadataLoaded;
+static char gPreviewVehicleMetadataFailureReason[128];
+static std::vector<PreviewVehicleDef> gPreviewVehicleDefs;
 static std::vector<PreviewWalkCycle> gPreviewWalkCycles;
 static std::vector<PreviewPedAssets> gPreviewPedAssetCache;
 static std::vector<PreviewWalker> gPreviewWalkers;
+static bool gPreviewPopulationAttempted;
+static bool gPreviewPopulationLoaded;
+static char gPreviewPopulationFailureReason[128];
+static bool gPreviewVehiclePopulationAttempted;
+static bool gPreviewVehiclePopulationLoaded;
+static char gPreviewVehiclePopulationFailureReason[128];
+static PreviewPopcycleSlot gPreviewPopcycle[PREVIEW_POP_ZONE_COUNT][PREVIEW_POP_DAYSETS][PREVIEW_POP_TIMESLOTS];
+static std::vector<PreviewPedGroup> gPreviewPedGroups;
+static std::vector<PreviewCarGroup> gPreviewCarGroups;
+static std::vector<PreviewZoneBox> gPreviewInfoZones;
+static std::vector<PreviewZoneBox> gPreviewMapZones;
+static std::vector<PreviewZoneState> gPreviewZoneStates;
+static std::vector<PreviewVehicleAssets> gPreviewVehicleAssetCache;
+static std::vector<PreviewTrafficCar> gPreviewTrafficCars;
+
+#include "sa_zone_population_init.inc"
 
 static bool loadLogicalPathData(const char *logicalPath, std::vector<uint8> &data);
+static float previewSeedFloat01(uint32 &seed);
+static void clearPreviewTrafficCars(void);
 
 static bool
 readExact(const uint8 *data, size_t dataSize, size_t *offset, void *buf, size_t size)
@@ -356,6 +499,79 @@ previewStringEquals(const std::string &a, const char *b)
 	return rw::strcmp_ci(a.c_str(), b) == 0;
 }
 
+static std::string
+stripPreviewLineComment(const std::string &value)
+{
+	size_t slash = value.find("//");
+	size_t hash = value.find('#');
+	size_t cut = std::string::npos;
+	if(slash != std::string::npos)
+		cut = slash;
+	if(hash != std::string::npos && (cut == std::string::npos || hash < cut))
+		cut = hash;
+	return cut == std::string::npos ? value : value.substr(0, cut);
+}
+
+static std::vector<std::string>
+splitPreviewWhitespace(const std::string &line)
+{
+	std::vector<std::string> out;
+	size_t i = 0;
+	while(i < line.size()){
+		while(i < line.size() && std::isspace((unsigned char)line[i]))
+			i++;
+		size_t start = i;
+		while(i < line.size() && !std::isspace((unsigned char)line[i]))
+			i++;
+		if(i > start)
+			out.push_back(line.substr(start, i - start));
+	}
+	return out;
+}
+
+static bool
+parsePreviewInt(const std::string &value, int *out)
+{
+	char *end = nil;
+	long parsed = std::strtol(value.c_str(), &end, 10);
+	if(end == value.c_str() || *end != '\0')
+		return false;
+	*out = (int)parsed;
+	return true;
+}
+
+static bool
+parsePreviewFloat(const std::string &value, float *out)
+{
+	char *end = nil;
+	float parsed = std::strtof(value.c_str(), &end);
+	if(end == value.c_str() || *end != '\0')
+		return false;
+	*out = parsed;
+	return true;
+}
+
+static uint8
+previewRaceMaskFromRace(int race)
+{
+	return race >= PREVIEW_RACE_BLACK && race <= PREVIEW_RACE_HISPANIC ? (uint8)(1u << (race - 1)) : 0x0Fu;
+}
+
+static int
+findPreviewRaceFromModelName(const char *modelName)
+{
+	for(int i = 0; i < 2 && modelName[i]; i++){
+		switch(std::toupper((unsigned char)modelName[i])){
+		case 'B': return PREVIEW_RACE_BLACK;
+		case 'H': return PREVIEW_RACE_HISPANIC;
+		case 'O':
+		case 'I': return PREVIEW_RACE_ORIENTAL;
+		case 'W': return PREVIEW_RACE_WHITE;
+		}
+	}
+	return PREVIEW_RACE_DEFAULT;
+}
+
 static std::vector<std::string>
 splitPreviewCsv(const std::string &line)
 {
@@ -371,6 +587,76 @@ splitPreviewCsv(const std::string &line)
 			break;
 	}
 	return out;
+}
+
+static int
+parsePreviewZonePopulationTypeName(const std::string &value)
+{
+	std::string key = lowerPreviewString(value);
+	if(key == "business") return PREVIEW_ZONE_BUSINESS;
+	if(key == "desert") return PREVIEW_ZONE_DESERT;
+	if(key == "entertainment") return PREVIEW_ZONE_ENTERTAINMENT;
+	if(key == "countryside") return PREVIEW_ZONE_COUNTRYSIDE;
+	if(key == "residential_rich") return PREVIEW_ZONE_RESIDENTIAL_RICH;
+	if(key == "residential_average") return PREVIEW_ZONE_RESIDENTIAL_AVERAGE;
+	if(key == "residential_poor") return PREVIEW_ZONE_RESIDENTIAL_POOR;
+	if(key == "gangland") return PREVIEW_ZONE_GANGLAND;
+	if(key == "beach") return PREVIEW_ZONE_BEACH;
+	if(key == "shopping") return PREVIEW_ZONE_SHOPPING;
+	if(key == "park") return PREVIEW_ZONE_PARK;
+	if(key == "industrial" || key == "industry") return PREVIEW_ZONE_INDUSTRY;
+	if(key == "entertainment_busy") return PREVIEW_ZONE_ENTERTAINMENT_BUSY;
+	if(key == "shopping_busy") return PREVIEW_ZONE_SHOPPING_BUSY;
+	if(key == "shopping_posh") return PREVIEW_ZONE_SHOPPING_POSH;
+	if(key == "residential_rich_secluded") return PREVIEW_ZONE_RESIDENTIAL_RICH_SECLUDED;
+	if(key == "airport") return PREVIEW_ZONE_AIRPORT;
+	if(key == "golf_club") return PREVIEW_ZONE_GOLF_CLUB;
+	if(key == "out_of_town_factory") return PREVIEW_ZONE_OUT_OF_TOWN_FACTORY;
+	if(key == "airport_runway") return PREVIEW_ZONE_AIRPORT_RUNWAY;
+	return -1;
+}
+
+static int
+parsePreviewScmZonePopulationType(const std::string &value)
+{
+	std::string key = lowerPreviewString(value);
+	if(key.find("popcycle_zone_") == 0)
+		key.erase(0, strlen("popcycle_zone_"));
+	return parsePreviewZonePopulationTypeName(key);
+}
+
+static uint8
+parsePreviewScmRaceMask(const std::string &value)
+{
+	std::string key = lowerPreviewString(value);
+	if(key.find("poprace_") == 0)
+		key.erase(0, strlen("poprace_"));
+	uint8 mask = 0;
+	for(size_t i = 0; i < key.size(); i++){
+		switch(std::toupper((unsigned char)key[i])){
+		case 'B': mask |= 1u << (PREVIEW_RACE_BLACK - 1); break;
+		case 'W': mask |= 1u << (PREVIEW_RACE_WHITE - 1); break;
+		case 'O':
+		case 'I': mask |= 1u << (PREVIEW_RACE_ORIENTAL - 1); break;
+		case 'H': mask |= 1u << (PREVIEW_RACE_HISPANIC - 1); break;
+		}
+	}
+	return mask ? mask : 0x0Fu;
+}
+
+static int
+parsePreviewScmGangId(const std::string &value)
+{
+	std::string key = lowerPreviewString(value);
+	if(key == "gang_flat") return 0;
+	if(key == "gang_grove") return 1;
+	if(key == "gang_nmex") return 2;
+	if(key == "gang_sfmex") return 3;
+	if(key == "gang_viet") return 4;
+	if(key == "gang_mafia") return 5;
+	if(key == "gang_triad") return 6;
+	if(key == "gang_smex") return 7;
+	return -1;
 }
 
 static void
@@ -397,6 +683,7 @@ appendPreviewFallbackData(void)
 		copyPreviewString(ped.modelName, sizeof(ped.modelName), "male01");
 		copyPreviewString(ped.txdName, sizeof(ped.txdName), "male01");
 		copyPreviewString(ped.animGroup, sizeof(ped.animGroup), "man");
+		ped.race = PREVIEW_RACE_DEFAULT;
 		gPreviewPedDefs.push_back(ped);
 	}
 }
@@ -522,6 +809,7 @@ loadPreviewMetadata(void)
 		copyPreviewString(ped.modelName, sizeof(ped.modelName), modelName);
 		copyPreviewString(ped.txdName, sizeof(ped.txdName), txdName);
 		copyPreviewString(ped.animGroup, sizeof(ped.animGroup), animGroup);
+		ped.race = (uint8)findPreviewRaceFromModelName(modelName.c_str());
 		gPreviewPedDefs.push_back(ped);
 	}
 
@@ -532,6 +820,406 @@ loadPreviewMetadata(void)
 	log("SAPaths: loaded preview metadata (%d ped defs, %d anim groups)\n",
 		(int)gPreviewPedDefs.size(), (int)gPreviewAnimGroups.size());
 	return gPreviewMetadataLoaded;
+}
+
+static bool
+isPreviewSupportedVehicleType(const std::string &type)
+{
+	return type == "car" || type == "mtruck";
+}
+
+static int
+findPreviewVehicleDefIndexByModelName(const char *modelName)
+{
+	for(size_t i = 0; i < gPreviewVehicleDefs.size(); i++)
+		if(rw::strcmp_ci(gPreviewVehicleDefs[i].modelName, modelName) == 0)
+			return (int)i;
+	return -1;
+}
+
+static bool
+loadPreviewVehicleMetadata(void)
+{
+	if(gPreviewVehicleMetadataAttempted)
+		return gPreviewVehicleMetadataLoaded;
+
+	gPreviewVehicleMetadataAttempted = true;
+	gPreviewVehicleMetadataLoaded = false;
+	gPreviewVehicleMetadataFailureReason[0] = '\0';
+	gPreviewVehicleDefs.clear();
+
+	std::vector<uint8> vehiclesData;
+	if(!loadLogicalPathData("data/vehicles.ide", vehiclesData)){
+		snprintf(gPreviewVehicleMetadataFailureReason, sizeof(gPreviewVehicleMetadataFailureReason), "missing_vehicles_ide");
+		return false;
+	}
+
+	std::string vehiclesText((const char*)&vehiclesData[0], vehiclesData.size());
+	bool inCarsBlock = false;
+	for(size_t start = 0; start <= vehiclesText.size(); ){
+		size_t end = vehiclesText.find('\n', start);
+		if(end == std::string::npos)
+			end = vehiclesText.size();
+		std::string line = vehiclesText.substr(start, end - start);
+		if(!line.empty() && line[line.size() - 1] == '\r')
+			line.resize(line.size() - 1);
+		size_t comment = line.find('#');
+		if(comment != std::string::npos)
+			line.erase(comment);
+		line = trimPreviewString(line);
+		start = end + 1;
+		if(line.empty())
+			continue;
+
+		if(!inCarsBlock){
+			if(rw::strcmp_ci(line.c_str(), "cars") == 0)
+				inCarsBlock = true;
+			continue;
+		}
+		if(rw::strcmp_ci(line.c_str(), "end") == 0)
+			break;
+
+		std::vector<std::string> parts = splitPreviewCsv(line);
+		if(parts.size() < 4)
+			continue;
+
+		std::string modelName = lowerPreviewString(parts[1]);
+		std::string txdName = lowerPreviewString(parts[2]);
+		std::string type = lowerPreviewString(parts[3]);
+		if(modelName.empty() || txdName.empty() || !isPreviewSupportedVehicleType(type))
+			continue;
+		if(findPreviewVehicleDefIndexByModelName(modelName.c_str()) >= 0)
+			continue;
+
+		PreviewVehicleDef vehicle = {};
+		copyPreviewString(vehicle.modelName, sizeof(vehicle.modelName), modelName);
+		copyPreviewString(vehicle.txdName, sizeof(vehicle.txdName), txdName);
+		copyPreviewString(vehicle.type, sizeof(vehicle.type), type);
+		vehicle.heavy = type == "mtruck";
+		gPreviewVehicleDefs.push_back(vehicle);
+	}
+
+	gPreviewVehicleMetadataLoaded = !gPreviewVehicleDefs.empty();
+	if(!gPreviewVehicleMetadataLoaded)
+		snprintf(gPreviewVehicleMetadataFailureReason, sizeof(gPreviewVehicleMetadataFailureReason), "empty_vehicle_preview_metadata");
+	else
+		log("SAPaths: loaded preview vehicle metadata (%d supported vehicle defs)\n",
+			(int)gPreviewVehicleDefs.size());
+	return gPreviewVehicleMetadataLoaded;
+}
+
+static PreviewZoneState*
+findPreviewZoneState(const char *label)
+{
+	for(size_t i = 0; i < gPreviewZoneStates.size(); i++)
+		if(rw::strcmp_ci(gPreviewZoneStates[i].label, label) == 0)
+			return &gPreviewZoneStates[i];
+	return nil;
+}
+
+static int
+findPreviewPedDefIndexByModelName(const char *modelName)
+{
+	for(size_t i = 0; i < gPreviewPedDefs.size(); i++)
+		if(rw::strcmp_ci(gPreviewPedDefs[i].modelName, modelName) == 0)
+			return (int)i;
+	return -1;
+}
+
+static bool
+loadPreviewPopulationData(void)
+{
+	if(gPreviewPopulationAttempted)
+		return gPreviewPopulationLoaded;
+
+	gPreviewPopulationAttempted = true;
+	gPreviewPopulationLoaded = false;
+	gPreviewPopulationFailureReason[0] = '\0';
+	memset(gPreviewPopcycle, 0, sizeof(gPreviewPopcycle));
+	gPreviewPedGroups.clear();
+	gPreviewInfoZones.clear();
+	gPreviewMapZones.clear();
+	gPreviewZoneStates.clear();
+
+	std::vector<uint8> popcycleData;
+	if(!loadLogicalPathData("data/popcycle.dat", popcycleData)){
+		snprintf(gPreviewPopulationFailureReason, sizeof(gPreviewPopulationFailureReason), "missing_popcycle_dat");
+		return false;
+	}
+
+	std::string popcycleText((const char*)&popcycleData[0], popcycleData.size());
+	int currentZoneType = -1;
+	int currentDayset = -1;
+	int currentSlot = 0;
+	for(size_t start = 0; start <= popcycleText.size(); ){
+		size_t end = popcycleText.find('\n', start);
+		if(end == std::string::npos)
+			end = popcycleText.size();
+		std::string rawLine = popcycleText.substr(start, end - start);
+		if(!rawLine.empty() && rawLine[rawLine.size() - 1] == '\r')
+			rawLine.resize(rawLine.size() - 1);
+		std::string trimmed = trimPreviewString(rawLine);
+		start = end + 1;
+		if(trimmed.empty())
+			continue;
+
+		if(trimmed.find("//") == 0){
+			std::string comment = trimPreviewString(trimmed.substr(2));
+			if(comment == "Weekday"){
+				currentDayset = 0;
+				currentSlot = 0;
+				continue;
+			}
+			if(comment == "Weekend"){
+				currentDayset = 1;
+				currentSlot = 0;
+				continue;
+			}
+			if(!comment.empty() && std::isupper((unsigned char)comment[0])){
+				size_t dash = comment.find('-');
+				if(dash != std::string::npos)
+					comment = trimPreviewString(comment.substr(0, dash));
+				currentZoneType = parsePreviewZonePopulationTypeName(lowerPreviewString(comment));
+			}
+			continue;
+		}
+
+		std::string line = trimPreviewString(stripPreviewLineComment(rawLine));
+		if(line.empty() || currentZoneType < 0 || currentDayset < 0 || currentSlot >= PREVIEW_POP_TIMESLOTS)
+			continue;
+
+		std::vector<std::string> parts = splitPreviewWhitespace(line);
+		if(parts.size() < 6 + PREVIEW_POP_GROUP_COUNT)
+			continue;
+
+		PreviewPopcycleSlot &slot = gPreviewPopcycle[currentZoneType][currentDayset][currentSlot++];
+		slot.maxPeds = (uint8)clamp(std::atoi(parts[0].c_str()), 0, 255);
+		slot.maxCars = (uint8)clamp(std::atoi(parts[1].c_str()), 0, 255);
+		slot.percDealers = (uint8)clamp(std::atoi(parts[2].c_str()), 0, 255);
+		slot.percGang = (uint8)clamp(std::atoi(parts[3].c_str()), 0, 255);
+		slot.percCops = (uint8)clamp(std::atoi(parts[4].c_str()), 0, 255);
+		slot.percOther = (uint8)clamp(std::atoi(parts[5].c_str()), 0, 255);
+		for(int i = 0; i < PREVIEW_POP_GROUP_COUNT; i++)
+			slot.groupPerc[i] = (uint8)clamp(std::atoi(parts[6 + i].c_str()), 0, 255);
+	}
+
+	std::vector<uint8> pedgrpData;
+	if(!loadLogicalPathData("data/pedgrp.dat", pedgrpData)){
+		snprintf(gPreviewPopulationFailureReason, sizeof(gPreviewPopulationFailureReason), "missing_pedgrp_dat");
+		return false;
+	}
+
+	std::string pedgrpText((const char*)&pedgrpData[0], pedgrpData.size());
+	for(size_t start = 0; start <= pedgrpText.size(); ){
+		size_t end = pedgrpText.find('\n', start);
+		if(end == std::string::npos)
+			end = pedgrpText.size();
+		std::string rawLine = pedgrpText.substr(start, end - start);
+		if(!rawLine.empty() && rawLine[rawLine.size() - 1] == '\r')
+			rawLine.resize(rawLine.size() - 1);
+		start = end + 1;
+
+		std::string line = trimPreviewString(stripPreviewLineComment(rawLine));
+		if(line.empty())
+			continue;
+
+		PreviewPedGroup group;
+		std::vector<std::string> parts = splitPreviewCsv(line);
+		for(size_t i = 0; i < parts.size(); i++){
+			std::string model = lowerPreviewString(parts[i]);
+			if(model.empty())
+				continue;
+			group.modelNames.push_back(model);
+		}
+		if(!group.modelNames.empty())
+			gPreviewPedGroups.push_back(group);
+	}
+
+	std::vector<uint8> infoZonData;
+	if(!loadLogicalPathData("data/info.zon", infoZonData)){
+		snprintf(gPreviewPopulationFailureReason, sizeof(gPreviewPopulationFailureReason), "missing_info_zon");
+		return false;
+	}
+
+	std::string infoZonText((const char*)&infoZonData[0], infoZonData.size());
+	for(size_t start = 0; start <= infoZonText.size(); ){
+		size_t end = infoZonText.find('\n', start);
+		if(end == std::string::npos)
+			end = infoZonText.size();
+		std::string rawLine = infoZonText.substr(start, end - start);
+		if(!rawLine.empty() && rawLine[rawLine.size() - 1] == '\r')
+			rawLine.resize(rawLine.size() - 1);
+		start = end + 1;
+
+		std::string line = trimPreviewString(stripPreviewLineComment(rawLine));
+		if(line.empty() || rw::strcmp_ci(line.c_str(), "zone") == 0 || rw::strcmp_ci(line.c_str(), "end") == 0)
+			continue;
+
+		std::vector<std::string> parts = splitPreviewCsv(line);
+		if(parts.size() < 10)
+			continue;
+
+		PreviewZoneBox zone = {};
+		copyPreviewString(zone.label, sizeof(zone.label), parts[0]);
+		zone.minx = std::strtof(parts[2].c_str(), nil);
+		zone.miny = std::strtof(parts[3].c_str(), nil);
+		zone.minz = std::strtof(parts[4].c_str(), nil);
+		zone.maxx = std::strtof(parts[5].c_str(), nil);
+		zone.maxy = std::strtof(parts[6].c_str(), nil);
+		zone.maxz = std::strtof(parts[7].c_str(), nil);
+		zone.area = (zone.maxx - zone.minx) * (zone.maxy - zone.miny) * max(1.0f, zone.maxz - zone.minz);
+		zone.level = std::atoi(parts[8].c_str());
+		gPreviewInfoZones.push_back(zone);
+
+		PreviewZoneState state = {};
+		copyPreviewString(state.label, sizeof(state.label), parts[0]);
+		state.popType = PREVIEW_ZONE_RESIDENTIAL_AVERAGE;
+		state.raceMask = 0x0Fu;
+		state.noCops = false;
+		state.dealerStrength = 0;
+		memset(state.gangStrength, 0, sizeof(state.gangStrength));
+		gPreviewZoneStates.push_back(state);
+	}
+
+	std::vector<uint8> mapZonData;
+	if(loadLogicalPathData("data/map.zon", mapZonData)){
+		std::string mapZonText((const char*)&mapZonData[0], mapZonData.size());
+		for(size_t start = 0; start <= mapZonText.size(); ){
+			size_t end = mapZonText.find('\n', start);
+			if(end == std::string::npos)
+				end = mapZonText.size();
+			std::string rawLine = mapZonText.substr(start, end - start);
+			if(!rawLine.empty() && rawLine[rawLine.size() - 1] == '\r')
+				rawLine.resize(rawLine.size() - 1);
+			start = end + 1;
+
+			std::string line = trimPreviewString(stripPreviewLineComment(rawLine));
+			if(line.empty() || rw::strcmp_ci(line.c_str(), "zone") == 0 || rw::strcmp_ci(line.c_str(), "end") == 0)
+				continue;
+
+			std::vector<std::string> parts = splitPreviewCsv(line);
+			if(parts.size() < 10)
+				continue;
+
+			PreviewZoneBox zone = {};
+			copyPreviewString(zone.label, sizeof(zone.label), parts[0]);
+			zone.minx = std::strtof(parts[2].c_str(), nil);
+			zone.miny = std::strtof(parts[3].c_str(), nil);
+			zone.minz = std::strtof(parts[4].c_str(), nil);
+			zone.maxx = std::strtof(parts[5].c_str(), nil);
+			zone.maxy = std::strtof(parts[6].c_str(), nil);
+			zone.maxz = std::strtof(parts[7].c_str(), nil);
+			zone.area = (zone.maxx - zone.minx) * (zone.maxy - zone.miny) * max(1.0f, zone.maxz - zone.minz);
+			zone.level = std::atoi(parts[8].c_str());
+			gPreviewMapZones.push_back(zone);
+		}
+	}
+
+	{
+		std::string script(gPreviewZonePopulationInitScript ? gPreviewZonePopulationInitScript : "");
+		for(size_t start = 0; start <= script.size(); ){
+			size_t end = script.find('\n', start);
+			if(end == std::string::npos)
+				end = script.size();
+			std::string rawLine = script.substr(start, end - start);
+			start = end + 1;
+
+			std::string line = trimPreviewString(stripPreviewLineComment(rawLine));
+			if(line.empty())
+				continue;
+			std::vector<std::string> parts = splitPreviewWhitespace(line);
+			if(parts.size() < 3)
+				continue;
+
+			PreviewZoneState *state = findPreviewZoneState(parts[1].c_str());
+			if(state == nil)
+				continue;
+
+			if(parts[0] == "SET_ZONE_POPULATION_TYPE"){
+				int popType = parsePreviewScmZonePopulationType(parts[2]);
+				if(popType >= 0)
+					state->popType = popType;
+			}else if(parts[0] == "SET_ZONE_POPULATION_RACE"){
+				state->raceMask = parsePreviewScmRaceMask(parts[2]);
+			}else if(parts[0] == "SET_ZONE_GANG_STRENGTH" && parts.size() >= 4){
+				int gang = parsePreviewScmGangId(parts[2]);
+				if(gang >= 0 && gang < 10)
+					state->gangStrength[gang] = (uint8)clamp(std::atoi(parts[3].c_str()), 0, 255);
+			}else if(parts[0] == "SET_ZONE_DEALER_STRENGTH" && parts.size() >= 3){
+				state->dealerStrength = (uint8)clamp(std::atoi(parts[2].c_str()), 0, 255);
+			}else if(parts[0] == "SET_ZONE_NO_COPS" && parts.size() >= 3){
+				state->noCops = rw::strcmp_ci(parts[2].c_str(), "TRUE") == 0;
+			}
+		}
+	}
+
+	gPreviewPopulationLoaded =
+		!gPreviewPedGroups.empty() &&
+		!gPreviewInfoZones.empty() &&
+		gPreviewPedGroups.size() >= 57;
+	if(!gPreviewPopulationLoaded)
+		snprintf(gPreviewPopulationFailureReason, sizeof(gPreviewPopulationFailureReason), "incomplete_population_data");
+	else
+		log("SAPaths: loaded preview population data (%d ped groups, %d info zones)\n",
+			(int)gPreviewPedGroups.size(), (int)gPreviewInfoZones.size());
+	return gPreviewPopulationLoaded;
+}
+
+static bool
+loadPreviewVehiclePopulationData(void)
+{
+	if(gPreviewVehiclePopulationAttempted)
+		return gPreviewVehiclePopulationLoaded;
+
+	gPreviewVehiclePopulationAttempted = true;
+	gPreviewVehiclePopulationLoaded = false;
+	gPreviewVehiclePopulationFailureReason[0] = '\0';
+	gPreviewCarGroups.clear();
+
+	if(!loadPreviewPopulationData()){
+		snprintf(gPreviewVehiclePopulationFailureReason, sizeof(gPreviewVehiclePopulationFailureReason), "missing_base_population_data");
+		return false;
+	}
+
+	std::vector<uint8> cargrpData;
+	if(!loadLogicalPathData("data/cargrp.dat", cargrpData)){
+		snprintf(gPreviewVehiclePopulationFailureReason, sizeof(gPreviewVehiclePopulationFailureReason), "missing_cargrp_dat");
+		return false;
+	}
+
+	std::string cargrpText((const char*)&cargrpData[0], cargrpData.size());
+	for(size_t start = 0; start <= cargrpText.size(); ){
+		size_t end = cargrpText.find('\n', start);
+		if(end == std::string::npos)
+			end = cargrpText.size();
+		std::string rawLine = cargrpText.substr(start, end - start);
+		if(!rawLine.empty() && rawLine[rawLine.size() - 1] == '\r')
+			rawLine.resize(rawLine.size() - 1);
+		start = end + 1;
+
+		std::string line = trimPreviewString(stripPreviewLineComment(rawLine));
+		if(line.empty())
+			continue;
+
+		PreviewCarGroup group;
+		std::vector<std::string> parts = splitPreviewCsv(line);
+		for(size_t i = 0; i < parts.size(); i++){
+			std::string model = lowerPreviewString(parts[i]);
+			if(model.empty())
+				continue;
+			group.modelNames.push_back(model);
+		}
+		if(!group.modelNames.empty())
+			gPreviewCarGroups.push_back(group);
+	}
+
+	gPreviewVehiclePopulationLoaded = gPreviewCarGroups.size() >= 29;
+	if(!gPreviewVehiclePopulationLoaded)
+		snprintf(gPreviewVehiclePopulationFailureReason, sizeof(gPreviewVehiclePopulationFailureReason), "incomplete_cargrp_data");
+	else
+		log("SAPaths: loaded preview vehicle population data (%d car groups)\n",
+			(int)gPreviewCarGroups.size());
+	return gPreviewVehiclePopulationLoaded;
 }
 
 static int
@@ -560,6 +1248,392 @@ findPreviewPedAssetIndex(const char *modelName, const char *txdName, const char 
 		   rw::strcmp_ci(gPreviewPedAssetCache[i].txdName, txdName) == 0 &&
 		   rw::strcmp_ci(gPreviewPedAssetCache[i].animGroup, animGroup) == 0)
 			return (int)i;
+	return -1;
+}
+
+static int
+findPreviewVehicleAssetIndex(const char *modelName, const char *txdName)
+{
+	for(size_t i = 0; i < gPreviewVehicleAssetCache.size(); i++)
+		if(rw::strcmp_ci(gPreviewVehicleAssetCache[i].modelName, modelName) == 0 &&
+		   rw::strcmp_ci(gPreviewVehicleAssetCache[i].txdName, txdName) == 0)
+			return (int)i;
+	return -1;
+}
+
+static rw::TexDictionary*
+loadPreviewTextureDictionary(const char *logicalPath)
+{
+	std::vector<uint8> txdData;
+	if(!loadLogicalPathData(logicalPath, txdData))
+		return nil;
+
+	rw::StreamMemory txdStream;
+	txdStream.open(&txdData[0], txdData.size());
+	rw::TexDictionary *txd = nil;
+	if(findChunk(&txdStream, rw::ID_TEXDICTIONARY, nil, nil)){
+		txd = rw::TexDictionary::streamRead(&txdStream);
+		if(txd)
+			ConvertTxd(txd);
+	}
+	txdStream.close();
+	return txd;
+}
+
+static void
+mergePreviewTextureDictionary(rw::TexDictionary *dst, rw::TexDictionary *src)
+{
+	if(dst == nil || src == nil)
+		return;
+	FORLIST(lnk, src->textures)
+		dst->addFront(rw::Texture::fromDict(lnk));
+}
+
+static rw::TexDictionary*
+loadPreviewVehicleTextureDictionary(const char *txdName)
+{
+	char txdPath[128];
+	if(snprintf(txdPath, sizeof(txdPath), "models/gta3.img/%s.txd", txdName) >= (int)sizeof(txdPath))
+		return nil;
+
+	rw::TexDictionary *sharedTxd = loadPreviewTextureDictionary("models/generic/vehicle.txd");
+	rw::TexDictionary *modelTxd = loadPreviewTextureDictionary(txdPath);
+	if(sharedTxd == nil && modelTxd == nil)
+		return nil;
+
+	rw::TexDictionary *combined = rw::TexDictionary::create();
+	if(sharedTxd){
+		mergePreviewTextureDictionary(combined, sharedTxd);
+		sharedTxd->destroy();
+	}
+	if(modelTxd){
+		mergePreviewTextureDictionary(combined, modelTxd);
+		modelTxd->destroy();
+	}
+	return combined;
+}
+
+static const PreviewZoneBox*
+findPreviewSmallestZone(const std::vector<PreviewZoneBox> &zones, const rw::V3d &pos)
+{
+	const PreviewZoneBox *best = nil;
+	float bestArea = 0.0f;
+	for(size_t i = 0; i < zones.size(); i++){
+		const PreviewZoneBox &zone = zones[i];
+		if(pos.x < zone.minx || pos.x > zone.maxx ||
+		   pos.y < zone.miny || pos.y > zone.maxy ||
+		   pos.z < zone.minz || pos.z > zone.maxz)
+			continue;
+		if(best == nil || zone.area < bestArea){
+			best = &zone;
+			bestArea = zone.area;
+		}
+	}
+	return best;
+}
+
+static int
+getPreviewWorldZoneIndexForPosition(const rw::V3d &pos)
+{
+	const PreviewZoneBox *zone = findPreviewSmallestZone(gPreviewMapZones, pos);
+	if(zone == nil)
+		return 0;
+	switch(zone->level){
+	case 2: return 1;
+	case 3: return 2;
+	default: return 0;
+	}
+}
+
+static const PreviewZoneState*
+getPreviewZoneStateForPosition(const rw::V3d &pos)
+{
+	const PreviewZoneBox *zone = findPreviewSmallestZone(gPreviewInfoZones, pos);
+	return zone ? findPreviewZoneState(zone->label) : nil;
+}
+
+static int
+getPreviewCurrentWeekendIndex(void)
+{
+	time_t now = time(nil);
+	struct tm localTm;
+#if defined(_WIN32)
+	localtime_s(&localTm, &now);
+#else
+	localtime_r(&now, &localTm);
+#endif
+	switch(localTm.tm_wday){
+	case 0: return 1;
+	case 1: return currentHour >= 20 ? 1 : 0;
+	case 6: return currentHour >= 20 ? 1 : 0;
+	default: return 0;
+	}
+}
+
+static const PreviewPopcycleSlot*
+getPreviewPopcycleSlotForPosition(const rw::V3d &pos, const PreviewZoneState **outState)
+{
+	if(outState)
+		*outState = nil;
+	if(!loadPreviewPopulationData())
+		return nil;
+
+	const PreviewZoneState *state = getPreviewZoneStateForPosition(pos);
+	if(state == nil)
+		return nil;
+	if(outState)
+		*outState = state;
+	if(state->popType < 0 || state->popType >= PREVIEW_POP_ZONE_COUNT)
+		return nil;
+	return &gPreviewPopcycle[state->popType][getPreviewCurrentWeekendIndex()][clamp(currentHour / 2, 0, PREVIEW_POP_TIMESLOTS - 1)];
+}
+
+static int
+getPreviewPedGroupIndex(int popGroup, int worldZone)
+{
+	switch(popGroup){
+	case 0: return worldZone;
+	case 1: return 3 + worldZone;
+	case 2: return 6 + worldZone;
+	case 3: return 9;
+	case 4: return 10;
+	case 5: return 11 + worldZone;
+	case 6: return 14 + worldZone;
+	case 7: return 17 + worldZone;
+	case 8: return 20 + worldZone;
+	case 9: return 23 + worldZone;
+	case 10: return 26 + worldZone;
+	case 11: return 29;
+	case 12: return 30 + worldZone;
+	case 13: return 33 + worldZone;
+	case 14: return 36 + worldZone;
+	case 15: return 39;
+	case 16: return 40;
+	case 17: return 41;
+	default: return -1;
+	}
+}
+
+static int
+choosePreviewPedDefFromGroup(int pedGroupIndex, uint8 raceMask, uint32 &seed)
+{
+	if(pedGroupIndex < 0 || pedGroupIndex >= (int)gPreviewPedGroups.size())
+		return -1;
+	const PreviewPedGroup &group = gPreviewPedGroups[pedGroupIndex];
+	if(group.modelNames.empty())
+		return -1;
+
+	for(int tries = 0; tries < (int)group.modelNames.size(); tries++){
+		int modelIndex = (int)(previewSeedFloat01(seed) * group.modelNames.size());
+		modelIndex = clamp(modelIndex, 0, (int)group.modelNames.size() - 1);
+		int pedDefIndex = findPreviewPedDefIndexByModelName(group.modelNames[modelIndex].c_str());
+		if(pedDefIndex < 0)
+			continue;
+		const PreviewPedDef &pedDef = gPreviewPedDefs[pedDefIndex];
+		if(pedDef.race != PREVIEW_RACE_DEFAULT && (raceMask & previewRaceMaskFromRace(pedDef.race)) == 0)
+			continue;
+		return pedDefIndex;
+	}
+	return -1;
+}
+
+static int
+choosePreviewCopPedDef(int popType, int worldZone)
+{
+	const char *modelName = "lapd1";
+	if(popType == PREVIEW_ZONE_DESERT)
+		modelName = "dsher";
+	else if(popType == PREVIEW_ZONE_COUNTRYSIDE || popType == PREVIEW_ZONE_OUT_OF_TOWN_FACTORY)
+		modelName = "csher";
+	else if(worldZone == 1)
+		modelName = "sfpd1";
+	else if(worldZone == 2)
+		modelName = "lvpd1";
+	return findPreviewPedDefIndexByModelName(modelName);
+}
+
+static int
+choosePreviewPedDefForPosition(const rw::V3d &pos, uint32 &seed)
+{
+	const PreviewZoneState *state = nil;
+	const PreviewPopcycleSlot *slot = getPreviewPopcycleSlotForPosition(pos, &state);
+	if(slot == nil || state == nil)
+		return -1;
+
+	const int worldZone = getPreviewWorldZoneIndexForPosition(pos);
+	const float gangDensity = (float)(
+		state->gangStrength[0] + state->gangStrength[1] + state->gangStrength[2] + state->gangStrength[3] +
+		state->gangStrength[4] + state->gangStrength[5] + state->gangStrength[6] + state->gangStrength[7] +
+		state->gangStrength[8] + state->gangStrength[9]
+	);
+	float dealerFactor = max(0.1f, state->dealerStrength / 100.0f);
+	float gangFactor = min(0.5f, gangDensity / 100.0f);
+	float copsFactor = state->noCops ? 0.0f :
+		(gangFactor >= 0.15f ? max(0.03f, 0.3f - gangFactor) : max(0.02f, gangFactor));
+	float otherFactor = max(0.0f, 1.0f - (dealerFactor + gangFactor + copsFactor));
+
+	float dealerWeight = slot->percDealers * dealerFactor;
+	float gangWeight = slot->percGang * gangFactor;
+	float copsWeight = slot->percCops * copsFactor;
+	float otherWeight = slot->percOther * otherFactor;
+	float totalWeight = dealerWeight + gangWeight + copsWeight + otherWeight;
+	if(totalWeight <= 0.001f)
+		otherWeight = totalWeight = 1.0f;
+
+	float roll = previewSeedFloat01(seed) * totalWeight;
+	if(roll < otherWeight){
+		int totalGroupWeight = 0;
+		for(int i = 0; i < PREVIEW_POP_GROUP_COUNT; i++)
+			totalGroupWeight += slot->groupPerc[i];
+		if(totalGroupWeight <= 0)
+			totalGroupWeight = PREVIEW_POP_GROUP_COUNT;
+		int choice = (int)(previewSeedFloat01(seed) * totalGroupWeight);
+		for(int group = 0; group < PREVIEW_POP_GROUP_COUNT; group++){
+			int weight = slot->groupPerc[group];
+			if(totalGroupWeight == PREVIEW_POP_GROUP_COUNT)
+				weight = 1;
+			if(choice < weight)
+				return choosePreviewPedDefFromGroup(getPreviewPedGroupIndex(group, worldZone), state->raceMask, seed);
+			choice -= weight;
+		}
+	}else{
+		roll -= otherWeight;
+		if(roll < copsWeight){
+			int pedDef = choosePreviewCopPedDef(state->popType, worldZone);
+			if(pedDef >= 0)
+				return pedDef;
+		}else{
+			roll -= copsWeight;
+			if(roll < dealerWeight){
+				int pedDef = choosePreviewPedDefFromGroup(52, state->raceMask, seed);
+				if(pedDef >= 0)
+					return pedDef;
+			}else{
+				int sumGang = 0;
+				for(int i = 0; i < 10; i++)
+					sumGang += state->gangStrength[i];
+				if(sumGang > 0){
+					int choice = (int)(previewSeedFloat01(seed) * sumGang);
+					for(int i = 0; i < 10; i++){
+						if(choice < state->gangStrength[i])
+							return choosePreviewPedDefFromGroup(42 + i, state->raceMask, seed);
+						choice -= state->gangStrength[i];
+					}
+				}
+			}
+		}
+	}
+
+	return -1;
+}
+
+static int
+choosePreviewVehicleDefFromGroup(int carGroupIndex, uint32 &seed)
+{
+	if(carGroupIndex < 0 || carGroupIndex >= (int)gPreviewCarGroups.size())
+		return -1;
+	const PreviewCarGroup &group = gPreviewCarGroups[carGroupIndex];
+	if(group.modelNames.empty())
+		return -1;
+
+	for(int tries = 0; tries < (int)group.modelNames.size(); tries++){
+		int modelIndex = (int)(previewSeedFloat01(seed) * group.modelNames.size());
+		modelIndex = clamp(modelIndex, 0, (int)group.modelNames.size() - 1);
+		int vehicleDefIndex = findPreviewVehicleDefIndexByModelName(group.modelNames[modelIndex].c_str());
+		if(vehicleDefIndex >= 0)
+			return vehicleDefIndex;
+	}
+	return -1;
+}
+
+static int
+choosePreviewPoliceVehicleDef(int popType, int worldZone)
+{
+	const char *modelName = "copcarla";
+	if(popType == PREVIEW_ZONE_DESERT || popType == PREVIEW_ZONE_COUNTRYSIDE || popType == PREVIEW_ZONE_OUT_OF_TOWN_FACTORY)
+		modelName = "copcarru";
+	else if(worldZone == 1)
+		modelName = "copcarsf";
+	else if(worldZone == 2)
+		modelName = "copcarvg";
+	return findPreviewVehicleDefIndexByModelName(modelName);
+}
+
+static int
+choosePreviewVehicleDefForPosition(const rw::V3d &pos, uint32 &seed)
+{
+	if(!loadPreviewVehicleMetadata() || !loadPreviewVehiclePopulationData())
+		return -1;
+
+	const PreviewZoneState *state = nil;
+	const PreviewPopcycleSlot *slot = getPreviewPopcycleSlotForPosition(pos, &state);
+	if(slot == nil || state == nil)
+		return -1;
+
+	const int worldZone = getPreviewWorldZoneIndexForPosition(pos);
+	const float gangDensity = (float)(
+		state->gangStrength[0] + state->gangStrength[1] + state->gangStrength[2] + state->gangStrength[3] +
+		state->gangStrength[4] + state->gangStrength[5] + state->gangStrength[6] + state->gangStrength[7] +
+		state->gangStrength[8] + state->gangStrength[9]
+	);
+	float dealerFactor = max(0.1f, state->dealerStrength / 100.0f);
+	float gangFactor = min(0.5f, gangDensity / 100.0f);
+	float copsFactor = state->noCops ? 0.0f :
+		(gangFactor >= 0.15f ? max(0.03f, 0.3f - gangFactor) : max(0.02f, gangFactor));
+	float otherFactor = max(0.0f, 1.0f - (dealerFactor + gangFactor + copsFactor));
+
+	float dealerWeight = slot->percDealers * dealerFactor;
+	float gangWeight = slot->percGang * gangFactor;
+	float copsWeight = slot->percCops * copsFactor;
+	float otherWeight = slot->percOther * otherFactor;
+	float totalWeight = dealerWeight + gangWeight + copsWeight + otherWeight;
+	if(totalWeight <= 0.001f)
+		otherWeight = totalWeight = 1.0f;
+
+	float roll = previewSeedFloat01(seed) * totalWeight;
+	if(roll < otherWeight){
+		int totalGroupWeight = 0;
+		for(int i = 0; i < PREVIEW_CAR_GROUP_OTHER_COUNT; i++)
+			totalGroupWeight += slot->groupPerc[i];
+		if(totalGroupWeight <= 0)
+			totalGroupWeight = PREVIEW_CAR_GROUP_OTHER_COUNT;
+		int choice = (int)(previewSeedFloat01(seed) * totalGroupWeight);
+		for(int group = 0; group < PREVIEW_CAR_GROUP_OTHER_COUNT; group++){
+			int weight = slot->groupPerc[group];
+			if(totalGroupWeight == PREVIEW_CAR_GROUP_OTHER_COUNT)
+				weight = 1;
+			if(choice < weight)
+				return choosePreviewVehicleDefFromGroup(group, seed);
+			choice -= weight;
+		}
+	}else{
+		roll -= otherWeight;
+		if(roll < copsWeight){
+			int vehicleDef = choosePreviewPoliceVehicleDef(state->popType, worldZone);
+			if(vehicleDef >= 0)
+				return vehicleDef;
+		}else{
+			roll -= copsWeight;
+			if(roll < dealerWeight){
+				int vehicleDef = choosePreviewVehicleDefFromGroup(PREVIEW_CAR_GROUP_DEALERS, seed);
+				if(vehicleDef >= 0)
+					return vehicleDef;
+			}else{
+				int sumGang = 0;
+				for(int i = 0; i < 10; i++)
+					sumGang += state->gangStrength[i];
+				if(sumGang > 0){
+					int choice = (int)(previewSeedFloat01(seed) * sumGang);
+					for(int i = 0; i < 10; i++){
+						if(choice < state->gangStrength[i])
+							return choosePreviewVehicleDefFromGroup(PREVIEW_CAR_GROUP_GANG_BASE + i, seed);
+						choice -= state->gangStrength[i];
+					}
+				}
+			}
+		}
+	}
+
 	return -1;
 }
 
@@ -709,6 +1783,61 @@ setupPreviewClump(rw::Clump *clump)
 }
 
 static void
+normalizePreviewVehicleMaterialColors(rw::Clump *clump)
+{
+	if(clump == nil)
+		return;
+
+	FORLIST(lnk, clump->atomics){
+		rw::Atomic *atomic = rw::Atomic::fromClump(lnk);
+		if(atomic == nil || atomic->geometry == nil)
+			continue;
+		for(int i = 0; i < atomic->geometry->matList.numMaterials; i++){
+			rw::Material *mat = atomic->geometry->matList.materials[i];
+			if(mat && mat->texture){
+				mat->color.red = 255;
+				mat->color.green = 255;
+				mat->color.blue = 255;
+			}
+		}
+	}
+}
+
+static void
+stripPreviewVehicleDamageAtomics(rw::Clump *clump)
+{
+	if(clump == nil)
+		return;
+
+	FORLIST(lnk, clump->atomics){
+		rw::Atomic *atomic = rw::Atomic::fromClump(lnk);
+		if(atomic == nil)
+			continue;
+		rw::Frame *frame = atomic->getFrame();
+		char *nodeName = frame ? gta::getNodeName(frame) : nil;
+		if(nodeName && strstr(nodeName, "_dam"))
+			atomic->setFlags(0);
+	}
+}
+
+static void
+stripPreviewVehicleLowDetailAtomics(rw::Clump *clump)
+{
+	if(clump == nil)
+		return;
+
+	FORLIST(lnk, clump->atomics){
+		rw::Atomic *atomic = rw::Atomic::fromClump(lnk);
+		if(atomic == nil)
+			continue;
+		rw::Frame *frame = atomic->getFrame();
+		char *nodeName = frame ? gta::getNodeName(frame) : nil;
+		if(nodeName && (strstr(nodeName, "_vlo") || strstr(nodeName, "_lo_")))
+			atomic->setFlags(0);
+	}
+}
+
+static void
 destroyPreviewWalker(PreviewWalker &walker)
 {
 	if(walker.clump){
@@ -725,6 +1854,25 @@ clearPreviewWalkers(void)
 	for(size_t i = 0; i < gPreviewWalkers.size(); i++)
 		destroyPreviewWalker(gPreviewWalkers[i]);
 	gPreviewWalkers.clear();
+}
+
+static void
+destroyPreviewTrafficCar(PreviewTrafficCar &car)
+{
+	if(car.clump){
+		car.clump->destroy();
+		car.clump = nil;
+	}
+	car.assetIndex = -1;
+	car.active = false;
+}
+
+static void
+clearPreviewTrafficCars(void)
+{
+	for(size_t i = 0; i < gPreviewTrafficCars.size(); i++)
+		destroyPreviewTrafficCar(gPreviewTrafficCars[i]);
+	gPreviewTrafficCars.clear();
 }
 
 static bool
@@ -1422,6 +2570,68 @@ loadPreviewPedAssets(int pedDefIndex)
 	return (int)gPreviewPedAssetCache.size() - 1;
 }
 
+static int
+loadPreviewVehicleAssets(int vehicleDefIndex)
+{
+	if(vehicleDefIndex < 0 || vehicleDefIndex >= (int)gPreviewVehicleDefs.size())
+		return -1;
+
+	PreviewVehicleDef &vehicleDef = gPreviewVehicleDefs[vehicleDefIndex];
+	int existing = findPreviewVehicleAssetIndex(vehicleDef.modelName, vehicleDef.txdName);
+	if(existing >= 0)
+		return gPreviewVehicleAssetCache[existing].loaded ? existing : -1;
+
+	PreviewVehicleAssets assets = {};
+	copyPreviewString(assets.modelName, sizeof(assets.modelName), vehicleDef.modelName);
+	copyPreviewString(assets.txdName, sizeof(assets.txdName), vehicleDef.txdName);
+	assets.heavy = vehicleDef.heavy;
+	assets.attempted = true;
+	assets.loaded = false;
+	assets.failureReason[0] = '\0';
+	gPreviewVehicleAssetCache.push_back(assets);
+
+	PreviewVehicleAssets &entry = gPreviewVehicleAssetCache.back();
+	char dffPath[128];
+	if(snprintf(dffPath, sizeof(dffPath), "models/gta3.img/%s.dff", entry.modelName) >= (int)sizeof(dffPath)){
+		snprintf(entry.failureReason, sizeof(entry.failureReason), "model_path_too_long");
+		return -1;
+	}
+
+	entry.txd = loadPreviewVehicleTextureDictionary(entry.txdName);
+	if(entry.txd == nil){
+		snprintf(entry.failureReason, sizeof(entry.failureReason), "missing_txd");
+		log("SAPaths: preview vehicle TXD not found: %s\n", entry.txdName);
+		return -1;
+	}
+
+	std::vector<uint8> dffData;
+	if(!loadLogicalPathData(dffPath, dffData)){
+		snprintf(entry.failureReason, sizeof(entry.failureReason), "missing_dff");
+		log("SAPaths: preview vehicle DFF not found: %s\n", dffPath);
+		return -1;
+	}
+
+	rw::TexDictionary *prevTxd = rw::TexDictionary::getCurrent();
+	rw::TexDictionary::setCurrent(entry.txd);
+	rw::StreamMemory dffStream;
+	dffStream.open(&dffData[0], dffData.size());
+	entry.clump = loadRwClumpFromMemory(&dffStream);
+	dffStream.close();
+	rw::TexDictionary::setCurrent(prevTxd);
+	if(entry.clump == nil){
+		snprintf(entry.failureReason, sizeof(entry.failureReason), "invalid_dff");
+		return -1;
+	}
+
+	setupPreviewClump(entry.clump);
+	stripPreviewVehicleDamageAtomics(entry.clump);
+	stripPreviewVehicleLowDetailAtomics(entry.clump);
+	normalizePreviewVehicleMaterialColors(entry.clump);
+	entry.loaded = true;
+	log("SAPaths: loaded preview vehicle assets (%s)\n", entry.modelName);
+	return (int)gPreviewVehicleAssetCache.size() - 1;
+}
+
 static rw::V2d
 getNaviPosition(const DiskCarPathLink &navi)
 {
@@ -1505,6 +2715,302 @@ getLaneOffset(const DiskCarPathLink &link)
 	if(same)
 		return 0.5f - getNaviWidth(link)/5.4f/2.0f;
 	return 0.5f - opposite/2.0f;
+}
+
+static rw::V3d
+quadraticBezierV3d(const rw::V3d &a, const rw::V3d &b, const rw::V3d &c, float t)
+{
+	float u = 1.0f - t;
+	return add(add(scale(a, u*u), scale(b, 2.0f*u*t)), scale(c, t*t));
+}
+
+static rw::V3d
+quadraticBezierTangent(const rw::V3d &a, const rw::V3d &b, const rw::V3d &c, float t)
+{
+	return add(scale(sub(b, a), 2.0f*(1.0f - t)), scale(sub(c, b), 2.0f*t));
+}
+
+static bool
+getPreviewDirectedVehicleLink(const NodeAddress &from, const NodeAddress &to,
+                              CarPathLinkAddress *outNaviAddr, DiskCarPathLink **outNavi,
+                              bool *outSameDirection, int *outLaneCount)
+{
+	if(outNaviAddr)
+		*outNaviAddr = { 0xFFFF };
+	if(outNavi)
+		*outNavi = nil;
+	if(outSameDirection)
+		*outSameDirection = false;
+	if(outLaneCount)
+		*outLaneCount = 0;
+
+	Node *node = getNode(from);
+	AreaData *area = getArea(from.areaId);
+	if(node == nil || area == nil || !area->loaded)
+		return false;
+
+	for(int li = 0; li < node->numLinks(); li++){
+		int slot = node->raw.baseLinkId + li;
+		if(slot < 0 || slot >= (int)area->nodeLinks.size() || slot >= (int)area->naviLinks.size())
+			continue;
+		if(!(area->nodeLinks[slot].areaId == to.areaId && area->nodeLinks[slot].nodeId == to.nodeId))
+			continue;
+
+		CarPathLinkAddress naviAddr = area->naviLinks[slot];
+		if(!naviAddr.isValid())
+			return false;
+
+		AreaData *naviArea = getArea(naviAddr.areaId());
+		if(naviArea == nil || !naviArea->loaded || naviAddr.nodeId() >= naviArea->naviNodes.size())
+			return false;
+
+		DiskCarPathLink *navi = &naviArea->naviNodes[naviAddr.nodeId()];
+		Node *fromNode = getNode(from);
+		Node *toNode = getNode(to);
+		if(fromNode == nil || toNode == nil)
+			return false;
+
+		rw::V3d pathDir = sub(getNodePosition(*toNode), getNodePosition(*fromNode));
+		pathDir.z = 0.0f;
+		float pathLen = length(pathDir);
+		if(pathLen < 0.001f)
+			return false;
+		pathDir = scale(pathDir, 1.0f/pathLen);
+
+		rw::V3d naviDir = { (float)navi->dirX, (float)navi->dirY, 0.0f };
+		float naviLen = length(naviDir);
+		bool sameDirection;
+		if(naviLen > 0.001f){
+			naviDir = scale(naviDir, 1.0f/naviLen);
+			sameDirection = dot(pathDir, naviDir) >= 0.0f;
+		}else{
+			sameDirection = navi->attachedAreaId == to.areaId && navi->attachedNodeId == to.nodeId;
+			if(!sameDirection && !(navi->attachedAreaId == from.areaId && navi->attachedNodeId == from.nodeId))
+				return false;
+		}
+
+		int laneCount = sameDirection ? getNaviSameLanes(*navi) : getNaviOppositeLanes(*navi);
+		if(outNaviAddr)
+			*outNaviAddr = naviAddr;
+		if(outNavi)
+			*outNavi = navi;
+		if(outSameDirection)
+			*outSameDirection = sameDirection;
+		if(outLaneCount)
+			*outLaneCount = laneCount;
+		return laneCount > 0;
+	}
+
+	return false;
+}
+
+static bool
+hasPreviewTrafficLink(const NodeAddress &addr)
+{
+	Node *node = getNode(addr);
+	AreaData *area = getArea(addr.areaId);
+	if(node == nil || area == nil || !area->loaded)
+		return false;
+
+	for(int li = 0; li < node->numLinks(); li++){
+		int slot = node->raw.baseLinkId + li;
+		if(slot < 0 || slot >= (int)area->nodeLinks.size())
+			continue;
+		NodeAddress target = area->nodeLinks[slot];
+		int laneCount = 0;
+		if(getPreviewDirectedVehicleLink(addr, target, nil, nil, nil, &laneCount) && laneCount > 0)
+			return true;
+	}
+	return false;
+}
+
+static rw::V3d
+getPreviewTrafficLanePointAtNavi(const DiskCarPathLink &navi, bool sameDirection, int laneIndex, float z)
+{
+	rw::V3d dir = { (float)navi.dirX, (float)navi.dirY, 0.0f };
+	dir.z = 0.0f;
+	float len = length(dir);
+	if(len < 0.001f)
+		dir = { 0.0f, 1.0f, 0.0f };
+	else
+		dir = scale(dir, 1.0f/len);
+	if(!sameDirection)
+		dir = scale(dir, -1.0f);
+	float laneOffsetUnits;
+	if(getNaviOppositeLanes(navi) > 0 && getNaviSameLanes(navi) > 0)
+		laneOffsetUnits = laneIndex + 0.5f;
+	else
+		laneOffsetUnits = getLaneOffset(navi) + laneIndex;
+	float laneOffset = laneOffsetUnits * LANE_WIDTH;
+	rw::V2d pos = getNaviPosition(navi);
+	return {
+		pos.x + laneOffset * dir.y,
+		pos.y - laneOffset * dir.x,
+		z
+	};
+}
+
+static bool
+getPreviewTrafficLaneEndpoint(const NodeAddress &from, const NodeAddress &to,
+                              int laneIndex, int laneCountHint, bool atTarget,
+                              rw::V3d *outPoint)
+{
+	Node *fromNode = getNode(from);
+	Node *toNode = getNode(to);
+	if(fromNode == nil || toNode == nil || outPoint == nil)
+		return false;
+
+	CarPathLinkAddress naviAddr = { 0xFFFF };
+	DiskCarPathLink *navi = nil;
+	bool sameDirection = false;
+	int laneCount = 0;
+	float z = atTarget ? toNode->z() : fromNode->z();
+
+	if(!atTarget){
+		if(!getPreviewDirectedVehicleLink(from, to, &naviAddr, &navi, &sameDirection, &laneCount) || navi == nil || laneCount <= 0)
+			return false;
+		laneIndex = clamp(laneIndex, 0, laneCount - 1);
+	}else{
+		bool reverseSameDirection = false;
+		if(!getPreviewDirectedVehicleLink(to, from, &naviAddr, &navi, &reverseSameDirection, nil) || navi == nil)
+			return false;
+		sameDirection = !reverseSameDirection;
+		laneCount = sameDirection ? getNaviSameLanes(*navi) : getNaviOppositeLanes(*navi);
+		if(laneCount <= 0)
+			return false;
+		if(laneCountHint > 0){
+			float lanePos = (laneIndex + 0.5f) / laneCountHint;
+			laneIndex = clamp((int)(lanePos * laneCount), 0, laneCount - 1);
+		}else
+			laneIndex = clamp(laneIndex, 0, laneCount - 1);
+	}
+
+	*outPoint = getPreviewTrafficLanePointAtNavi(*navi, sameDirection, laneIndex, z);
+	return true;
+}
+
+static bool
+pickPreviewTrafficSpawnNode(uint32 &seed, NodeAddress *outAddr)
+{
+	std::vector<NodeAddress> candidates;
+	std::vector<float> weights;
+	candidates.reserve(256);
+	weights.reserve(256);
+
+	for(int areaId = 0; areaId < NUM_PATH_AREAS; areaId++){
+		AreaData &area = gAreas[areaId];
+		if(!area.loaded || !areaInDrawRange(areaId))
+			continue;
+		for(uint32 i = 0; i < area.numVehicleNodes; i++){
+			Node &node = area.nodes[i];
+			if(node.numLinks() <= 0 || node.waterNode() || node.isSwitchedOff())
+				continue;
+			if(!hasPreviewTrafficLink(node.address()))
+				continue;
+			rw::V3d pos = getNodePosition(node);
+			if(TheCamera.distanceTo(pos) > PATH_DRAW_DIST*0.8f)
+				continue;
+			candidates.push_back(node.address());
+			const PreviewPopcycleSlot *slot = getPreviewPopcycleSlotForPosition(pos, nil);
+			float weight = (float)max(1, node.spawnProbability() + 1);
+			if(slot)
+				weight *= max(1.0f, (float)slot->maxCars);
+			weights.push_back(weight);
+		}
+	}
+
+	if(candidates.empty())
+		return false;
+
+	float totalWeight = 0.0f;
+	for(size_t i = 0; i < weights.size(); i++)
+		totalWeight += weights[i];
+
+	float roll = previewSeedFloat01(seed) * totalWeight;
+	for(size_t i = 0; i < candidates.size(); i++){
+		if(roll < weights[i]){
+			*outAddr = candidates[i];
+			return true;
+		}
+		roll -= weights[i];
+	}
+
+	*outAddr = candidates.back();
+	return true;
+}
+
+static bool
+chooseNextPreviewTrafficLink(const NodeAddress &currentAddr, const NodeAddress &previousAddr, uint32 &seed,
+                             NodeAddress *outTarget, CarPathLinkAddress *outNaviAddr, int *outLaneIndex,
+                             int previousLaneIndex = -1, int previousLaneCount = 0)
+{
+	Node *current = getNode(currentAddr);
+	AreaData *area = getArea(currentAddr.areaId);
+	if(current == nil || area == nil || !area->loaded || current->numLinks() <= 0)
+		return false;
+
+	rw::V3d wantedDir = { 0.0f, 1.0f, 0.0f };
+	if(previousAddr.isValid()){
+		Node *previous = getNode(previousAddr);
+		if(previous){
+			wantedDir = sub(getNodePosition(*current), getNodePosition(*previous));
+			wantedDir.z = 0.0f;
+			float wantedLen = length(wantedDir);
+			if(wantedLen > 0.001f)
+				wantedDir = scale(wantedDir, 1.0f/wantedLen);
+		}
+	}else{
+		float angle = previewSeedFloat01(seed) * (PREVIEW_PI*2.0f);
+		wantedDir = { std::sin(angle), std::cos(angle), 0.0f };
+	}
+
+	float bestScore = -999999.0f;
+	bool found = false;
+	for(int li = 0; li < current->numLinks(); li++){
+		int slot = current->raw.baseLinkId + li;
+		if(slot < 0 || slot >= (int)area->nodeLinks.size())
+			continue;
+		NodeAddress targetAddr = area->nodeLinks[slot];
+		Node *target = getNode(targetAddr);
+		if(target == nil || target->waterNode())
+			continue;
+
+		CarPathLinkAddress naviAddr = { 0xFFFF };
+		DiskCarPathLink *navi = nil;
+		bool sameDirection = false;
+		int laneCount = 0;
+		if(!getPreviewDirectedVehicleLink(currentAddr, targetAddr, &naviAddr, &navi, &sameDirection, &laneCount) || laneCount <= 0)
+			continue;
+
+		rw::V3d dir = sub(getNodePosition(*target), getNodePosition(*current));
+		dir.z = 0.0f;
+		float len = length(dir);
+		if(len < 0.001f)
+			continue;
+		dir = scale(dir, 1.0f/len);
+
+		float score = dot(dir, wantedDir);
+		if(targetAddr.isValid() &&
+		   targetAddr.areaId == previousAddr.areaId &&
+		   targetAddr.nodeId == previousAddr.nodeId)
+			score -= 0.75f;
+		score += previewSeedFloat01(seed) * 0.2f;
+		score += laneCount * 0.05f;
+
+		if(!found || score > bestScore){
+			bestScore = score;
+			*outTarget = targetAddr;
+			*outNaviAddr = naviAddr;
+			if(previousLaneIndex >= 0 && previousLaneCount > 0){
+				float lanePos = (previousLaneIndex + 0.5f) / previousLaneCount;
+				*outLaneIndex = clamp((int)(lanePos * laneCount), 0, laneCount - 1);
+			}else
+				*outLaneIndex = clamp((int)(previewSeedFloat01(seed) * laneCount), 0, laneCount - 1);
+			found = true;
+		}
+	}
+
+	return found;
 }
 
 static bool
@@ -1748,6 +3254,7 @@ Reset(void)
 {
 	clearAreas();
 	clearPreviewWalkers();
+	clearPreviewTrafficCars();
 	gLoadAttempted = false;
 	gLoadSucceeded = false;
 	gLoadFailed = false;
@@ -2200,7 +3707,9 @@ static bool
 pickPreviewSpawnNode(uint32 &seed, NodeAddress *outAddr)
 {
 	std::vector<NodeAddress> candidates;
+	std::vector<float> weights;
 	candidates.reserve(256);
+	weights.reserve(256);
 
 	for(int areaId = 0; areaId < NUM_PATH_AREAS; areaId++){
 		AreaData &area = gAreas[areaId];
@@ -2214,14 +3723,31 @@ pickPreviewSpawnNode(uint32 &seed, NodeAddress *outAddr)
 			if(TheCamera.distanceTo(pos) > PATH_DRAW_DIST*0.75f)
 				continue;
 			candidates.push_back(node.address());
+			float weight = 1.0f;
+			const PreviewZoneState *state = nil;
+			const PreviewPopcycleSlot *slot = getPreviewPopcycleSlotForPosition(pos, &state);
+			if(slot)
+				weight = max(1.0f, (float)slot->maxPeds);
+			weights.push_back(weight);
 		}
 	}
 
 	if(candidates.empty())
 		return false;
 
-	int index = (int)(previewSeedFloat01(seed) * candidates.size());
-	index = clamp(index, 0, (int)candidates.size()-1);
+	float totalWeight = 0.0f;
+	for(size_t i = 0; i < weights.size(); i++)
+		totalWeight += weights[i];
+	float roll = previewSeedFloat01(seed) * totalWeight;
+	int index = 0;
+	for(size_t i = 0; i < candidates.size(); i++){
+		if(roll < weights[i]){
+			index = (int)i;
+			break;
+		}
+		roll -= weights[i];
+		index = (int)i;
+	}
 	*outAddr = candidates[index];
 	return true;
 }
@@ -2325,9 +3851,18 @@ resetPreviewWalker(PreviewWalker &walker, uint32 seed)
 	walker.segmentT = previewSeedFloat01(walker.seed);
 	walker.speed = 1.0f + previewSeedFloat01(walker.seed)*0.45f;
 
-	for(int attempts = 0; attempts < 16; attempts++){
-		int pedIndex = (int)(previewSeedFloat01(walker.seed) * gPreviewPedDefs.size());
-		pedIndex = clamp(pedIndex, 0, (int)gPreviewPedDefs.size()-1);
+	if(!pickPreviewSpawnNode(walker.seed, &walker.current))
+		return false;
+	if(!chooseNextPreviewPedNode(walker.current, walker.previous, walker.direction, &walker.target, &walker.direction))
+		return false;
+
+	rw::V3d spawnPos = getNodePosition(*getNode(walker.current));
+	for(int attempts = 0; attempts < 20; attempts++){
+		int pedIndex = choosePreviewPedDefForPosition(spawnPos, walker.seed);
+		if(pedIndex < 0){
+			pedIndex = (int)(previewSeedFloat01(walker.seed) * gPreviewPedDefs.size());
+			pedIndex = clamp(pedIndex, 0, (int)gPreviewPedDefs.size()-1);
+		}
 		walker.assetIndex = loadPreviewPedAssets(pedIndex);
 		if(walker.assetIndex >= 0)
 			break;
@@ -2341,11 +3876,6 @@ resetPreviewWalker(PreviewWalker &walker, uint32 seed)
 		return false;
 	setupPreviewClump(walker.clump);
 	walker.animTime = previewSeedFloat01(walker.seed) * assets.animationDuration;
-
-	if(!pickPreviewSpawnNode(walker.seed, &walker.current))
-		return false;
-	if(!chooseNextPreviewPedNode(walker.current, walker.previous, walker.direction, &walker.target, &walker.direction))
-		return false;
 
 	updatePreviewWalkerEndpoints(walker);
 	return true;
@@ -2464,6 +3994,244 @@ renderPreviewWalkers(void)
 	rw::SetRenderState(rw::CULLMODE, rw::CULLNONE);
 }
 
+static bool
+updatePreviewTrafficCarCurve(PreviewTrafficCar &car)
+{
+	Node *current = getNode(car.current);
+	Node *target = getNode(car.target);
+	if(current == nil || target == nil){
+		car.active = false;
+		return false;
+	}
+
+	CarPathLinkAddress naviAddr = { 0xFFFF };
+	DiskCarPathLink *navi = nil;
+	bool sameDirection = false;
+	int laneCount = 0;
+	if(!getPreviewDirectedVehicleLink(car.current, car.target, &naviAddr, &navi, &sameDirection, &laneCount) || navi == nil){
+		car.active = false;
+		return false;
+	}
+
+	car.naviAddr = naviAddr;
+	car.laneCount = laneCount;
+	car.laneIndex = clamp(car.laneIndex, 0, max(0, laneCount - 1));
+
+	rw::V3d linkStart;
+	rw::V3d linkEnd;
+	float midZ = (current->z() + target->z()) * 0.5f;
+	if(!getPreviewTrafficLaneEndpoint(car.current, car.target, car.laneIndex, car.laneCount, false, &linkStart) ||
+	   !getPreviewTrafficLaneEndpoint(car.current, car.target, car.laneIndex, car.laneCount, true, &linkEnd)){
+		car.active = false;
+		return false;
+	}
+	if(car.hasCarryStart){
+		car.curveP0 = car.carryStart;
+		car.curveP1 = linkStart;
+		car.hasCarryStart = false;
+	}else{
+		car.curveP0 = linkStart;
+		car.curveP1 = getPreviewTrafficLanePointAtNavi(*navi, sameDirection, car.laneIndex, midZ);
+	}
+	car.curveP2 = linkEnd;
+	car.curveLength = max(1.0f,
+		length(sub(car.curveP1, car.curveP0)) +
+		length(sub(car.curveP2, car.curveP1)));
+	return true;
+}
+
+static float
+choosePreviewTrafficSpeed(const PreviewVehicleAssets &assets, const Node *current, uint32 &seed)
+{
+	float minSpeed = assets.heavy ? 2.4f : 3.2f;
+	float maxSpeed = assets.heavy ? 4.2f : 5.6f;
+	if(current){
+		if(current->highway()){
+			minSpeed += 1.1f;
+			maxSpeed += 1.6f;
+		}else if(current->notHighway()){
+			minSpeed -= 0.4f;
+			maxSpeed -= 0.6f;
+		}
+	}
+	if(maxSpeed < minSpeed)
+		maxSpeed = minSpeed;
+	return minSpeed + previewSeedFloat01(seed) * (maxSpeed - minSpeed);
+}
+
+static bool
+resetPreviewTrafficCar(PreviewTrafficCar &car, uint32 seed)
+{
+	destroyPreviewTrafficCar(car);
+	if(!loadPreviewVehicleMetadata() || gPreviewVehicleDefs.empty())
+		return false;
+
+	car.seed = seed;
+	car.active = true;
+	car.previous = { 0xFFFF, 0xFFFF };
+	car.current = { 0xFFFF, 0xFFFF };
+	car.target = { 0xFFFF, 0xFFFF };
+	car.naviAddr = { 0xFFFF };
+	car.prevLaneIndex = -1;
+	car.prevLaneCount = 0;
+	car.laneIndex = 0;
+	car.laneCount = 0;
+	car.assetIndex = -1;
+	car.hasCarryStart = false;
+	car.segmentT = previewSeedFloat01(car.seed);
+	car.curveLength = 1.0f;
+
+	if(!pickPreviewTrafficSpawnNode(car.seed, &car.current))
+		return false;
+	if(!chooseNextPreviewTrafficLink(car.current, car.previous, car.seed, &car.target, &car.naviAddr, &car.laneIndex))
+		return false;
+
+	rw::V3d spawnPos = getNodePosition(*getNode(car.current));
+	for(int attempts = 0; attempts < 24; attempts++){
+		int vehicleIndex = choosePreviewVehicleDefForPosition(spawnPos, car.seed);
+		if(vehicleIndex < 0){
+			vehicleIndex = (int)(previewSeedFloat01(car.seed) * gPreviewVehicleDefs.size());
+			vehicleIndex = clamp(vehicleIndex, 0, (int)gPreviewVehicleDefs.size() - 1);
+		}
+		car.assetIndex = loadPreviewVehicleAssets(vehicleIndex);
+		if(car.assetIndex >= 0)
+			break;
+	}
+	if(car.assetIndex < 0)
+		return false;
+
+	PreviewVehicleAssets &assets = gPreviewVehicleAssetCache[car.assetIndex];
+	car.heavy = assets.heavy;
+	car.speed = choosePreviewTrafficSpeed(assets, getNode(car.current), car.seed);
+	car.clump = assets.clump->clone();
+	if(car.clump == nil)
+		return false;
+	setupPreviewClump(car.clump);
+	return updatePreviewTrafficCarCurve(car);
+}
+
+static void
+advancePreviewTrafficCarSegment(PreviewTrafficCar &car)
+{
+	rw::V3d carryStart = car.curveP2;
+	car.prevLaneIndex = car.laneIndex;
+	car.prevLaneCount = car.laneCount;
+	car.previous = car.current;
+	car.current = car.target;
+	car.target = { 0xFFFF, 0xFFFF };
+	car.segmentT = 0.0f;
+	car.hasCarryStart = true;
+	car.carryStart = carryStart;
+	if(!chooseNextPreviewTrafficLink(car.current, car.previous, car.seed,
+		&car.target, &car.naviAddr, &car.laneIndex, car.prevLaneIndex, car.prevLaneCount))
+		car.active = false;
+	else
+		updatePreviewTrafficCarCurve(car);
+}
+
+static void
+updatePreviewTrafficCar(PreviewTrafficCar &car)
+{
+	if(!car.active){
+		resetPreviewTrafficCar(car, car.seed + 1);
+		return;
+	}
+
+	rw::V3d approxPos = quadraticBezierV3d(car.curveP0, car.curveP1, car.curveP2, clamp(car.segmentT, 0.0f, 1.0f));
+	if(TheCamera.distanceTo(approxPos) > PATH_DRAW_DIST*1.6f){
+		car.active = false;
+		resetPreviewTrafficCar(car, car.seed + 31);
+		return;
+	}
+
+	for(int steps = 0; steps < 4; steps++){
+		car.segmentT += (car.speed * timeStep) / max(1.0f, car.curveLength);
+		if(car.segmentT < 1.0f)
+			break;
+		car.segmentT -= 1.0f;
+		advancePreviewTrafficCarSegment(car);
+		if(!car.active){
+			resetPreviewTrafficCar(car, car.seed + 17);
+			return;
+		}
+	}
+
+	float t = clamp(car.segmentT, 0.0f, 1.0f);
+	rw::V3d pos = quadraticBezierV3d(car.curveP0, car.curveP1, car.curveP2, t);
+	rw::V3d dir = quadraticBezierTangent(car.curveP0, car.curveP1, car.curveP2, t);
+	dir.z = 0.0f;
+	float dirLen = length(dir);
+	if(dirLen < 0.001f)
+		dir = { 0.0f, 1.0f, 0.0f };
+	else
+		dir = scale(dir, 1.0f/dirLen);
+
+	rw::V3d groundNormal = { 0.0f, 0.0f, 1.0f };
+	rw::V3d right = cross(dir, groundNormal);
+	float rightLen = length(right);
+	if(rightLen < 0.001f)
+		right = { 1.0f, 0.0f, 0.0f };
+	else
+		right = scale(right, 1.0f/rightLen);
+	rw::V3d forward = cross(groundNormal, right);
+	float forwardLen = length(forward);
+	if(forwardLen < 0.001f)
+		forward = dir;
+	else
+		forward = scale(forward, 1.0f/forwardLen);
+
+	rw::Matrix world;
+	world.right = right;
+	world.up = forward;
+	world.at = groundNormal;
+	world.pos = pos;
+	world.pos.z += PREVIEW_CAR_Z_OFFSET;
+	car.clump->getFrame()->matrix = world;
+	car.clump->getFrame()->updateObjects();
+}
+
+static void
+renderPreviewTrafficCars(void)
+{
+	if(!gRenderSaCarPathTraffic || gSaCarPathTrafficCount <= 0){
+		clearPreviewTrafficCars();
+		return;
+	}
+	if(!loadPreviewVehicleMetadata() || gPreviewVehicleDefs.empty())
+		return;
+
+	int wantedCount = clamp(gSaCarPathTrafficCount, 0, 32);
+	while((int)gPreviewTrafficCars.size() > wantedCount){
+		destroyPreviewTrafficCar(gPreviewTrafficCars.back());
+		gPreviewTrafficCars.pop_back();
+	}
+	while((int)gPreviewTrafficCars.size() < wantedCount){
+		PreviewTrafficCar car = {};
+		car.seed = 0x2468ACE1u + (uint32)gPreviewTrafficCars.size()*0x01020305u;
+		resetPreviewTrafficCar(car, car.seed);
+		gPreviewTrafficCars.push_back(car);
+	}
+
+	rw::SetRenderState(rw::ZTESTENABLE, 1);
+	rw::SetRenderState(rw::ZWRITEENABLE, 1);
+	rw::SetRenderState(rw::FOGENABLE, 0);
+	rw::SetRenderState(rw::CULLMODE, rw::CULLBACK);
+	rw::RGBAf savedAmbient = pAmbient->color;
+	rw::RGBAf savedDirect = pDirect->color;
+	pAmbient->setColor(0.80f, 0.80f, 0.80f);
+	pDirect->setColor(0.65f, 0.65f, 0.65f);
+
+	for(size_t i = 0; i < gPreviewTrafficCars.size(); i++){
+		updatePreviewTrafficCar(gPreviewTrafficCars[i]);
+		if(gPreviewTrafficCars[i].active && gPreviewTrafficCars[i].clump)
+			gPreviewTrafficCars[i].clump->render();
+	}
+
+	pAmbient->setColor(savedAmbient.red, savedAmbient.green, savedAmbient.blue);
+	pDirect->setColor(savedDirect.red, savedDirect.green, savedDirect.blue);
+	rw::SetRenderState(rw::CULLMODE, rw::CULLNONE);
+}
+
 void
 RenderCarPaths(void)
 {
@@ -2472,6 +4240,7 @@ RenderCarPaths(void)
 		return;
 	drawNodeSet(true);
 	drawVehicleLanes();
+	renderPreviewTrafficCars();
 }
 
 void

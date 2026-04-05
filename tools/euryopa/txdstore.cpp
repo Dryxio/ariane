@@ -8,6 +8,19 @@ static rw::TexDictionary *pushedTxd;
 
 rw::TexDictionary *defaultTxd;
 
+static rw::Texture*
+FindTextureCaseInsensitive(rw::TexDictionary *txd, const char *name)
+{
+	if(txd == nil || name == nil)
+		return nil;
+	FORLIST(lnk, txd->textures){
+		rw::Texture *tex = rw::Texture::fromDict(lnk);
+		if(tex && rw::strcmp_ci(tex->name, name) == 0)
+			return tex;
+	}
+	return nil;
+}
+
 int
 FindTxdSlot(const char *name)
 {
@@ -175,6 +188,8 @@ TxdStoreFindCB(const char *name)
 	rw::Texture *tex;
 	while(txd){
 		tex = txd->find(name);
+		if(tex == nil)
+			tex = FindTextureCaseInsensitive(txd, name);
 		if(tex) return tex;
 		txd = *PLUGINOFFSET(rw::TexDictionary*, txd, txdStoreOffset);
 	}

@@ -70,10 +70,12 @@ bool gRenderLegacyCarPaths;
 bool gRenderSaPedPaths;
 bool gRenderSaPedPathWalkers;
 bool gRenderSaCarPaths;
+bool gRenderSaCarPathTraffic;
 bool gRenderSaAreaGrid;
 bool gRenderEffects;
 bool gRenderTimecycleBoxes;
 int gSaPedPathWalkerCount = 12;
+int gSaCarPathTrafficCount = 10;
 
 // SA postfx
 int  gColourFilter;
@@ -1364,11 +1366,25 @@ handleTool(void)
 rw::Texture *(*originalFindCB)(const char *name);
 rw::TexDictionary *fallbackTxd;
 static rw::Texture*
+findTextureCaseInsensitive(rw::TexDictionary *txd, const char *name)
+{
+	if(txd == nil || name == nil)
+		return nil;
+	FORLIST(lnk, txd->textures){
+		rw::Texture *tex = rw::Texture::fromDict(lnk);
+		if(tex && rw::strcmp_ci(tex->name, name) == 0)
+			return tex;
+	}
+	return nil;
+}
+static rw::Texture*
 fallbackFindCB(const char *name)
 {
 	rw::Texture *t = originalFindCB(name);
 	if(t) return t;
-	return fallbackTxd->find(name);
+	t = fallbackTxd->find(name);
+	if(t) return t;
+	return findTextureCaseInsensitive(fallbackTxd, name);
 }
 
 void

@@ -3210,6 +3210,13 @@ uiView(void)
 	if(isSA()){
 		ImGui::SeparatorText("San Andreas Streamed Paths");
 		ImGui::Checkbox("Draw SA Car Paths", &gRenderSaCarPaths);
+		if(gRenderSaCarPaths){
+			ImGui::Indent();
+			ImGui::Checkbox("Show Preview Traffic", &gRenderSaCarPathTraffic);
+			if(gRenderSaCarPathTraffic)
+				ImGui::SliderInt("Preview Traffic Count", &gSaCarPathTrafficCount, 1, 32);
+			ImGui::Unindent();
+		}
 		ImGui::Checkbox("Draw SA Ped Paths", &gRenderSaPedPaths);
 		if(gRenderSaPedPaths){
 			ImGui::Indent();

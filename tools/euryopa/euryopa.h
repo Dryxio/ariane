@@ -144,10 +144,12 @@ extern bool gRenderLegacyCarPaths;
 extern bool gRenderSaPedPaths;
 extern bool gRenderSaPedPathWalkers;
 extern bool gRenderSaCarPaths;
+extern bool gRenderSaCarPathTraffic;
 extern bool gRenderSaAreaGrid;
 extern bool gRenderEffects;
 extern bool gRenderTimecycleBoxes;
 extern int gSaPedPathWalkerCount;
+extern int gSaCarPathTrafficCount;
 
 // SA postfx
 extern int  gColourFilter;
