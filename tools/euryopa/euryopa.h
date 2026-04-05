@@ -578,6 +578,7 @@ struct ObjectDef
 	// clump info
 	rw::Clump *m_clump;
 	char m_animname[MODELNAMELEN];
+	void *m_animAsset;
 
 	bool m_cantLoad;
 	bool m_hasPreRendered;
@@ -662,6 +663,8 @@ struct ObjectInst
 	int32 m_imageIndex;	// IMG directory index (for binary IPL save), -1 if text IPL
 	int m_binInstIndex;	// index within binary IPL instance array
 	char m_iplFilterKey[256];
+	void *m_animState;
+	float m_animTime;
 
 	GameFile *m_file;
 

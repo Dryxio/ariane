@@ -35,6 +35,7 @@ enum
 	FILE_COL,
 	FILE_IPL,
 	FILE_DAT,
+	FILE_IFP,
 };
 
 struct DirEntry
@@ -85,6 +86,7 @@ GetDirEntryExtension(const DirEntry *de)
 	case FILE_COL: return "col";
 	case FILE_IPL: return "ipl";
 	case FILE_DAT: return "dat";
+	case FILE_IFP: return "ifp";
 	default: return nil;
 	}
 }
@@ -171,7 +173,7 @@ void
 uiShowCdImages(void)
 {
 	static const char *types[] = {
-		"-", "DFF", "TXD", "COL", "IPL", "DAT"
+		"-", "DFF", "TXD", "COL", "IPL", "DAT", "IFP"
 	};
 	int i, j;
 	CdImage *cdimg;
@@ -238,6 +240,8 @@ AddDirEntry(CdImage *cdimg, DirEntry *de)
 	}else if(rw::strncmp_ci(ext, "dat", 3) == 0){
 		de->filetype = FILE_DAT;
 		de->file = NewGameFile(de->name);
+	}else if(rw::strncmp_ci(ext, "ifp", 3) == 0){
+		de->filetype = FILE_IFP;
 	}else{
 //		log("warning: unknown file extension: %s %s\n", ext, de->name);
 		return;

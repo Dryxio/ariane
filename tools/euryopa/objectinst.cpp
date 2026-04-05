@@ -2,9 +2,630 @@
 #include "lod_associations.h"
 #include "modloader.h"
 #include "object_categories.h"
+#include <cmath>
+#include <string>
+#include <vector>
+
+bool ReadCdImageEntryByLogicalPath(const char *logicalPath, std::vector<uint8> &data,
+                                   char *outSourcePath, size_t outSourcePathSize);
 
 CPtrList instances;
 CPtrList selection;
+
+enum
+{
+	OBJECT_ANIM_HAS_ROT = 1,
+	OBJECT_ANIM_HAS_TRANS = 2,
+	OBJECT_ANIM_HAS_SCALE = 4
+};
+
+struct ObjectAnimKeyFrame
+{
+	rw::Quat rotation;
+	float time;
+	rw::V3d translation;
+};
+
+struct ObjectAnimTrack
+{
+	char name[32];
+	int nodeId;
+	int type;
+	std::vector<ObjectAnimKeyFrame> keyFrames;
+};
+
+struct ObjectAnimAsset
+{
+	bool attempted;
+	bool loaded;
+	float duration;
+	char sourcePath[256];
+	char animName[MODELNAMELEN];
+	std::vector<ObjectAnimTrack> tracks;
+};
+
+struct ObjectAnimState
+{
+	rw::HAnimHierarchy *hier;
+	std::vector<rw::Matrix> baseLocalMatrices;
+	std::vector<int> trackIndexByNode;
+};
+
+struct IfpChunkHeader
+{
+	char ident[4];
+	uint32 size;
+};
+
+static ObjectAnimAsset*
+GetObjectAnimAsset(const ObjectDef *obj)
+{
+	return (ObjectAnimAsset*)obj->m_animAsset;
+}
+
+static ObjectAnimState*
+GetObjectAnimState(const ObjectInst *inst)
+{
+	return (ObjectAnimState*)inst->m_animState;
+}
+
+static bool
+readObjectAnimExact(const uint8 *data, size_t dataSize, size_t *offset, void *buf, size_t size)
+{
+	if(data == nil || offset == nil || *offset > dataSize || size > dataSize - *offset)
+		return false;
+	memcpy(buf, data + *offset, size);
+	*offset += size;
+	return true;
+}
+
+static rw::Quat
+normalizeObjectAnimQuat(const rw::Quat &q)
+{
+	float len = std::sqrt(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
+	if(len < 0.0001f)
+		return rw::makeQuat(1.0f, 0.0f, 0.0f, 0.0f);
+	return scale(q, 1.0f/len);
+}
+
+static bool
+readObjectAnimChunkHeader(const std::vector<uint8> &data, size_t *offset, IfpChunkHeader *header)
+{
+	const uint8 *bytes = data.empty() ? nil : &data[0];
+	return readObjectAnimExact(bytes, data.size(), offset, header, sizeof(*header));
+}
+
+static bool
+readObjectAnimRoundedChunkData(const std::vector<uint8> &data, size_t *offset, uint32 size,
+                               std::vector<uint8> &out)
+{
+	size_t rounded = (size + 3) & ~3;
+	out.resize(rounded);
+	if(rounded == 0)
+		return true;
+	const uint8 *bytes = data.empty() ? nil : &data[0];
+	return readObjectAnimExact(bytes, data.size(), offset, &out[0], rounded);
+}
+
+static bool
+loadObjectAnimLogicalPath(const char *logicalPath, std::vector<uint8> &data)
+{
+	char sourcePath[1024];
+	sourcePath[0] = '\0';
+	if(ReadCdImageEntryByLogicalPath(logicalPath, data, sourcePath, sizeof(sourcePath)))
+		return true;
+
+	const char *redirect = ModloaderGetSourcePath(logicalPath);
+	int size = 0;
+	uint8 *buf = nil;
+	if(redirect)
+		buf = ReadLooseFile(redirect, &size);
+	else
+		buf = ReadLooseFile(logicalPath, &size);
+	if(buf && size > 0){
+		data.assign(buf, buf + size);
+		free(buf);
+		return true;
+	}
+	if(buf)
+		free(buf);
+
+	char gameRoot[1024];
+	char absPath[1024];
+	if(GetGameRootDirectory(gameRoot, sizeof(gameRoot)) &&
+	   BuildPath(absPath, sizeof(absPath), gameRoot, logicalPath)){
+		buf = ReadLooseFile(absPath, &size);
+		if(buf && size > 0){
+			data.assign(buf, buf + size);
+			free(buf);
+			return true;
+		}
+		if(buf)
+			free(buf);
+	}
+	return false;
+}
+
+static bool
+loadObjectAnimationFromData(const std::vector<uint8> &data, const char *wantedName,
+                            ObjectAnimAsset *asset)
+{
+	size_t offset = 0;
+	IfpChunkHeader root;
+	std::vector<uint8> chunkData;
+
+	if(asset == nil)
+		return false;
+	asset->duration = 0.0f;
+	asset->tracks.clear();
+
+	if(!readObjectAnimChunkHeader(data, &offset, &root))
+		return false;
+
+	if(strncmp(root.ident, "ANP3", 4) == 0){
+		char packageName[24];
+		uint32 numAnimations = 0;
+		if(!readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, packageName, sizeof(packageName)) ||
+		   !readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, &numAnimations, sizeof(numAnimations)))
+			return false;
+
+		ObjectAnimAsset fallback = {};
+		bool haveFallback = false;
+		for(uint32 animIndex = 0; animIndex < numAnimations; animIndex++){
+			char animName[24];
+			uint32 numNodes = 0;
+			uint32 frameDataSize = 0;
+			uint32 flags = 0;
+			if(!readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, animName, sizeof(animName)) ||
+			   !readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, &numNodes, sizeof(numNodes)) ||
+			   !readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, &frameDataSize, sizeof(frameDataSize)) ||
+			   !readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, &flags, sizeof(flags)))
+				return false;
+
+			bool wanted = rw::strcmp_ci(animName, wantedName) == 0;
+			ObjectAnimAsset candidate = {};
+			candidate.duration = 0.0f;
+			if(wanted || !haveFallback){
+				strncpy(candidate.animName, animName, sizeof(candidate.animName)-1);
+				candidate.tracks.reserve(numNodes);
+			}
+
+			for(uint32 nodeIndex = 0; nodeIndex < numNodes; nodeIndex++){
+				char nodeName[24];
+				uint32 frameType = 0;
+				uint32 numKeyFrames = 0;
+				uint32 boneId = 0;
+				if(!readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, nodeName, sizeof(nodeName)) ||
+				   !readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, &frameType, sizeof(frameType)) ||
+				   !readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, &numKeyFrames, sizeof(numKeyFrames)) ||
+				   !readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, &boneId, sizeof(boneId)))
+					return false;
+
+				bool hasTranslation = frameType == 2 || frameType == 4;
+				bool compressed = frameType == 3 || frameType == 4;
+				if(!compressed)
+					return false;
+
+				ObjectAnimTrack track = {};
+				if(wanted || !haveFallback){
+					strncpy(track.name, nodeName, sizeof(track.name)-1);
+					track.nodeId = boneId;
+					track.type = OBJECT_ANIM_HAS_ROT | (hasTranslation ? OBJECT_ANIM_HAS_TRANS : 0);
+					track.keyFrames.reserve(numKeyFrames);
+				}
+
+				for(uint32 keyIndex = 0; keyIndex < numKeyFrames; keyIndex++){
+					int16 qx, qy, qz, qw, dt;
+					ObjectAnimKeyFrame keyFrame = {};
+					if(!readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, &qx, sizeof(qx)) ||
+					   !readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, &qy, sizeof(qy)) ||
+					   !readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, &qz, sizeof(qz)) ||
+					   !readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, &qw, sizeof(qw)) ||
+					   !readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, &dt, sizeof(dt)))
+						return false;
+
+					keyFrame.rotation = normalizeObjectAnimQuat(rw::makeQuat(
+						qw / 4096.0f,
+						qx / 4096.0f,
+						qy / 4096.0f,
+						qz / 4096.0f
+					));
+					keyFrame.time = dt / 60.0f;
+
+					if(hasTranslation){
+						int16 tx, ty, tz;
+						if(!readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, &tx, sizeof(tx)) ||
+						   !readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, &ty, sizeof(ty)) ||
+						   !readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset, &tz, sizeof(tz)))
+							return false;
+						keyFrame.translation = { tx / 1024.0f, ty / 1024.0f, tz / 1024.0f };
+					}
+
+					if(wanted || !haveFallback)
+						track.keyFrames.push_back(keyFrame);
+					candidate.duration = max(candidate.duration, keyFrame.time);
+				}
+
+				if(wanted || !haveFallback)
+					candidate.tracks.push_back(track);
+			}
+
+			if(wanted){
+				*asset = candidate;
+				return true;
+			}
+			if(!haveFallback){
+				fallback = candidate;
+				haveFallback = true;
+			}
+		}
+		if(haveFallback){
+			*asset = fallback;
+			return true;
+		}
+		return false;
+	}
+
+	int numPackages = 0;
+	if(strncmp(root.ident, "ANLF", 4) == 0){
+		if(!readObjectAnimRoundedChunkData(data, &offset, root.size, chunkData) ||
+		   chunkData.size() < sizeof(int32))
+			return false;
+		numPackages = *(int32*)&chunkData[0];
+	}else if(strncmp(root.ident, "ANPK", 4) == 0){
+		offset = 0;
+		numPackages = 1;
+	}else
+		return false;
+
+	ObjectAnimAsset fallback = {};
+	bool haveFallback = false;
+	for(int pkg = 0; pkg < numPackages; pkg++){
+		IfpChunkHeader anpk, info;
+		if(!readObjectAnimChunkHeader(data, &offset, &anpk) ||
+		   !readObjectAnimChunkHeader(data, &offset, &info) ||
+		   !readObjectAnimRoundedChunkData(data, &offset, info.size, chunkData) ||
+		   chunkData.size() < sizeof(int32))
+			return false;
+
+		int numAnimations = *(int32*)&chunkData[0];
+		for(int animIndex = 0; animIndex < numAnimations; animIndex++){
+			IfpChunkHeader nameChunk, dgan, nodeInfoChunk;
+			std::vector<uint8> nameData;
+			if(!readObjectAnimChunkHeader(data, &offset, &nameChunk) ||
+			   !readObjectAnimRoundedChunkData(data, &offset, nameChunk.size, nameData) ||
+			   !readObjectAnimChunkHeader(data, &offset, &dgan) ||
+			   !readObjectAnimChunkHeader(data, &offset, &nodeInfoChunk) ||
+			   !readObjectAnimRoundedChunkData(data, &offset, nodeInfoChunk.size, chunkData) ||
+			   chunkData.size() < 8)
+				return false;
+
+			bool wanted = rw::strcmp_ci((const char*)&nameData[0], wantedName) == 0;
+			int numNodes = *(int32*)&chunkData[0];
+			ObjectAnimAsset candidate = {};
+			candidate.duration = 0.0f;
+			if(wanted || !haveFallback){
+				strncpy(candidate.animName, (const char*)&nameData[0], sizeof(candidate.animName)-1);
+				candidate.tracks.reserve(numNodes);
+			}
+
+			for(int nodeIndex = 0; nodeIndex < numNodes; nodeIndex++){
+				IfpChunkHeader cpan, animChunk;
+				if(!readObjectAnimChunkHeader(data, &offset, &cpan) ||
+				   !readObjectAnimChunkHeader(data, &offset, &animChunk) ||
+				   !readObjectAnimRoundedChunkData(data, &offset, animChunk.size, chunkData) ||
+				   chunkData.size() < 44)
+					return false;
+
+				int numKeyFrames = *(int32*)&chunkData[28];
+				int nodeId = *(int32*)&chunkData[40];
+				int type = 0;
+				ObjectAnimTrack track = {};
+				if(wanted || !haveFallback){
+					strncpy(track.name, (const char*)&chunkData[0], sizeof(track.name)-1);
+					track.nodeId = nodeId;
+				}
+
+				if(numKeyFrames <= 0){
+					if(wanted || !haveFallback)
+						candidate.tracks.push_back(track);
+					continue;
+				}
+
+				IfpChunkHeader keyChunk;
+				if(!readObjectAnimChunkHeader(data, &offset, &keyChunk))
+					return false;
+
+				if(strncmp(keyChunk.ident, "KR00", 4) == 0)
+					type = OBJECT_ANIM_HAS_ROT;
+				else if(strncmp(keyChunk.ident, "KRT0", 4) == 0)
+					type = OBJECT_ANIM_HAS_ROT | OBJECT_ANIM_HAS_TRANS;
+				else if(strncmp(keyChunk.ident, "KRTS", 4) == 0)
+					type = OBJECT_ANIM_HAS_ROT | OBJECT_ANIM_HAS_TRANS | OBJECT_ANIM_HAS_SCALE;
+				else
+					return false;
+
+				if(wanted || !haveFallback){
+					track.type = type;
+					track.keyFrames.reserve(numKeyFrames);
+				}
+
+				for(int keyIndex = 0; keyIndex < numKeyFrames; keyIndex++){
+					ObjectAnimKeyFrame keyFrame = {};
+					if(type & OBJECT_ANIM_HAS_ROT){
+						if(!readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset,
+						                        &keyFrame.rotation, sizeof(keyFrame.rotation)))
+							return false;
+						keyFrame.rotation.x = -keyFrame.rotation.x;
+						keyFrame.rotation.y = -keyFrame.rotation.y;
+						keyFrame.rotation.z = -keyFrame.rotation.z;
+						keyFrame.rotation = normalizeObjectAnimQuat(keyFrame.rotation);
+					}
+					if(type & OBJECT_ANIM_HAS_TRANS){
+						if(!readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset,
+						                        &keyFrame.translation, sizeof(keyFrame.translation)))
+							return false;
+					}
+					if(type & OBJECT_ANIM_HAS_SCALE){
+						rw::V3d unusedScale;
+						if(!readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset,
+						                        &unusedScale, sizeof(unusedScale)))
+							return false;
+					}
+					if(!readObjectAnimExact(data.empty() ? nil : &data[0], data.size(), &offset,
+					                        &keyFrame.time, sizeof(keyFrame.time)))
+						return false;
+
+					if(wanted || !haveFallback)
+						track.keyFrames.push_back(keyFrame);
+					candidate.duration = max(candidate.duration, keyFrame.time);
+				}
+
+				if(wanted || !haveFallback)
+					candidate.tracks.push_back(track);
+			}
+
+			if(wanted){
+				*asset = candidate;
+				return true;
+			}
+			if(!haveFallback){
+				fallback = candidate;
+				haveFallback = true;
+			}
+		}
+	}
+
+	if(haveFallback){
+		*asset = fallback;
+		return true;
+	}
+	return false;
+}
+
+static bool
+sampleObjectAnimTrack(const ObjectAnimTrack &track, float time,
+                      rw::Quat *rotation, rw::V3d *translation)
+{
+	if(track.keyFrames.empty())
+		return false;
+	if(track.keyFrames.size() == 1){
+		if(rotation) *rotation = track.keyFrames[0].rotation;
+		if(translation) *translation = track.keyFrames[0].translation;
+		return true;
+	}
+
+	const ObjectAnimKeyFrame *prev = &track.keyFrames[0];
+	const ObjectAnimKeyFrame *next = &track.keyFrames[track.keyFrames.size()-1];
+	for(size_t i = 1; i < track.keyFrames.size(); i++){
+		if(time <= track.keyFrames[i].time){
+			next = &track.keyFrames[i];
+			prev = &track.keyFrames[i-1];
+			break;
+		}
+	}
+
+	float span = next->time - prev->time;
+	float t = span > 0.0001f ? (time - prev->time) / span : 0.0f;
+	t = clamp(t, 0.0f, 1.0f);
+	if(rotation) *rotation = slerp(prev->rotation, next->rotation, t);
+	if(translation) *translation = add(scale(prev->translation, 1.0f - t), scale(next->translation, t));
+	return true;
+}
+
+static ObjectAnimAsset*
+EnsureObjectAnimAsset(ObjectDef *obj)
+{
+	if(obj == nil || obj->m_animname[0] == '\0')
+		return nil;
+
+	ObjectAnimAsset *asset = GetObjectAnimAsset(obj);
+	if(asset){
+		if(asset->attempted && !asset->loaded)
+			return nil;
+		return asset->loaded ? asset : nil;
+	}
+
+	asset = new ObjectAnimAsset();
+	asset->attempted = true;
+	obj->m_animAsset = asset;
+
+	std::vector<std::string> candidates;
+	if(obj->m_imageIndex >= 0){
+		const char *archive = GetCdImageLogicalName(obj->m_imageIndex);
+		if(archive && archive[0]){
+			char path[512];
+			if(snprintf(path, sizeof(path), "%s/%s.ifp", archive, obj->m_animname) < (int)sizeof(path))
+				candidates.push_back(path);
+		}
+	}
+	char fallback[64];
+	if(snprintf(fallback, sizeof(fallback), "anim/%s.ifp", obj->m_animname) < (int)sizeof(fallback))
+		candidates.push_back(fallback);
+	if(snprintf(fallback, sizeof(fallback), "models/gta3.img/%s.ifp", obj->m_animname) < (int)sizeof(fallback))
+		candidates.push_back(fallback);
+	if(snprintf(fallback, sizeof(fallback), "models/gta_int.img/%s.ifp", obj->m_animname) < (int)sizeof(fallback))
+		candidates.push_back(fallback);
+
+	std::vector<uint8> ifpData;
+	for(size_t i = 0; i < candidates.size(); i++){
+		if(loadObjectAnimLogicalPath(candidates[i].c_str(), ifpData)){
+			strncpy(asset->sourcePath, candidates[i].c_str(), sizeof(asset->sourcePath)-1);
+			break;
+		}
+	}
+	if(ifpData.empty()){
+		log("Object animation: IFP not found for %s (%s)\n", obj->m_name, obj->m_animname);
+		return nil;
+	}
+
+	if(!loadObjectAnimationFromData(ifpData, obj->m_name, asset)){
+		log("Object animation: no matching anim for %s in %s\n", obj->m_name, asset->sourcePath);
+		return nil;
+	}
+
+	asset->loaded = true;
+	log("Object animation: loaded %s from %s for %s\n",
+	    asset->animName[0] ? asset->animName : obj->m_name,
+	    asset->sourcePath[0] ? asset->sourcePath : obj->m_animname,
+	    obj->m_name);
+	return asset;
+}
+
+static bool
+SetupAnimatedClump(ObjectInst *inst, rw::Clump *clump)
+{
+	ObjectDef *obj = GetObjectDef(inst->m_objectId);
+	ObjectAnimAsset *asset = EnsureObjectAnimAsset(obj);
+	if(asset == nil || !asset->loaded || clump == nil)
+		return false;
+
+	rw::HAnimHierarchy *hier = rw::HAnimHierarchy::get(clump);
+	if(hier == nil)
+		return false;
+	hier->attach();
+
+	FORLIST(lnk, clump->atomics){
+		rw::Atomic *atomic = rw::Atomic::fromClump(lnk);
+		if(atomic && atomic->geometry && rw::Skin::get(atomic->geometry))
+			rw::Skin::setHierarchy(atomic, hier);
+	}
+
+	ObjectAnimState *state = new ObjectAnimState();
+	state->hier = hier;
+	state->baseLocalMatrices.resize(hier->numNodes);
+	state->trackIndexByNode.assign(hier->numNodes, -1);
+
+	for(int i = 0; i < hier->numNodes; i++){
+		if(hier->nodeInfo[i].frame)
+			state->baseLocalMatrices[i] = hier->nodeInfo[i].frame->matrix;
+		else
+			state->baseLocalMatrices[i].setIdentity();
+	}
+
+	for(size_t i = 0; i < asset->tracks.size(); i++){
+		const ObjectAnimTrack &track = asset->tracks[i];
+		int index = hier->getIndex(track.nodeId);
+		if(index < 0){
+			for(int boneIndex = 0; boneIndex < hier->numNodes; boneIndex++){
+				rw::Frame *frame = hier->nodeInfo[boneIndex].frame;
+				if(frame == nil)
+					continue;
+				const char *boneName = gta::getNodeName(frame);
+				if(boneName && rw::strcmp_ci(boneName, track.name) == 0){
+					index = boneIndex;
+					break;
+				}
+			}
+		}
+		if(index >= 0)
+			state->trackIndexByNode[index] = (int)i;
+	}
+
+	bool haveMappedTrack = false;
+	for(size_t i = 0; i < state->trackIndexByNode.size(); i++)
+		if(state->trackIndexByNode[i] >= 0){
+			haveMappedTrack = true;
+			break;
+		}
+	if(!haveMappedTrack){
+		delete state;
+		return false;
+	}
+
+	inst->m_animState = state;
+	inst->m_animTime = 0.0f;
+	return true;
+}
+
+static void
+ApplyAnimatedClump(ObjectInst *inst)
+{
+	ObjectDef *obj = GetObjectDef(inst->m_objectId);
+	ObjectAnimAsset *asset = obj ? GetObjectAnimAsset(obj) : nil;
+	ObjectAnimState *state = GetObjectAnimState(inst);
+	if(asset == nil || !asset->loaded || state == nil || state->hier == nil)
+		return;
+
+	float animTime = inst->m_animTime;
+	if(asset->duration > 0.001f)
+		animTime = std::fmod(animTime, asset->duration);
+
+	rw::HAnimHierarchy *hier = state->hier;
+	rw::Matrix rootMat;
+	rw::Frame *hierRoot = hier->parentFrame;
+	rw::Frame *rootParent = hierRoot ? hierRoot->getParent() : nil;
+	if(hierRoot && rootParent && !(hier->flags & rw::HAnimHierarchy::LOCALSPACEMATRICES))
+		rootMat = *rootParent->getLTM();
+	else
+		rootMat.setIdentity();
+
+	rw::Matrix *parentMat = &rootMat;
+	rw::Matrix *stack[64];
+	rw::Matrix **sp = stack;
+	*sp++ = parentMat;
+
+	for(int i = 0; i < hier->numNodes; i++){
+		rw::Matrix local = state->baseLocalMatrices[i];
+		int trackIndex = i < (int)state->trackIndexByNode.size() ? state->trackIndexByNode[i] : -1;
+		if(trackIndex >= 0 && trackIndex < (int)asset->tracks.size()){
+			const ObjectAnimTrack &track = asset->tracks[trackIndex];
+			rw::Quat rotation;
+			rw::V3d translation;
+			if(sampleObjectAnimTrack(track, animTime, &rotation, &translation)){
+				rw::V3d localPos = local.pos;
+				local.rotate(rotation, rw::COMBINEREPLACE);
+				local.pos = localPos;
+				if(track.type & OBJECT_ANIM_HAS_TRANS){
+					if(i == 0 && rootParent == nil && hierRoot == hier->nodeInfo[i].frame)
+						local.pos = add(localPos, translation);
+					else
+						local.pos = translation;
+				}
+			}
+		}
+
+		if(hier->nodeInfo[i].frame)
+			hier->nodeInfo[i].frame->matrix = local;
+		if(hier->matrices)
+			rw::Matrix::mult(&hier->matrices[i], &local, parentMat);
+
+		if(hier->nodeInfo[i].flags & rw::HAnimHierarchy::PUSH){
+			if(sp < stack + 64)
+				*sp++ = parentMat;
+		}
+		parentMat = hier->matrices ? &hier->matrices[i] : parentMat;
+		if(hier->nodeInfo[i].flags & rw::HAnimHierarchy::POP){
+			if(sp > stack)
+				parentMat = *--sp;
+			else
+				parentMat = &rootMat;
+		}
+	}
+
+	if(hier->parentFrame)
+		hier->parentFrame->updateObjects();
+}
 
 static bool
 BuildAssetExportPath(const char *dir, const char *name, const char *ext, char *dst, size_t size)
@@ -149,6 +770,7 @@ ObjectInst::CreateRwObject(void)
 		clump = obj->m_clump->clone();
 		f = clump->getFrame();
 		f->transform(&m_matrix, rw::COMBINEREPLACE);
+		SetupAnimatedClump(this, clump);
 		m_rwObject = clump;
 	}
 	return m_rwObject;
@@ -236,15 +858,21 @@ ObjectInst::PreRender(void)
 	ObjectDef *obj = GetObjectDef(m_objectId);
 	if(obj == nil)
 		return;
-	if(obj->m_hasPreRendered)
-		return;
-	obj->m_hasPreRendered = true;
+	if(obj->m_type == ObjectDef::ATOMIC){
+		if(obj->m_hasPreRendered)
+			return;
+		obj->m_hasPreRendered = true;
 
-	if(obj->m_type == ObjectDef::ATOMIC && gPlayAnimations){
-		rw::Atomic *atm = (rw::Atomic*)m_rwObject;
-		if(rw::MatFX::getEffects(atm))
-			for(i = 0; i < atm->geometry->matList.numMaterials; i++)
-				updateMatFXAnim(atm->geometry->matList.materials[i]);
+		if(gPlayAnimations){
+			rw::Atomic *atm = (rw::Atomic*)m_rwObject;
+			if(rw::MatFX::getEffects(atm))
+				for(i = 0; i < atm->geometry->matList.numMaterials; i++)
+					updateMatFXAnim(atm->geometry->matList.materials[i]);
+		}
+	}else if(obj->m_type == ObjectDef::CLUMP && m_rwObject){
+		if(gPlayAnimations)
+			m_animTime += timeStep;
+		ApplyAnimatedClump(this);
 	}
 }
 
