@@ -2361,22 +2361,27 @@ uiMainmenu(void)
 			ImGui::EndMenu();
 		}
 
-		if(params.numAreas){
-			ImGui::PushItemWidth(100);
-			if(ImGui::BeginCombo("Area", params.areaNames[currentArea])){
-				for(int n = 0; n < params.numAreas; n++){
-					bool is_selected = n == currentArea;
-					static char str[100];
-					sprintf(str, "%d - %s", n, params.areaNames[n]);
-					if(ImGui::Selectable(str, is_selected))
-						currentArea = n;
-					if(is_selected)
-						ImGui::SetItemDefaultFocus();
-				}
-				ImGui::EndCombo();
-			}
-			ImGui::PopItemWidth();
-		}
+		if(ImGui::ArrowButton("##intdec", ImGuiDir_Left) && currentArea > 0)
+			currentArea--;
+		ImGui::SameLine(0, 2);
+		ImGui::PushItemWidth(40);
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, ImGui::GetStyle().FramePadding.y));
+		static char intbuf[16];
+		sprintf(intbuf, "%d", currentArea);
+		float tw = ImGui::CalcTextSize(intbuf).x;
+		float pad = (40 - tw) * 0.5f;
+		if(pad < 0) pad = 0;
+		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(pad, ImGui::GetStyle().FramePadding.y));
+		ImGui::InputInt("##interior", &currentArea, 0, 0);
+		if(currentArea < 0) currentArea = 0;
+		ImGui::PopStyleVar(2);
+		ImGui::PopItemWidth();
+		ImGui::SameLine(0, 2);
+		ImGui::ArrowButton("##intinc", ImGuiDir_Right);
+		if(ImGui::IsItemClicked())
+			currentArea++;
+		ImGui::SameLine();
+		ImGui::Text("Interior");
 
 
 		ImGui::Separator();
@@ -3747,8 +3752,8 @@ uiInstInfo(ObjectInst *inst)
 		}
 	}
 
-	if(params.numAreas)
-		ImGui::Text("Area: %d", inst->m_area);
+	ImGui::InputInt("Interior", &inst->m_area);
+	if(inst->m_area < 0) inst->m_area = 0;
 
 	if(params.objFlagset == GAME_SA){
 		ImGui::Checkbox("Unimportant", &inst->m_isUnimportant);
@@ -3844,7 +3849,7 @@ loadCamSettings(void)
 			&cam.area);
 		if(cam.fov < 1.0f || cam.fov > 150.0f)
 			cam.fov = 70.0f;
-		if(cam.area < 0 || cam.area >= params.numAreas)
+		if(cam.area < 0)
 			cam.area = 0;
 		cam.hour %= 24;
 		cam.minute %= 60;
