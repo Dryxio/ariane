@@ -822,6 +822,111 @@ SnapToGrid(rw::V3d pos)
 	return pos;
 }
 
+// GTA SA water stores X/Y as integers and assumes strict axis-aligned layouts.
+static const int SA_WORLD_MIN = -3000;
+static const int SA_WORLD_MAX = 3000;
+
+static int
+WaterCoordToGame(float v)
+{
+	return (int)v;
+}
+
+static bool
+IsWaterVertexOutOfBounds(const WaterVertex *v)
+{
+	int x = WaterCoordToGame(v->pos.x);
+	int y = WaterCoordToGame(v->pos.y);
+	return x < SA_WORLD_MIN || x > SA_WORLD_MAX ||
+	       y < SA_WORLD_MIN || y > SA_WORLD_MAX;
+}
+
+static bool
+TryCanonicalizeQuadVertices(const WaterVertex in[4], WaterVertex out[4])
+{
+	int xs[4], ys[4];
+	int minX, maxX, minY, maxY;
+
+	for(int i = 0; i < 4; i++){
+		xs[i] = WaterCoordToGame(in[i].pos.x);
+		ys[i] = WaterCoordToGame(in[i].pos.y);
+	}
+
+	minX = maxX = xs[0];
+	minY = maxY = ys[0];
+	for(int i = 1; i < 4; i++){
+		if(xs[i] < minX) minX = xs[i];
+		if(xs[i] > maxX) maxX = xs[i];
+		if(ys[i] < minY) minY = ys[i];
+		if(ys[i] > maxY) maxY = ys[i];
+	}
+
+	if(minX == maxX || minY == maxY)
+		return false;
+
+	const int expected[4][2] = {
+		{ minX, minY },
+		{ maxX, minY },
+		{ minX, maxY },
+		{ maxX, maxY }
+	};
+	bool used[4] = { false, false, false, false };
+	for(int corner = 0; corner < 4; corner++){
+		int found = -1;
+		for(int i = 0; i < 4; i++){
+			if(used[i])
+				continue;
+			if(xs[i] == expected[corner][0] && ys[i] == expected[corner][1]){
+				found = i;
+				break;
+			}
+		}
+		if(found < 0)
+			return false;
+		used[found] = true;
+		out[corner] = in[found];
+	}
+	return true;
+}
+
+static bool
+TryCanonicalizeTriVertices(const WaterVertex in[3], WaterVertex out[3])
+{
+	int xs[3], ys[3];
+	int a, b, c;
+
+	for(int i = 0; i < 3; i++){
+		xs[i] = WaterCoordToGame(in[i].pos.x);
+		ys[i] = WaterCoordToGame(in[i].pos.y);
+	}
+
+	if(ys[0] == ys[1]){
+		a = 0; b = 1; c = 2;
+	}else if(ys[0] == ys[2]){
+		a = 0; b = 2; c = 1;
+	}else if(ys[1] == ys[2]){
+		a = 1; b = 2; c = 0;
+	}else
+		return false;
+
+	if(xs[a] == xs[b])
+		return false;
+	if(ys[c] == ys[a])
+		return false;
+	if(xs[c] != xs[a] && xs[c] != xs[b])
+		return false;
+
+	if(xs[a] <= xs[b]){
+		out[0] = in[a];
+		out[1] = in[b];
+	}else{
+		out[0] = in[b];
+		out[1] = in[a];
+	}
+	out[2] = in[c];
+	return true;
+}
+
 //
 // Picking
 //
@@ -977,14 +1082,24 @@ CreateWaterQuad(rw::V3d a, rw::V3d b)
 	for(int i = 0; i < 4; i++)
 		corners[i] = SnapToNearbyVertex(corners[i], snapDist);
 
+	WaterVertex ordered[4];
+	WaterVertex input[4];
+	for(int i = 0; i < 4; i++){
+		input[i].pos = corners[i];
+		input[i].speed = { 0.0f, 0.0f };
+		input[i].waveunk = 0.0f;
+		input[i].waveheight = 0.0f;
+	}
+	if(!TryCanonicalizeQuadVertices(input, ordered)){
+		log("CreateWaterQuad: resulting shape is not a valid GTA SA water rectangle\n");
+		return -1;
+	}
+
 	WaterQuad *q = &waterQuads[numWaterQuads];
 	for(int i = 0; i < 4; i++){
 		int vi = numWaterVertices++;
 		q->indices[i] = vi;
-		waterVertices[vi].pos = corners[i];
-		waterVertices[vi].speed = { 0.0f, 0.0f };
-		waterVertices[vi].waveunk = 0.0f;
-		waterVertices[vi].waveheight = 0.0f;
+		waterVertices[vi] = ordered[i];
 	}
 	q->flags = 1;
 	return numWaterQuads++;
@@ -1009,14 +1124,24 @@ CreateWaterTriangle(rw::V3d a, rw::V3d b, rw::V3d c)
 	for(int i = 0; i < 3; i++)
 		corners[i] = SnapToNearbyVertex(corners[i], snapDist);
 
+	WaterVertex ordered[3];
+	WaterVertex input[3];
+	for(int i = 0; i < 3; i++){
+		input[i].pos = corners[i];
+		input[i].speed = { 0.0f, 0.0f };
+		input[i].waveunk = 0.0f;
+		input[i].waveheight = 0.0f;
+	}
+	if(!TryCanonicalizeTriVertices(input, ordered)){
+		log("CreateWaterTriangle: GTA SA only supports axis-aligned right triangles\n");
+		return -1;
+	}
+
 	WaterTri *t = &waterTris[numWaterTris];
 	for(int i = 0; i < 3; i++){
 		int vi = numWaterVertices++;
 		t->indices[i] = vi;
-		waterVertices[vi].pos = corners[i];
-		waterVertices[vi].speed = { 0.0f, 0.0f };
-		waterVertices[vi].waveunk = 0.0f;
-		waterVertices[vi].waveheight = 0.0f;
+		waterVertices[vi] = ordered[i];
 	}
 	t->flags = 1;
 	return numWaterTris++;
@@ -1612,10 +1737,16 @@ IsTriDegenerate(WaterTri *t)
 }
 
 // Validate water data before save. Returns number of warnings, logs them.
-static int
+struct WaterValidationResult {
+	int warnings;
+	int errors;
+};
+
+static WaterValidationResult
 ValidateWaterData(void)
 {
 	int warnings = 0;
+	int errors = 0;
 
 	if(!UsesPatchedGameLimits()){
 		if(numWaterQuads > SA_MAX_QUADS){
@@ -1651,6 +1782,16 @@ ValidateWaterData(void)
 		}
 	}
 
+	int outOfBoundsVerts = 0;
+	for(int i = 0; i < numWaterVertices; i++)
+		if(IsWaterVertexOutOfBounds(&waterVertices[i]))
+			outOfBoundsVerts++;
+	if(outOfBoundsVerts){
+		log("ERROR: %d vertex/vertices lie outside GTA SA world bounds (%d..%d) and will be clamped by the game\n",
+			outOfBoundsVerts, SA_WORLD_MIN, SA_WORLD_MAX);
+		errors++;
+	}
+
 	int degQuads = 0, degTris = 0;
 	for(int i = 0; i < numWaterQuads; i++)
 		if(IsQuadDegenerate(&waterQuads[i]))
@@ -1667,7 +1808,38 @@ ValidateWaterData(void)
 		warnings++;
 	}
 
-	return warnings;
+	int invalidQuads = 0;
+	for(int i = 0; i < numWaterQuads; i++){
+		WaterVertex verts[4];
+		for(int j = 0; j < 4; j++)
+			verts[j] = waterVertices[waterQuads[i].indices[j]];
+		WaterVertex ordered[4];
+		if(!TryCanonicalizeQuadVertices(verts, ordered))
+			invalidQuads++;
+	}
+	if(invalidQuads){
+		log("ERROR: %d quad(s) are not axis-aligned rectangles in GTA SA water.dat terms\n", invalidQuads);
+		errors++;
+	}
+
+	int invalidTris = 0;
+	for(int i = 0; i < numWaterTris; i++){
+		WaterVertex verts[3];
+		for(int j = 0; j < 3; j++)
+			verts[j] = waterVertices[waterTris[i].indices[j]];
+		WaterVertex ordered[3];
+		if(!TryCanonicalizeTriVertices(verts, ordered))
+			invalidTris++;
+	}
+	if(invalidTris){
+		log("ERROR: %d triangle(s) are not valid GTA SA water triangles (must share one X pair and one Y pair)\n", invalidTris);
+		errors++;
+	}
+
+	WaterValidationResult result;
+	result.warnings = warnings;
+	result.errors = errors;
+	return result;
 }
 
 static bool
@@ -1684,9 +1856,13 @@ bool
 SaveWater(void)
 {
 	// Validate before writing
-	int warnings = ValidateWaterData();
-	if(warnings > 0)
-		log("SaveWater: %d validation warning(s)\n", warnings);
+	WaterValidationResult validation = ValidateWaterData();
+	if(validation.warnings > 0)
+		log("SaveWater: %d validation warning(s)\n", validation.warnings);
+	if(validation.errors > 0){
+		log("SaveWater: aborted due to %d validation error(s)\n", validation.errors);
+		return false;
+	}
 
 	// Clamp out-of-range values (push undo first since this mutates data)
 	bool needsClamp = false;
@@ -1739,8 +1915,18 @@ SaveWater(void)
 
 	for(int i = 0; i < numWaterQuads; i++){
 		WaterQuad *q = &waterQuads[i];
+		WaterVertex verts[4];
+		WaterVertex ordered[4];
+		for(int j = 0; j < 4; j++)
+			verts[j] = waterVertices[q->indices[j]];
+		if(!TryCanonicalizeQuadVertices(verts, ordered)){
+			fclose(f);
+			remove(tempPath);
+			log("SaveWater: quad %d failed canonicalization\n", i);
+			return false;
+		}
 		for(int j = 0; j < 4; j++){
-			WaterVertex *v = &waterVertices[q->indices[j]];
+			WaterVertex *v = &ordered[j];
 			fprintf(f, "%.5f %.5f %.5f %.5f %.5f %.5f %.5f ",
 				v->pos.x, v->pos.y, v->pos.z,
 				v->speed.x, v->speed.y,
@@ -1751,8 +1937,18 @@ SaveWater(void)
 
 	for(int i = 0; i < numWaterTris; i++){
 		WaterTri *t = &waterTris[i];
+		WaterVertex verts[3];
+		WaterVertex ordered[3];
+		for(int j = 0; j < 3; j++)
+			verts[j] = waterVertices[t->indices[j]];
+		if(!TryCanonicalizeTriVertices(verts, ordered)){
+			fclose(f);
+			remove(tempPath);
+			log("SaveWater: triangle %d failed canonicalization\n", i);
+			return false;
+		}
 		for(int j = 0; j < 3; j++){
-			WaterVertex *v = &waterVertices[t->indices[j]];
+			WaterVertex *v = &ordered[j];
 			fprintf(f, "%.5f %.5f %.5f %.5f %.5f %.5f %.5f ",
 				v->pos.x, v->pos.y, v->pos.z,
 				v->speed.x, v->speed.y,
