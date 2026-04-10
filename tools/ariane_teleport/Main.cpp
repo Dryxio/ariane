@@ -378,6 +378,7 @@ ProcessEntityReload(void)
 					mat.pos.x   = nx;            mat.pos.y   = ny;            mat.pos.z   = nz;
 
 					e->SetMatrix(mat);
+					e->UpdateRwMatrix();
 					CWorld::Add(e);
 					PromoteToBigBuildingIfNeeded(e);
 					e->UpdateRwFrame();
