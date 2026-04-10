@@ -1,7 +1,7 @@
 #pragma once
 
 // Ariane version — bump this when releasing updates
-#define ARIANE_VERSION "1.27"
+#define ARIANE_VERSION "1.28"
 
 // Update channel — set at build time via preprocessor define
 // Defaults to "master" if not set by the build system
