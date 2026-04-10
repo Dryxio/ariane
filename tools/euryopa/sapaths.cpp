@@ -2,6 +2,7 @@
 #include "modloader.h"
 #include "sapaths.h"
 #include <cctype>
+#include <cfloat>
 #include <cstdlib>
 #include <cmath>
 #include <ctime>
@@ -44,6 +45,7 @@ static const int PREVIEW_CAR_GROUP_OTHER_COUNT = 18;
 static const int PREVIEW_CAR_GROUP_GANG_BASE = 18;
 static const int PREVIEW_CAR_GROUP_DEALERS = 28;
 static const int PREVIEW_TRAFFIC_CURVE_SAMPLES = 24;
+static const float PREVIEW_TRAFFIC_SPEED_MULTIPLIER = 3.0f;
 
 struct NodeAddress {
 	uint16 areaId;
@@ -406,6 +408,10 @@ struct PreviewTrafficCar {
 	rw::V3d curveP2;
 	float curveLength;
 	float curveSampleDistances[PREVIEW_TRAFFIC_CURVE_SAMPLES + 1];
+	bool hasLastRenderedPos;
+	rw::V3d lastRenderedPos;
+	rw::V3d lastMotionDir;
+	bool traverseReversed;
 };
 
 struct PreviewParkedCar {
@@ -2499,6 +2505,7 @@ alignNaviDirectionToAttachedNode(DiskCarPathLink &navi, const Node &attached)
 }
 
 static void refreshMetadataForNode(const NodeAddress &changedAddr);
+static bool findReciprocalLinkSlot(const NodeAddress &from, const NodeAddress &to, uint16 *outAreaId, int *outSlot);
 
 static void
 touchChangeSeq(void)
@@ -3201,11 +3208,11 @@ getLaneOffset(const DiskCarPathLink &link)
 {
 	int opposite = getNaviOppositeLanes(link);
 	int same = getNaviSameLanes(link);
-	if(opposite)
-		return 0.5f - same/2.0f;
-	if(same)
-		return 0.5f - getNaviWidth(link)/5.4f/2.0f;
-	return 0.5f - opposite/2.0f;
+	if(opposite == 0)
+		return 0.5f - same*0.5f;
+	if(same == 0)
+		return 0.5f - opposite*0.5f;
+	return getNaviWidth(link)/5.4f + 0.5f;
 }
 
 static rw::V3d
@@ -3266,6 +3273,87 @@ getPreviewTrafficTravelDirection(const DiskCarPathLink &navi, bool sameDirection
 	if(!sameDirection)
 		dir = scale(dir, -1.0f);
 	return dir;
+}
+
+static int
+getPreviewTrafficDirectionSign(const NodeAddress &from, const NodeAddress &to)
+{
+	if(to.areaId < from.areaId)
+		return -1;
+	if(to.areaId > from.areaId)
+		return 1;
+	return to.nodeId < from.nodeId ? -1 : 1;
+}
+
+static rw::V3d
+getPreviewTrafficTravelDirection(const NodeAddress &from, const NodeAddress &to,
+                                 const DiskCarPathLink &navi)
+{
+	rw::V3d dir = { (float)navi.dirX, (float)navi.dirY, 0.0f };
+	dir.z = 0.0f;
+	float len = length(dir);
+	if(len < 0.001f)
+		dir = { 0.0f, 1.0f, 0.0f };
+	else
+		dir = scale(dir, 1.0f/len);
+	return scale(dir, (float)getPreviewTrafficDirectionSign(from, to));
+}
+
+static bool
+isPreviewTrafficSegmentTravelReversed(const NodeAddress &from, const NodeAddress &to,
+                                      const DiskCarPathLink &navi)
+{
+	Node *fromNode = getNode(from);
+	Node *toNode = getNode(to);
+	if(fromNode == nil || toNode == nil)
+		return false;
+
+	rw::V3d pathDir = sub(getNodePosition(*toNode), getNodePosition(*fromNode));
+	pathDir.z = 0.0f;
+	float pathLen = length(pathDir);
+	if(pathLen < 0.001f)
+		return false;
+	pathDir = scale(pathDir, 1.0f/pathLen);
+
+	rw::V3d travelDir = getPreviewTrafficTravelDirection(from, to, navi);
+	return dot(pathDir, travelDir) < 0.0f;
+}
+
+static rw::V3d
+getPreviewTrafficLaneBasisDirection(const DiskCarPathLink &navi)
+{
+	rw::V3d dir = { (float)navi.dirX, (float)navi.dirY, 0.0f };
+	dir.z = 0.0f;
+	float len = length(dir);
+	if(len < 0.001f)
+		return { 0.0f, 1.0f, 0.0f };
+	return scale(dir, 1.0f/len);
+}
+
+static rw::V3d
+getPreviewTrafficLaneBasisDirection(const NodeAddress &from, const NodeAddress &to,
+                                    const DiskCarPathLink &navi)
+{
+	Node *fromNode = getNode(from);
+	Node *toNode = getNode(to);
+	if(fromNode && toNode){
+		rw::V3d dir = sub(getNodePosition(*toNode), getNodePosition(*fromNode));
+		dir.z = 0.0f;
+		float len = length(dir);
+		if(len >= 0.001f)
+			return scale(dir, 1.0f/len);
+	}
+	return getPreviewTrafficLaneBasisDirection(navi);
+}
+
+static float
+getPreviewTrafficLaneOffsetUnits(const DiskCarPathLink &navi, bool sameDirection, int laneIndex)
+{
+	int laneCount = sameDirection ? getNaviSameLanes(navi) : getNaviOppositeLanes(navi);
+	if(laneCount <= 0)
+		return 0.0f;
+	laneIndex = clamp(laneIndex, 0, laneCount - 1);
+	return getLaneOffset(navi) + laneIndex;
 }
 
 static rw::V3d
@@ -3338,29 +3426,9 @@ getPreviewDirectedVehicleLink(const NodeAddress &from, const NodeAddress &to,
 			return false;
 
 		DiskCarPathLink *navi = &naviArea->naviNodes[naviAddr.nodeId()];
-		Node *fromNode = getNode(from);
-		Node *toNode = getNode(to);
-		if(fromNode == nil || toNode == nil)
-			return false;
-
-		rw::V3d pathDir = sub(getNodePosition(*toNode), getNodePosition(*fromNode));
-		pathDir.z = 0.0f;
-		float pathLen = length(pathDir);
-		if(pathLen < 0.001f)
-			return false;
-		pathDir = scale(pathDir, 1.0f/pathLen);
-
-		rw::V3d naviDir = { (float)navi->dirX, (float)navi->dirY, 0.0f };
-		float naviLen = length(naviDir);
-		bool sameDirection;
-		if(naviLen > 0.001f){
-			naviDir = scale(naviDir, 1.0f/naviLen);
-			sameDirection = dot(pathDir, naviDir) >= 0.0f;
-		}else{
-			sameDirection = navi->attachedAreaId == to.areaId && navi->attachedNodeId == to.nodeId;
-			if(!sameDirection && !(navi->attachedAreaId == from.areaId && navi->attachedNodeId == from.nodeId))
-				return false;
-		}
+		bool sameDirection =
+			navi->attachedAreaId == to.areaId &&
+			navi->attachedNodeId == to.nodeId;
 
 		int laneCount = sameDirection ? getNaviSameLanes(*navi) : getNaviOppositeLanes(*navi);
 		if(outNaviAddr)
@@ -3409,22 +3477,11 @@ hasPreviewTrafficLink(const NodeAddress &addr)
 }
 
 static rw::V3d
-getPreviewTrafficLanePointAtNavi(const DiskCarPathLink &navi, bool sameDirection, int laneIndex, float z)
+getPreviewTrafficLanePointAtNavi(const NodeAddress &from, const NodeAddress &to,
+                                 const DiskCarPathLink &navi, bool sameDirection, int laneIndex, float z)
 {
-	rw::V3d dir = { (float)navi.dirX, (float)navi.dirY, 0.0f };
-	dir.z = 0.0f;
-	float len = length(dir);
-	if(len < 0.001f)
-		dir = { 0.0f, 1.0f, 0.0f };
-	else
-		dir = scale(dir, 1.0f/len);
-	if(!sameDirection)
-		dir = scale(dir, -1.0f);
-	float laneOffsetUnits = 0.0f;
-	if(getNaviOppositeLanes(navi) > 0 && getNaviSameLanes(navi) > 0)
-		laneOffsetUnits = laneIndex + 0.5f;
-	else
-		laneOffsetUnits = getLaneOffset(navi) + laneIndex;
+	rw::V3d dir = getPreviewTrafficTravelDirection(from, to, navi);
+	float laneOffsetUnits = getPreviewTrafficLaneOffsetUnits(navi, sameDirection, laneIndex);
 	float laneOffset = laneOffsetUnits * LANE_WIDTH;
 	rw::V2d pos = getNaviPosition(navi);
 	return {
@@ -3434,38 +3491,331 @@ getPreviewTrafficLanePointAtNavi(const DiskCarPathLink &navi, bool sameDirection
 	};
 }
 
-static float
-getPreviewTrafficLaneOffsetUnits(const DiskCarPathLink &navi, bool sameDirection, int laneIndex)
+static void dumpPreviewTrafficCarRouteDebug(const PreviewTrafficCar &car);
+static int mapPreviewTrafficLaneIndex(const DiskCarPathLink &fromNavi, bool fromSameDirection, int fromLaneIndex,
+                                      const DiskCarPathLink &toNavi, bool toSameDirection);
+
+static void
+dumpPreviewTrafficLinkDebug(const NodeAddress &source, const NodeAddress &target,
+                            int slot, CarPathLinkAddress naviAddr)
 {
-	int laneCount = sameDirection ? getNaviSameLanes(navi) : getNaviOppositeLanes(navi);
-	if(laneCount <= 0)
-		return 0.0f;
-	laneIndex = clamp(laneIndex, 0, laneCount - 1);
-	if(getNaviOppositeLanes(navi) > 0 && getNaviSameLanes(navi) > 0)
-		return laneIndex + 0.5f;
-	return getLaneOffset(navi) + laneIndex;
+	AreaData *area = getArea(source.areaId);
+	Node *sourceNode = getNode(source);
+	Node *targetNode = getNode(target);
+	DiskCarPathLink *navi = getPreviewTrafficNavi(naviAddr);
+	if(area == nil || sourceNode == nil || targetNode == nil || navi == nil){
+		log("SAPaths debug: can't dump link %d:%d -> %d:%d (missing area/node/navi)\n",
+		    source.areaId, source.nodeId, target.areaId, target.nodeId);
+		return;
+	}
+
+	auto logDir = [](const char *label, const rw::V3d &dir) {
+		log("  %s=(%.3f, %.3f, %.3f)\n", label, dir.x, dir.y, dir.z);
+	};
+
+	rw::V3d pathDir = sub(getNodePosition(*targetNode), getNodePosition(*sourceNode));
+	pathDir.z = 0.0f;
+	float pathLen = length(pathDir);
+	if(pathLen > 0.001f)
+		pathDir = scale(pathDir, 1.0f/pathLen);
+	else
+		pathDir = { 0.0f, 1.0f, 0.0f };
+
+	bool forwardSame = false;
+	int forwardLaneCount = 0;
+	getPreviewDirectedVehicleLink(source, target, nil, nil, &forwardSame, &forwardLaneCount);
+	bool reverseSame = false;
+	int reverseLaneCount = 0;
+	getPreviewDirectedVehicleLink(target, source, nil, nil, &reverseSame, &reverseLaneCount);
+
+	rw::V3d currentTravelDir = getPreviewTrafficTravelDirection(source, target, *navi);
+	rw::V3d vanillaTravelDir = getPreviewTrafficTravelDirection(*navi, forwardSame);
+	rw::V2d naviPos = getNaviPosition(*navi);
+	float z = (sourceNode->z() + targetNode->z()) * 0.5f;
+
+	log("SAPaths debug link %d:%d -> %d:%d slot=%d navi=%d:%d\n",
+	    source.areaId, source.nodeId, target.areaId, target.nodeId,
+	    slot, naviAddr.areaId(), naviAddr.nodeId());
+	log("  attachedTo=%d:%d dir=(%d,%d) width=%.3f lanes same=%d opp=%d laneOffsetBase=%.3f\n",
+	    navi->attachedAreaId, navi->attachedNodeId, navi->dirX, navi->dirY,
+	    getNaviWidth(*navi), getNaviSameLanes(*navi), getNaviOppositeLanes(*navi), getLaneOffset(*navi));
+	log("  forwardSame=%d forwardLaneCount=%d reverseSame=%d reverseLaneCount=%d\n",
+	    forwardSame ? 1 : 0, forwardLaneCount, reverseSame ? 1 : 0, reverseLaneCount);
+	log("  naviPos=(%.3f, %.3f) sourcePos=(%.3f, %.3f) targetPos=(%.3f, %.3f)\n",
+	    naviPos.x, naviPos.y, sourceNode->x(), sourceNode->y(), targetNode->x(), targetNode->y());
+	logDir("pathDir", pathDir);
+	logDir("travelDir.current", currentTravelDir);
+	logDir("travelDir.sameFlag", vanillaTravelDir);
+
+	for(int group = 0; group < 2; group++){
+		bool sameDirection = group == 0;
+		int laneCount = sameDirection ? getNaviSameLanes(*navi) : getNaviOppositeLanes(*navi);
+		if(laneCount <= 0)
+			continue;
+		log("  group=%s laneCount=%d\n", sameDirection ? "same" : "opposite", laneCount);
+		for(int lane = 0; lane < laneCount; lane++){
+			rw::V3d point = getPreviewTrafficLanePointAtNavi(source, target, *navi, sameDirection, lane, z);
+			float offsetUnits = getPreviewTrafficLaneOffsetUnits(*navi, sameDirection, lane);
+			log("    lane=%d offsetUnits=%.3f point=(%.3f, %.3f, %.3f)\n",
+			    lane, offsetUnits, point.x, point.y, point.z);
+		}
+	}
+
+	bool foundTouchingCar = false;
+	float bestNearestDistance = FLT_MAX;
+	size_t bestNearestCarIndex = SIZE_MAX;
+	rw::V3d bestNearestPos = { 0.0f, 0.0f, 0.0f };
+	rw::V3d bestNearestTangent = { 0.0f, 1.0f, 0.0f };
+	for(size_t i = 0; i < gPreviewTrafficCars.size(); i++){
+		const PreviewTrafficCar &car = gPreviewTrafficCars[i];
+		if(!car.active)
+			continue;
+
+		float t = getPreviewTrafficCurveTForDistance(car, car.distanceOnCurve);
+		rw::V3d pos = quadraticBezierV3d(car.curveP0, car.curveP1, car.curveP2, t);
+		rw::V3d tangent = quadraticBezierTangent(car.curveP0, car.curveP1, car.curveP2, t);
+		tangent.z = 0.0f;
+		float tangentLen = length(tangent);
+		if(tangentLen > 0.001f)
+			tangent = scale(tangent, 1.0f/tangentLen);
+		else
+			tangent = { 0.0f, 1.0f, 0.0f };
+
+		float dx = pos.x - naviPos.x;
+		float dy = pos.y - naviPos.y;
+		float distanceToNavi = std::sqrt(dx*dx + dy*dy);
+		if(distanceToNavi < bestNearestDistance){
+			bestNearestDistance = distanceToNavi;
+			bestNearestCarIndex = i;
+			bestNearestPos = pos;
+			bestNearestTangent = tangent;
+		}
+
+		bool touches = car.currentLinkAddr.raw == naviAddr.raw || car.nextLinkAddr.raw == naviAddr.raw;
+		if(!touches)
+			continue;
+		foundTouchingCar = true;
+		log("  previewCar[%u] prev=%d:%d cur=%d:%d tgt=%d:%d curLink=%d nextLink=%d curSame=%d nextSame=%d curLane=%d/%d nextLane=%d/%d dist=%.3f/%.3f pos=(%.3f, %.3f, %.3f)\n",
+		    car.stableId,
+		    car.previous.areaId, car.previous.nodeId,
+		    car.current.areaId, car.current.nodeId,
+		    car.target.areaId, car.target.nodeId,
+		    car.currentLinkAddr.raw, car.nextLinkAddr.raw,
+		    car.currentSameDirection ? 1 : 0, car.nextSameDirection ? 1 : 0,
+		    car.currentLaneIndex, car.currentLaneCount,
+		    car.nextLaneIndex, car.nextLaneCount,
+		    car.distanceOnCurve, car.curveLength,
+		    pos.x, pos.y, pos.z);
+		logDir("    tangent", tangent);
+		dumpPreviewTrafficCarRouteDebug(car);
+	}
+
+	if(bestNearestCarIndex != SIZE_MAX && !foundTouchingCar){
+		const PreviewTrafficCar &car = gPreviewTrafficCars[bestNearestCarIndex];
+		log("  nearestPreviewCar[%u] distanceToNavi=%.3f prev=%d:%d cur=%d:%d tgt=%d:%d curLink=%d nextLink=%d curSame=%d nextSame=%d curLane=%d/%d nextLane=%d/%d pos=(%.3f, %.3f, %.3f)\n",
+		    car.stableId, bestNearestDistance,
+		    car.previous.areaId, car.previous.nodeId,
+		    car.current.areaId, car.current.nodeId,
+		    car.target.areaId, car.target.nodeId,
+		    car.currentLinkAddr.raw, car.nextLinkAddr.raw,
+		    car.currentSameDirection ? 1 : 0, car.nextSameDirection ? 1 : 0,
+		    car.currentLaneIndex, car.currentLaneCount,
+		    car.nextLaneIndex, car.nextLaneCount,
+		    bestNearestPos.x, bestNearestPos.y, bestNearestPos.z);
+		logDir("    tangent", bestNearestTangent);
+		dumpPreviewTrafficCarRouteDebug(car);
+	}
+}
+
+static void
+dumpPreviewTrafficCarRouteDebug(const PreviewTrafficCar &car)
+{
+	if(!car.active){
+		log("SAPaths debug previewCar[%u] inactive\n", car.stableId);
+		return;
+	}
+
+	auto dumpRouteSegment = [&](const char *label,
+	                            const NodeAddress &from, const NodeAddress &to,
+	                            CarPathLinkAddress naviAddr, bool sameDirection,
+	                            int laneIndex, int laneCount) {
+		DiskCarPathLink *navi = getPreviewTrafficNavi(naviAddr);
+		Node *fromNode = getNode(from);
+		Node *toNode = getNode(to);
+		if(navi == nil || fromNode == nil || toNode == nil){
+			log("  %s missing route data\n", label);
+			return;
+		}
+
+		rw::V3d travelDirCurrent = getPreviewTrafficTravelDirection(from, to, *navi);
+		rw::V3d travelDirSame = getPreviewTrafficTravelDirection(*navi, sameDirection);
+		float z = (fromNode->z() + toNode->z()) * 0.5f;
+		rw::V3d lanePoint = getPreviewTrafficLanePointAtNavi(from, to, *navi, sameDirection, laneIndex, z);
+
+		log("  %s %d:%d -> %d:%d navi=%d:%d same=%d lane=%d/%d attachedTo=%d:%d dir=(%d,%d) lanes same=%d opp=%d\n",
+		    label,
+		    from.areaId, from.nodeId, to.areaId, to.nodeId,
+		    naviAddr.areaId(), naviAddr.nodeId(),
+		    sameDirection ? 1 : 0, laneIndex, laneCount,
+		    navi->attachedAreaId, navi->attachedNodeId,
+		    navi->dirX, navi->dirY,
+		    getNaviSameLanes(*navi), getNaviOppositeLanes(*navi));
+		log("    %s travelDir.current=(%.3f, %.3f, %.3f) travelDir.sameFlag=(%.3f, %.3f, %.3f) lanePoint=(%.3f, %.3f, %.3f)\n",
+		    label,
+		    travelDirCurrent.x, travelDirCurrent.y, travelDirCurrent.z,
+		    travelDirSame.x, travelDirSame.y, travelDirSame.z,
+		    lanePoint.x, lanePoint.y, lanePoint.z);
+	};
+
+	auto dumpOutgoingChoices = [&](void) {
+		DiskCarPathLink *currentNavi = getPreviewTrafficNavi(car.currentLinkAddr);
+		Node *current = getNode(car.current);
+		AreaData *area = getArea(car.current.areaId);
+		if(currentNavi == nil || current == nil || area == nil || !area->loaded)
+			return;
+
+		rw::V3d wantedDir = getPreviewTrafficTravelDirection(car.previous, car.current, *currentNavi);
+		log("  outgoing candidates from %d:%d (wantedDir=(%.3f, %.3f, %.3f))\n",
+		    car.current.areaId, car.current.nodeId, wantedDir.x, wantedDir.y, wantedDir.z);
+		for(int li = 0; li < current->numLinks(); li++){
+			int slot = current->raw.baseLinkId + li;
+			if(slot < 0 || slot >= (int)area->nodeLinks.size())
+				continue;
+			NodeAddress targetAddr = area->nodeLinks[slot];
+			Node *target = getNode(targetAddr);
+			if(target == nil || target->waterNode())
+				continue;
+
+			CarPathLinkAddress naviAddr = { 0xFFFF };
+			DiskCarPathLink *navi = nil;
+			bool sameDirection = false;
+			int laneCount = 0;
+			if(!getPreviewDirectedVehicleLink(car.current, targetAddr, &naviAddr, &navi, &sameDirection, &laneCount) || laneCount <= 0)
+				continue;
+
+			rw::V3d candidateDir = getPreviewTrafficTravelDirection(car.current, targetAddr, *navi);
+			float score = dot(candidateDir, wantedDir);
+			float nodeBias = 0.0f;
+			if(target){
+				rw::V3d nodeDir = sub(getNodePosition(*target), getNodePosition(*current));
+				nodeDir.z = 0.0f;
+				float nodeLen = length(nodeDir);
+				if(nodeLen > 0.001f){
+					nodeDir = scale(nodeDir, 1.0f/nodeLen);
+					nodeBias = dot(nodeDir, wantedDir) * 0.2f;
+					score += nodeBias;
+				}
+			}
+			if(targetAddr.isValid() &&
+			   targetAddr.areaId == car.previous.areaId &&
+			   targetAddr.nodeId == car.previous.nodeId)
+				score -= 1.0f;
+
+			int mappedLane = mapPreviewTrafficLaneIndex(*currentNavi, car.currentSameDirection,
+				car.currentLaneIndex, *navi, sameDirection);
+			log("    -> %d:%d navi=%d:%d same=%d lanes=%d mappedLane=%d score=%.3f nodeBias=%.3f chosen=%d attachedTo=%d:%d\n",
+			    targetAddr.areaId, targetAddr.nodeId,
+			    naviAddr.areaId(), naviAddr.nodeId(),
+			    sameDirection ? 1 : 0, laneCount, mappedLane,
+			    score, nodeBias,
+			    (targetAddr.areaId == car.target.areaId && targetAddr.nodeId == car.target.nodeId) ? 1 : 0,
+			    navi->attachedAreaId, navi->attachedNodeId);
+		}
+	};
+
+	auto dumpIncomingChoices = [&](void) {
+		Node *current = getNode(car.current);
+		AreaData *area = getArea(car.current.areaId);
+		Node *outgoing = getNode(car.target);
+		if(current == nil || area == nil || !area->loaded)
+			return;
+
+		rw::V3d outgoingDir = { 0.0f, 1.0f, 0.0f };
+		if(outgoing){
+			outgoingDir = sub(getNodePosition(*outgoing), getNodePosition(*current));
+			outgoingDir.z = 0.0f;
+			float len = length(outgoingDir);
+			if(len > 0.001f)
+				outgoingDir = scale(outgoingDir, 1.0f/len);
+		}
+
+		log("  incoming candidates into %d:%d (outgoingDir=(%.3f, %.3f, %.3f))\n",
+		    car.current.areaId, car.current.nodeId, outgoingDir.x, outgoingDir.y, outgoingDir.z);
+		for(int li = 0; li < current->numLinks(); li++){
+			int slot = current->raw.baseLinkId + li;
+			if(slot < 0 || slot >= (int)area->nodeLinks.size())
+				continue;
+			NodeAddress prevAddr = area->nodeLinks[slot];
+			if(prevAddr.areaId == car.target.areaId && prevAddr.nodeId == car.target.nodeId)
+				continue;
+			Node *previous = getNode(prevAddr);
+			if(previous == nil || previous->waterNode())
+				continue;
+
+			CarPathLinkAddress naviAddr = { 0xFFFF };
+			DiskCarPathLink *navi = nil;
+			bool sameDirection = false;
+			int laneCount = 0;
+			if(!getPreviewDirectedVehicleLink(prevAddr, car.current, &naviAddr, &navi, &sameDirection, &laneCount) || laneCount <= 0)
+				continue;
+
+			rw::V3d incomingDir = sub(getNodePosition(*current), getNodePosition(*previous));
+			incomingDir.z = 0.0f;
+			float len = length(incomingDir);
+			if(len < 0.001f)
+				continue;
+			incomingDir = scale(incomingDir, 1.0f/len);
+
+			float score = dot(incomingDir, outgoingDir);
+			int mappedLane = mapPreviewTrafficLaneIndex(*getPreviewTrafficNavi(car.nextLinkAddr), car.nextSameDirection,
+				car.nextLaneIndex, *navi, sameDirection);
+			log("    <- %d:%d navi=%d:%d same=%d lanes=%d mappedLane=%d score=%.3f chosen=%d attachedTo=%d:%d\n",
+			    prevAddr.areaId, prevAddr.nodeId,
+			    naviAddr.areaId(), naviAddr.nodeId(),
+			    sameDirection ? 1 : 0, laneCount, mappedLane,
+			    score,
+			    (prevAddr.areaId == car.previous.areaId && prevAddr.nodeId == car.previous.nodeId) ? 1 : 0,
+			    navi->attachedAreaId, navi->attachedNodeId);
+		}
+	};
+
+	log("SAPaths debug previewCar[%u] route prev=%d:%d cur=%d:%d tgt=%d:%d curLink=%d nextLink=%d curSame=%d nextSame=%d curLane=%d/%d nextLane=%d/%d reverse=%d curveLen=%.3f dist=%.3f\n",
+	    car.stableId,
+	    car.previous.areaId, car.previous.nodeId,
+	    car.current.areaId, car.current.nodeId,
+	    car.target.areaId, car.target.nodeId,
+	    car.currentLinkAddr.raw, car.nextLinkAddr.raw,
+	    car.currentSameDirection ? 1 : 0, car.nextSameDirection ? 1 : 0,
+	    car.currentLaneIndex, car.currentLaneCount,
+	    car.nextLaneIndex, car.nextLaneCount,
+	    car.traverseReversed ? 1 : 0,
+	    car.curveLength, car.distanceOnCurve);
+	dumpRouteSegment("current", car.previous, car.current, car.currentLinkAddr,
+	                 car.currentSameDirection, car.currentLaneIndex, car.currentLaneCount);
+	dumpRouteSegment("next", car.current, car.target, car.nextLinkAddr,
+	                 car.nextSameDirection, car.nextLaneIndex, car.nextLaneCount);
+	log("  curveP0=(%.3f, %.3f, %.3f) curveP1=(%.3f, %.3f, %.3f) curveP2=(%.3f, %.3f, %.3f)\n",
+	    car.curveP0.x, car.curveP0.y, car.curveP0.z,
+	    car.curveP1.x, car.curveP1.y, car.curveP1.z,
+	    car.curveP2.x, car.curveP2.y, car.curveP2.z);
+	if(car.hasLastRenderedPos)
+		log("  lastMotionDir=(%.3f, %.3f, %.3f)\n",
+		    car.lastMotionDir.x, car.lastMotionDir.y, car.lastMotionDir.z);
+	dumpOutgoingChoices();
+	dumpIncomingChoices();
 }
 
 static int
 mapPreviewTrafficLaneIndex(const DiskCarPathLink &fromNavi, bool fromSameDirection, int fromLaneIndex,
                            const DiskCarPathLink &toNavi, bool toSameDirection)
 {
+	(void)fromNavi;
+	(void)fromSameDirection;
+
 	int toLaneCount = toSameDirection ? getNaviSameLanes(toNavi) : getNaviOppositeLanes(toNavi);
 	if(toLaneCount <= 0)
 		return 0;
-
-	float wantedOffset = getPreviewTrafficLaneOffsetUnits(fromNavi, fromSameDirection, fromLaneIndex);
-	int bestLane = 0;
-	float bestDistance = 999999.0f;
-	for(int lane = 0; lane < toLaneCount; lane++){
-		float candidateOffset = getPreviewTrafficLaneOffsetUnits(toNavi, toSameDirection, lane);
-		float distance = std::fabs(candidateOffset - wantedOffset);
-		if(distance < bestDistance){
-			bestDistance = distance;
-			bestLane = lane;
-		}
-	}
-	return bestLane;
+	return clamp(fromLaneIndex, 0, toLaneCount - 1);
 }
 
 static bool
@@ -3510,7 +3860,7 @@ getPreviewTrafficLaneEndpoint(const NodeAddress &from, const NodeAddress &to,
 			laneIndex = clamp(laneIndex, 0, laneCount - 1);
 	}
 
-	*outPoint = getPreviewTrafficLanePointAtNavi(*navi, sameDirection, laneIndex, z);
+	*outPoint = getPreviewTrafficLanePointAtNavi(from, to, *navi, sameDirection, laneIndex, z);
 	return true;
 }
 
@@ -3834,8 +4184,6 @@ pickPreviewParkedSpawnState(uint32 &seed, PreviewParkedSpawnState *outState, flo
 			Node &node = area->nodes[ni];
 			if(node.numLinks() <= 0 || node.waterNode() || node.width() < 5.0f)
 				continue;
-			if(node.highway() && !node.notHighway())
-				continue;
 
 			for(int li = 0; li < node.numLinks(); li++){
 				int slot = node.raw.baseLinkId + li;
@@ -3853,12 +4201,10 @@ pickPreviewParkedSpawnState(uint32 &seed, PreviewParkedSpawnState *outState, flo
 				if(!getPreviewDirectedVehicleLink(node.address(), targetAddr, &naviAddr, &navi, &sameDirection, &laneCount) ||
 				   navi == nil || laneCount <= 0)
 					continue;
-				if(slot < (int)area->intersections.size() && getRoadCross(area->intersections[slot]))
-					continue;
-				if(node.numLinks() > 2 || target->numLinks() > 2)
-					continue;
+				bool roadCross = slot < (int)area->intersections.size() &&
+					getRoadCross(area->intersections[slot]);
 
-				rw::V3d baseDir = getPreviewTrafficTravelDirection(*navi, sameDirection);
+				rw::V3d baseDir = getPreviewTrafficTravelDirection(node.address(), targetAddr, *navi);
 				rw::V3d right = cross(baseDir, { 0.0f, 0.0f, 1.0f });
 				float rightLen = length(right);
 				if(rightLen < 0.001f)
@@ -3870,7 +4216,7 @@ pickPreviewParkedSpawnState(uint32 &seed, PreviewParkedSpawnState *outState, flo
 				rw::V3d segment = sub(endPos, startPos);
 				segment.z = 0.0f;
 				float segmentLength = length(segment);
-				if(segmentLength < 10.0f)
+				if(segmentLength < 6.0f)
 					continue;
 				float nodeWidth = node.width();
 				float targetWidth = target->width();
@@ -3916,6 +4262,10 @@ pickPreviewParkedSpawnState(uint32 &seed, PreviewParkedSpawnState *outState, flo
 						weight *= 1.9f;
 					if(node.highway())
 						weight *= 0.20f;
+					if(roadCross)
+						weight *= 0.18f;
+					if(node.numLinks() > 2 || target->numLinks() > 2)
+						weight *= 0.30f;
 					if(node.width() < 7.0f)
 						weight *= 1.25f;
 					if(totalLanes <= 2)
@@ -4064,7 +4414,7 @@ chooseNextPreviewTrafficLinkFromCurrentLink(const NodeAddress &currentAddr, cons
 	if(current == nil || area == nil || !area->loaded || current->numLinks() <= 0)
 		return false;
 
-	rw::V3d wantedDir = getPreviewTrafficTravelDirection(*currentNavi, currentSameDirection);
+	rw::V3d wantedDir = getPreviewTrafficTravelDirection(previousAddr, currentAddr, *currentNavi);
 	float bestScore = -999999.0f;
 	bool found = false;
 	for(int li = 0; li < current->numLinks(); li++){
@@ -4083,7 +4433,7 @@ chooseNextPreviewTrafficLinkFromCurrentLink(const NodeAddress &currentAddr, cons
 		if(!getPreviewDirectedVehicleLink(currentAddr, targetAddr, &naviAddr, &navi, &sameDirection, &laneCount) || laneCount <= 0)
 			continue;
 
-		rw::V3d candidateDir = getPreviewTrafficTravelDirection(*navi, sameDirection);
+		rw::V3d candidateDir = getPreviewTrafficTravelDirection(currentAddr, targetAddr, *navi);
 		float score = dot(candidateDir, wantedDir);
 
 		if(targetAddr.isValid() &&
@@ -4612,6 +4962,19 @@ GetSelectedNodePosition(rw::V3d *pos)
 	return true;
 }
 
+static rw::V3d
+quantizeNodePosition(const rw::V3d &pos)
+{
+	int16 qx = (int16)(pos.x / PATH_POS_SCALE);
+	int16 qy = (int16)(pos.y / PATH_POS_SCALE);
+	int16 qz = (int16)(pos.z / PATH_POS_SCALE);
+	return {
+		qx * PATH_POS_SCALE,
+		qy * PATH_POS_SCALE,
+		qz * PATH_POS_SCALE
+	};
+}
+
 bool
 SetSelectedNodePosition(const rw::V3d &pos, bool notifyChange)
 {
@@ -4620,23 +4983,24 @@ SetSelectedNodePosition(const rw::V3d &pos, bool notifyChange)
 		return false;
 
 	rw::V3d current = getNodePosition(*selectedNode);
-	if(length(sub(current, pos)) < 0.0001f)
+	rw::V3d quantizedPos = quantizeNodePosition(pos);
+	rw::V3d delta = sub(quantizedPos, current);
+	if(length(delta) < 0.0001f)
 		return false;
 
 	gBlockedCrossAreaNodeMove = false;
 	gBlockedCrossAreaNaviMove = false;
-	if(!positionBelongsToArea(selectedNode->ownerAreaId, pos.x, pos.y)){
+	if(!positionBelongsToArea(selectedNode->ownerAreaId, quantizedPos.x, quantizedPos.y)){
 		gBlockedCrossAreaNodeMove = true;
 		return false;
 	}
 
-	rw::V3d delta = sub(pos, current);
 	if(isVehicleNode(selectedNode) && !canMoveAttachedNavisWithNode(selectedNode->address(), delta)){
 		gBlockedCrossAreaNaviMove = true;
 		return false;
 	}
 
-	selectedNode->setPosition(pos.x, pos.y, pos.z);
+	selectedNode->setPosition(quantizedPos.x, quantizedPos.y, quantizedPos.z);
 	setAreaDirty(selectedNode->ownerAreaId, notifyChange);
 	if(isVehicleNode(selectedNode))
 		moveAttachedNavisWithNode(selectedNode->address(), delta);
@@ -4727,6 +5091,9 @@ drawNodeSet(bool vehicles)
 	Ray ray;
 	ray.start = TheCamera.m_position;
 	ray.dir = normalize(TheCamera.m_mouseDir);
+	static float hoveredNodeHitT = FLT_MAX;
+	if(hoveredNode == nil)
+		hoveredNodeHitT = FLT_MAX;
 
 	for(int areaId = 0; areaId < NUM_PATH_AREAS; areaId++){
 		AreaData &area = gAreas[areaId];
@@ -4745,8 +5112,10 @@ drawNodeSet(bool vehicles)
 			CSphere sphere;
 			sphere.center = p;
 			sphere.radius = NODE_DRAW_RADIUS;
-			if(SphereIntersect(sphere, ray)){
+			float hitT = 0.0f;
+			if(IntersectRaySphere(ray, sphere, &hitT) && hitT >= 0.0f && hitT < hoveredNodeHitT){
 				hoveredNode = &node;
+				hoveredNodeHitT = hitT;
 				c = cyan;
 			}
 			drawNodeSphere(p, c, vehicles);
@@ -4814,6 +5183,191 @@ drawVehicleLanes(void)
 				for(int l = 0; l < getNaviOppositeLanes(navi); l++)
 					RenderLine(add(r1, scale(right, LANE_WIDTH*l)), add(r2, scale(right, LANE_WIDTH*l)), green, green);
 			}
+		}
+	}
+}
+
+static void
+drawArrow(const rw::V3d &start, const rw::V3d &dir, float lengthUnits, rw::RGBA col)
+{
+	rw::V3d n = dir;
+	n.z = 0.0f;
+	float len = length(n);
+	if(len < 0.001f)
+		return;
+	n = scale(n, 1.0f/len);
+
+	rw::V3d end = add(start, scale(n, lengthUnits));
+	RenderLine(start, end, col, col);
+
+	rw::V3d right = { n.y, -n.x, 0.0f };
+	rw::V3d headBase = add(start, scale(n, lengthUnits*0.72f));
+	float headSize = min(lengthUnits*0.28f, 3.0f);
+	RenderLine(end, add(headBase, scale(right, headSize*0.5f)), col, col);
+	RenderLine(end, sub(headBase, scale(right, headSize*0.5f)), col, col);
+}
+
+static void
+drawPreviewTrafficLinkOverlayOneDirection(const NodeAddress &source, const NodeAddress &target,
+                                          CarPathLinkAddress naviAddr, rw::RGBA laneCol, rw::RGBA arrowCol)
+{
+	DiskCarPathLink *navi = getPreviewTrafficNavi(naviAddr);
+	Node *sourceNode = getNode(source);
+	Node *targetNode = getNode(target);
+	if(navi == nil || sourceNode == nil || targetNode == nil)
+		return;
+
+	bool sameDirection = false;
+	int laneCount = 0;
+	if(!getPreviewDirectedVehicleLink(source, target, nil, nil, &sameDirection, &laneCount) || laneCount <= 0)
+		return;
+
+	float z = (sourceNode->z() + targetNode->z()) * 0.5f + 0.35f;
+
+	rw::V3d dir = getPreviewTrafficTravelDirection(source, target, *navi);
+	for(int lane = 0; lane < laneCount; lane++){
+		rw::V3d point = getPreviewTrafficLanePointAtNavi(source, target, *navi, sameDirection, lane, z);
+		CSphere sphere;
+		sphere.center = point;
+		sphere.radius = 0.75f;
+		RenderSphereAsCross(&sphere, laneCol, nil);
+		drawArrow(point, dir, 7.0f, arrowCol);
+	}
+}
+
+static float
+distancePointToSegment2D(const rw::V3d &p, const rw::V3d &a, const rw::V3d &b)
+{
+	rw::V3d ab = sub(b, a);
+	ab.z = 0.0f;
+	float abLenSq = dot(ab, ab);
+	if(abLenSq < 0.0001f){
+		rw::V3d delta = sub(p, a);
+		delta.z = 0.0f;
+		return length(delta);
+	}
+
+	rw::V3d ap = sub(p, a);
+	ap.z = 0.0f;
+	float t = clamp(dot(ap, ab) / abLenSq, 0.0f, 1.0f);
+	rw::V3d closest = add(a, scale(ab, t));
+	rw::V3d delta = sub(p, closest);
+	delta.z = 0.0f;
+	return length(delta);
+}
+
+static void
+drawPreviewTrafficCarDebugOverlay(const PreviewTrafficCar &car, rw::RGBA tangentCol, rw::RGBA frameCol)
+{
+	if(!car.active || car.clump == nil)
+		return;
+
+	float t = getPreviewTrafficCurveTForDistance(car, car.distanceOnCurve);
+	rw::V3d pos = quadraticBezierV3d(car.curveP0, car.curveP1, car.curveP2, t);
+	rw::V3d tangent = quadraticBezierTangent(car.curveP0, car.curveP1, car.curveP2, t);
+	tangent.z = 0.0f;
+	if(length(tangent) >= 0.001f)
+		tangent = normalize(tangent);
+	else
+		tangent = { 0.0f, 1.0f, 0.0f };
+
+	rw::V3d frameForward = car.clump->getFrame()->matrix.up;
+	frameForward.z = 0.0f;
+	if(length(frameForward) >= 0.001f)
+		frameForward = normalize(frameForward);
+	else
+		frameForward = tangent;
+
+	CSphere sphere;
+	sphere.center = pos;
+	sphere.radius = 0.9f;
+	RenderSphereAsCross(&sphere, tangentCol, nil);
+	drawArrow(pos, tangent, 9.0f, tangentCol);
+	drawArrow(pos, frameForward, 5.5f, frameCol);
+	if(car.hasLastRenderedPos && length(car.lastMotionDir) >= 0.001f)
+		drawArrow(pos, car.lastMotionDir, 7.0f, { 255, 160, 0, 255 });
+}
+
+static void
+drawSelectedPreviewTrafficCarsDebugOverlay(const NodeAddress &source, const NodeAddress &target,
+                                           CarPathLinkAddress naviAddr)
+{
+	DiskCarPathLink *navi = getPreviewTrafficNavi(naviAddr);
+	Node *sourceNode = getNode(source);
+	Node *targetNode = getNode(target);
+	if(navi == nil || sourceNode == nil || targetNode == nil)
+		return;
+
+	float z = (sourceNode->z() + targetNode->z()) * 0.5f;
+	rw::V3d laneA = getPreviewTrafficLanePointAtNavi(source, target, *navi, false, 0, z);
+	rw::V3d laneB = laneA;
+	bool hasLaneSegment = false;
+	bool sameDirection = false;
+	int laneCount = 0;
+	if(getPreviewDirectedVehicleLink(source, target, nil, nil, &sameDirection, &laneCount) && laneCount > 0){
+		laneA = getPreviewTrafficLanePointAtNavi(source, target, *navi, sameDirection, 0, z);
+		laneB = getPreviewTrafficLanePointAtNavi(source, target, *navi, sameDirection, laneCount - 1, z);
+		hasLaneSegment = true;
+	}
+
+	bool foundTouching = false;
+	float bestDistance = 999999.0f;
+	const PreviewTrafficCar *nearest = nil;
+	for(size_t i = 0; i < gPreviewTrafficCars.size(); i++){
+		const PreviewTrafficCar &car = gPreviewTrafficCars[i];
+		if(!car.active || car.clump == nil)
+			continue;
+		if(car.currentLinkAddr.raw == naviAddr.raw || car.nextLinkAddr.raw == naviAddr.raw){
+			drawPreviewTrafficCarDebugOverlay(car, red, green);
+			foundTouching = true;
+			continue;
+		}
+		if(hasLaneSegment){
+			float t = getPreviewTrafficCurveTForDistance(car, car.distanceOnCurve);
+			rw::V3d pos = quadraticBezierV3d(car.curveP0, car.curveP1, car.curveP2, t);
+			float distance = distancePointToSegment2D(pos, laneA, laneB);
+			if(distance < bestDistance){
+				bestDistance = distance;
+				nearest = &car;
+			}
+		}
+	}
+
+	if(!foundTouching && nearest != nil)
+		drawPreviewTrafficCarDebugOverlay(*nearest, red, green);
+}
+
+static void
+drawSelectedPreviewTrafficDebugOverlay(void)
+{
+	if(selectedNode == nil || !isVehicleNode(selectedNode))
+		return;
+
+	AreaData *area = getArea(selectedNode->ownerAreaId);
+	if(area == nil || gSelectedLinkIndex < 0 || gSelectedLinkIndex >= selectedNode->numLinks())
+		return;
+
+	int slot = selectedNode->raw.baseLinkId + gSelectedLinkIndex;
+	if(slot < 0 || slot >= (int)area->nodeLinks.size() || slot >= (int)area->naviLinks.size())
+		return;
+
+	CarPathLinkAddress naviAddr = area->naviLinks[slot];
+	if(!naviAddr.isValid())
+		return;
+
+	NodeAddress source = selectedNode->address();
+	NodeAddress target = area->nodeLinks[slot];
+	drawPreviewTrafficLinkOverlayOneDirection(source, target, naviAddr, cyan, white);
+	drawSelectedPreviewTrafficCarsDebugOverlay(source, target, naviAddr);
+
+	uint16 reciprocalAreaId = 0xFFFF;
+	int reciprocalSlot = -1;
+	if(findReciprocalLinkSlot(source, target, &reciprocalAreaId, &reciprocalSlot)){
+		AreaData *recArea = getArea(reciprocalAreaId);
+		if(recArea && reciprocalSlot >= 0 && reciprocalSlot < (int)recArea->naviLinks.size()){
+			CarPathLinkAddress recNaviAddr = recArea->naviLinks[reciprocalSlot];
+			if(recNaviAddr.isValid())
+				drawPreviewTrafficLinkOverlayOneDirection(target, source, recNaviAddr, yellow, magenta);
 		}
 	}
 }
@@ -5217,14 +5771,31 @@ updatePreviewTrafficCarCurve(PreviewTrafficCar &car)
 	car.currentLaneIndex = clamp(car.currentLaneIndex, 0, car.currentLaneCount - 1);
 	car.nextLaneIndex = clamp(car.nextLaneIndex, 0, car.nextLaneCount - 1);
 
-	float startZ = (previous->z() + current->z()) * 0.5f;
-	float endZ = (current->z() + target->z()) * 0.5f;
+	rw::V3d currentDir = getPreviewTrafficTravelDirection(car.previous, car.current, *currentNavi);
+	rw::V3d nextDir = getPreviewTrafficTravelDirection(car.current, car.target, *nextNavi);
+	float startZ, endZ;
+	rw::V3d startDir, endDir;
+	if(!car.traverseReversed){
+		startZ = (previous->z() + current->z()) * 0.5f;
+		endZ = (current->z() + target->z()) * 0.5f;
+		car.curveP0 = getPreviewTrafficLanePointAtNavi(car.previous, car.current, *currentNavi,
+			car.currentSameDirection, car.currentLaneIndex, startZ);
+		car.curveP2 = getPreviewTrafficLanePointAtNavi(car.current, car.target, *nextNavi,
+			car.nextSameDirection, car.nextLaneIndex, endZ);
+		startDir = currentDir;
+		endDir = nextDir;
+	}else{
+		startZ = (current->z() + target->z()) * 0.5f;
+		endZ = (previous->z() + current->z()) * 0.5f;
+		car.curveP0 = getPreviewTrafficLanePointAtNavi(car.current, car.target, *nextNavi,
+			car.nextSameDirection, car.nextLaneIndex, startZ);
+		car.curveP2 = getPreviewTrafficLanePointAtNavi(car.previous, car.current, *currentNavi,
+			car.currentSameDirection, car.currentLaneIndex, endZ);
+		startDir = nextDir;
+		endDir = currentDir;
+	}
 	float controlZ = (startZ + endZ) * 0.5f;
-	car.curveP0 = getPreviewTrafficLanePointAtNavi(*currentNavi, car.currentSameDirection, car.currentLaneIndex, startZ);
-	car.curveP2 = getPreviewTrafficLanePointAtNavi(*nextNavi, car.nextSameDirection, car.nextLaneIndex, endZ);
-	rw::V3d currentDir = getPreviewTrafficTravelDirection(*currentNavi, car.currentSameDirection);
-	rw::V3d nextDir = getPreviewTrafficTravelDirection(*nextNavi, car.nextSameDirection);
-	car.curveP1 = getPreviewTrafficCurveControlPoint(car.curveP0, currentDir, car.curveP2, nextDir, controlZ);
+	car.curveP1 = getPreviewTrafficCurveControlPoint(car.curveP0, startDir, car.curveP2, endDir, controlZ);
 	buildPreviewTrafficCurveSamples(car);
 	return true;
 }
@@ -5317,7 +5888,8 @@ choosePreviewTrafficSpeed(const PreviewVehicleAssets &assets, const Node *curren
 	}
 	if(maxSpeed < minSpeed)
 		maxSpeed = minSpeed;
-	return minSpeed + previewSeedFloat01(seed) * (maxSpeed - minSpeed);
+	return (minSpeed + previewSeedFloat01(seed) * (maxSpeed - minSpeed)) *
+		PREVIEW_TRAFFIC_SPEED_MULTIPLIER;
 }
 
 static float
@@ -5344,8 +5916,13 @@ getPreviewTrafficSegmentSpeedScale(const PreviewTrafficCar &car)
 	else if(laneCount <= 2 || roadWidth <= 7.5f)
 		scale *= 0.90f;
 
-	rw::V3d currentDir = getPreviewTrafficTravelDirection(*currentNavi, car.currentSameDirection);
-	rw::V3d nextDir = getPreviewTrafficTravelDirection(*nextNavi, car.nextSameDirection);
+	rw::V3d currentDir = getPreviewTrafficTravelDirection(car.previous, car.current, *currentNavi);
+	rw::V3d nextDir = getPreviewTrafficTravelDirection(car.current, car.target, *nextNavi);
+	if(car.traverseReversed){
+		rw::V3d tmp = currentDir;
+		currentDir = nextDir;
+		nextDir = tmp;
+	}
 	float turnDot = clamp(dot(currentDir, nextDir), -1.0f, 1.0f);
 	if(turnDot < 0.35f)
 		scale *= 0.58f;
@@ -5385,6 +5962,10 @@ resetPreviewTrafficCar(PreviewTrafficCar &car, uint32 seed)
 	car.currentLaneCount = 0;
 	car.nextLaneIndex = 0;
 	car.nextLaneCount = 0;
+	car.traverseReversed = false;
+	car.hasLastRenderedPos = false;
+	car.lastRenderedPos = { 0.0f, 0.0f, 0.0f };
+	car.lastMotionDir = { 0.0f, 0.0f, 0.0f };
 	car.colorIndices[0] = 1;
 	car.colorIndices[1] = 1;
 	car.colorIndices[2] = 1;
@@ -5434,6 +6015,12 @@ resetPreviewTrafficCar(PreviewTrafficCar &car, uint32 seed)
 		car.currentLaneCount = currentLaneCount;
 		car.nextLaneIndex = nextLaneIndex;
 		car.nextLaneCount = nextLaneCount;
+		DiskCarPathLink *resolvedCurrentNavi = getPreviewTrafficNavi(car.currentLinkAddr);
+		DiskCarPathLink *resolvedNextNavi = getPreviewTrafficNavi(car.nextLinkAddr);
+		car.traverseReversed =
+			resolvedCurrentNavi && resolvedNextNavi &&
+			isPreviewTrafficSegmentTravelReversed(car.previous, car.current, *resolvedCurrentNavi) &&
+			isPreviewTrafficSegmentTravelReversed(car.current, car.target, *resolvedNextNavi);
 		foundPathState = true;
 		break;
 	}
@@ -5501,7 +6088,7 @@ resetPreviewParkedCar(PreviewParkedCar &car, uint32 seed)
 	}
 
 	PreviewParkedSpawnState spawn = {};
-	if(!pickPreviewParkedSpawnState(car.seed, &spawn, car.preferredSpawnDistance, 12.0f))
+	if(!pickPreviewParkedSpawnState(car.seed, &spawn, car.preferredSpawnDistance, 5.0f))
 		return false;
 
 	car.current = spawn.current;
@@ -5544,6 +6131,44 @@ resetPreviewParkedCar(PreviewParkedCar &car, uint32 seed)
 static void
 advancePreviewTrafficCarSegment(PreviewTrafficCar &car)
 {
+	if(car.traverseReversed){
+		NodeAddress oldPrevious = car.previous;
+		NodeAddress oldCurrent = car.current;
+		CarPathLinkAddress oldCurrentLinkAddr = car.currentLinkAddr;
+		bool oldCurrentSameDirection = car.currentSameDirection;
+		int oldCurrentLaneIndex = car.currentLaneIndex;
+		int oldCurrentLaneCount = car.currentLaneCount;
+
+		car.target = oldCurrent;
+		car.current = oldPrevious;
+		car.nextLinkAddr = oldCurrentLinkAddr;
+		car.nextSameDirection = oldCurrentSameDirection;
+		car.nextLaneIndex = oldCurrentLaneIndex;
+		car.nextLaneCount = oldCurrentLaneCount;
+		car.previous = { 0xFFFF, 0xFFFF };
+		car.currentLinkAddr = { 0xFFFF };
+		car.currentSameDirection = false;
+		car.currentLaneIndex = 0;
+		car.currentLaneCount = 0;
+		car.distanceOnCurve = 0.0f;
+
+		if(!choosePreviewIncomingTrafficLink(car.current, car.target, car.seed,
+			&car.previous, &car.currentLinkAddr, &car.currentLaneIndex,
+			car.nextLaneIndex, car.nextLaneCount, &car.currentLaneCount, &car.currentSameDirection)){
+			car.active = false;
+			return;
+		}
+
+		DiskCarPathLink *resolvedCurrentNavi = getPreviewTrafficNavi(car.currentLinkAddr);
+		DiskCarPathLink *resolvedNextNavi = getPreviewTrafficNavi(car.nextLinkAddr);
+		car.traverseReversed =
+			resolvedCurrentNavi && resolvedNextNavi &&
+			isPreviewTrafficSegmentTravelReversed(car.previous, car.current, *resolvedCurrentNavi) &&
+			isPreviewTrafficSegmentTravelReversed(car.current, car.target, *resolvedNextNavi);
+		updatePreviewTrafficCarCurve(car);
+		return;
+	}
+
 	car.previous = car.current;
 	car.current = car.target;
 	car.currentLinkAddr = car.nextLinkAddr;
@@ -5557,8 +6182,15 @@ advancePreviewTrafficCarSegment(PreviewTrafficCar &car)
 		&car.target, &car.nextLinkAddr, &car.nextLaneIndex, &car.nextLaneCount, &car.nextSameDirection,
 		car.currentLaneIndex, car.currentLaneCount))
 		car.active = false;
-	else
+	else{
+		DiskCarPathLink *resolvedCurrentNavi = getPreviewTrafficNavi(car.currentLinkAddr);
+		DiskCarPathLink *resolvedNextNavi = getPreviewTrafficNavi(car.nextLinkAddr);
+		car.traverseReversed =
+			resolvedCurrentNavi && resolvedNextNavi &&
+			isPreviewTrafficSegmentTravelReversed(car.previous, car.current, *resolvedCurrentNavi) &&
+			isPreviewTrafficSegmentTravelReversed(car.current, car.target, *resolvedNextNavi);
 		updatePreviewTrafficCarCurve(car);
+	}
 }
 
 static void
@@ -5623,10 +6255,10 @@ updatePreviewTrafficCar(PreviewTrafficCar &car)
 
 	float segmentSpeedScale = getPreviewTrafficSegmentSpeedScale(car);
 	float remainingDistance = car.speed * segmentSpeedScale * gSaCarPathTrafficSpeedScale * timeStep;
-	float lightStopDistance = shouldPreviewTrafficCarStopForLight(car) ? getPreviewTrafficLightStopDistance(car) : car.curveLength;
-	float spacingStopDistance = getPreviewTrafficSpacingStopDistance(car);
-	float yieldStopDistance = shouldPreviewTrafficCarYieldAtJunction(car) ? getPreviewTrafficYieldStopDistance(car) : car.curveLength;
 	for(int steps = 0; steps < 8 && remainingDistance > 0.0f; steps++){
+		float lightStopDistance = shouldPreviewTrafficCarStopForLight(car) ? getPreviewTrafficLightStopDistance(car) : car.curveLength;
+		float spacingStopDistance = getPreviewTrafficSpacingStopDistance(car);
+		float yieldStopDistance = shouldPreviewTrafficCarYieldAtJunction(car) ? getPreviewTrafficYieldStopDistance(car) : car.curveLength;
 		float distanceLimit = min(car.curveLength, min(lightStopDistance, min(spacingStopDistance, yieldStopDistance)));
 		float distanceLeftOnCurve = max(0.0f, distanceLimit - car.distanceOnCurve);
 		if(distanceLeftOnCurve <= 0.001f){
@@ -5676,6 +6308,17 @@ updatePreviewTrafficCar(PreviewTrafficCar &car)
 	world.at = groundNormal;
 	world.pos = pos;
 	world.pos.z += PREVIEW_CAR_Z_OFFSET;
+	rw::V3d planarPos = world.pos;
+	planarPos.z = 0.0f;
+	if(car.hasLastRenderedPos){
+		rw::V3d motion = sub(planarPos, car.lastRenderedPos);
+		motion.z = 0.0f;
+		float motionLen = length(motion);
+		if(motionLen >= 0.001f)
+			car.lastMotionDir = scale(motion, 1.0f/motionLen);
+	}
+	car.lastRenderedPos = planarPos;
+	car.hasLastRenderedPos = true;
 	car.clump->getFrame()->matrix = world;
 	car.clump->getFrame()->updateObjects();
 }
@@ -5807,6 +6450,7 @@ RenderCarPaths(void)
 		return;
 	drawNodeSet(true);
 	drawVehicleLanes();
+	drawSelectedPreviewTrafficDebugOverlay();
 	renderPreviewTrafficCars();
 	renderPreviewParkedCars();
 }
@@ -6215,11 +6859,29 @@ drawLinksEditor(void)
 				ImGui::SetItemTooltip("Navi nodes are lane waypoints placed between two path nodes.\n"
 					"They define road width, lane count, and traffic direction\n"
 					"for the road segment between this node and the target.");
+				if(ImGui::Button("Dump Preview Traffic Debug")){
+					dumpPreviewTrafficLinkDebug(sourceAddr, targetAddr, slot, naviAddr);
+					if(hasReciprocal){
+						AreaData *recArea = getArea(reciprocalAreaId);
+						if(recArea && reciprocalSlot >= 0 &&
+						   reciprocalSlot < (int)recArea->naviLinks.size()){
+							CarPathLinkAddress recNaviAddr = recArea->naviLinks[reciprocalSlot];
+							NodeAddress reciprocalSource = targetAddr;
+							NodeAddress reciprocalTarget = sourceAddr;
+							if(recNaviAddr.isValid())
+								dumpPreviewTrafficLinkDebug(reciprocalSource, reciprocalTarget, reciprocalSlot, recNaviAddr);
+						}
+					}
+				}
+				ImGui::SetItemTooltip("Logs the selected link, its reciprocal direction when present, and any active or nearest preview cars.\nUse this on a problematic highway segment, then inspect the app log/terminal output.");
 
 				float naviPos[2] = { navi.x * NAVI_POS_SCALE, navi.y * NAVI_POS_SCALE };
 				if(ImGui::DragFloat2("Navi Pos", naviPos, 0.125f)){
 					navi.x = (int16)(naviPos[0] / NAVI_POS_SCALE);
 					navi.y = (int16)(naviPos[1] / NAVI_POS_SCALE);
+					Node *attached = getNode({ navi.attachedAreaId, navi.attachedNodeId });
+					if(attached)
+						alignNaviDirectionToAttachedNode(navi, *attached);
 					markAreaDirty(naviAddr.areaId());
 				}
 				ImGui::SetItemTooltip("2D position (X, Y) of this navi waypoint.\nUsually placed at the midpoint between two path nodes.\nQuantized to 0.125 units.");
