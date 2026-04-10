@@ -743,7 +743,24 @@ countLiveLodChildren(ObjectInst *lodInst, ObjectInst *ignoreInst)
 void
 ObjectInst::UpdateMatrix(void)
 {
-	m_matrix.rotate(conj(m_rotation), rw::COMBINEREPLACE);
+	if(isSA() && std::fabs(m_rotation.x) <= 0.05f && std::fabs(m_rotation.y) <= 0.05f){
+		// Match SA's IPL loader: quaternions with tiny X/Y components are treated
+		// as heading-only instead of full 3D rotations.
+		float w = m_rotation.w;
+		if(w < -1.0f) w = -1.0f;
+		if(w > 1.0f) w = 1.0f;
+		float heading = acosf(w) * (m_rotation.z < 0.0f ? 2.0f : -2.0f);
+		float s = sinf(heading);
+		float c = cosf(heading);
+
+		m_matrix.setIdentity();
+		m_matrix.right = { c, s, 0.0f };
+		m_matrix.up = { -s, c, 0.0f };
+		m_matrix.at = { 0.0f, 0.0f, 1.0f };
+		m_matrix.flags = rw::Matrix::TYPEORTHONORMAL;
+	}else{
+		m_matrix.rotate(conj(m_rotation), rw::COMBINEREPLACE);
+	}
 	m_matrix.translate(&m_translation, rw::COMBINEPOSTCONCAT);
 }
 
