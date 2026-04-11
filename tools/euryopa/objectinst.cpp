@@ -987,19 +987,19 @@ DeleteSelected(void)
 {
 	// Collect all instances that will be deleted (including LOD cascades)
 	// First, gather the selected ones
-	ObjectInst *toDelete[64];
+	ObjectInst *toDelete[MAX_BATCH_OBJECTS];
 	int numToDelete = 0;
 	CPtrNode *p, *next;
 	for(p = selection.first; p; p = next){
 		next = p->next;
 		ObjectInst *inst = (ObjectInst*)p->item;
-		if(!inst->m_isDeleted && numToDelete < 64)
+		if(!inst->m_isDeleted && numToDelete < MAX_BATCH_OBJECTS)
 			toDelete[numToDelete++] = inst;
 	}
 	if(numToDelete == 0) return;
 
 	// Now delete them and collect ALL that got deleted (including LOD cascade)
-	ObjectInst *allDeleted[64];
+	ObjectInst *allDeleted[MAX_BATCH_OBJECTS];
 	int numAllDeleted = 0;
 
 	// Snapshot which are already deleted
@@ -1010,7 +1010,7 @@ DeleteSelected(void)
 	// Scan for all instances that are now deleted to record in undo
 	for(p = instances.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
-		if(inst->m_isDeleted && numAllDeleted < 64){
+		if(inst->m_isDeleted && numAllDeleted < MAX_BATCH_OBJECTS){
 			// Check if this was freshly deleted (it's in our set or cascaded)
 			// Simple approach: just record all deleted. On undo we undelete them.
 			// This is slightly broad but safe.
@@ -1631,7 +1631,7 @@ RenderPreviewObject(int objectId)
 }
 
 // Clipboard
-#define MAX_CLIPBOARD 64
+#define MAX_CLIPBOARD MAX_BATCH_OBJECTS
 static ObjectInst *clipboard[MAX_CLIPBOARD];
 static int clipboardCount;
 
@@ -1729,7 +1729,7 @@ UndoRecordDelete(ObjectInst **insts, int num)
 	UndoAction a;
 	memset(&a, 0, sizeof(a));
 	a.type = UNDO_DELETE;
-	a.numDeleted = num > 64 ? 64 : num;
+	a.numDeleted = num > MAX_BATCH_OBJECTS ? MAX_BATCH_OBJECTS : num;
 	for(int i = 0; i < a.numDeleted; i++)
 		a.deletedInsts[i] = insts[i];
 	pushUndo(&a);
@@ -1741,7 +1741,7 @@ UndoRecordPaste(ObjectInst **insts, int num)
 	UndoAction a;
 	memset(&a, 0, sizeof(a));
 	a.type = UNDO_PASTE;
-	a.numPasted = num > 64 ? 64 : num;
+	a.numPasted = num > MAX_BATCH_OBJECTS ? MAX_BATCH_OBJECTS : num;
 	for(int i = 0; i < a.numPasted; i++)
 		a.pastedInsts[i] = insts[i];
 	pushUndo(&a);
@@ -1756,7 +1756,7 @@ UndoRecordTransformBatch(UndoTransform *transforms, int num)
 	UndoAction a;
 	memset(&a, 0, sizeof(a));
 	a.type = UNDO_TRANSFORM_BATCH;
-	a.numTransforms = num > 64 ? 64 : num;
+	a.numTransforms = num > MAX_BATCH_OBJECTS ? MAX_BATCH_OBJECTS : num;
 	for(int i = 0; i < a.numTransforms; i++)
 		a.transforms[i] = transforms[i];
 	pushUndo(&a);
@@ -1915,6 +1915,38 @@ cloneInstance(ObjectInst *src, GameFile *dstFile, int iplIndex, rw::V3d offset)
 	return inst;
 }
 
+static GameFile*
+findPasteDestinationFile(ObjectInst *src)
+{
+	if(src == nil)
+		return nil;
+
+	if(src->m_imageIndex < 0)
+		return src->m_file;
+
+	// Prefer the linked text LOD file when it exists.
+	if(src->m_lod && src->m_lod->m_imageIndex < 0 && src->m_lod->m_file)
+		return src->m_lod->m_file;
+
+	// Streaming instances loaded alongside a text IPL share the same
+	// visibility/filter key. Reuse that scene so pasted copies land in a
+	// writable text IPL instead of an IMG entry name like foo_stream0.
+	if(src->m_iplFilterKey[0] != '\0'){
+		for(CPtrNode *p = instances.first; p; p = p->next){
+			ObjectInst *other = (ObjectInst*)p->item;
+			if(other == nil || other->m_imageIndex >= 0 || other->m_file == nil)
+				continue;
+			if(strcmp(other->m_iplFilterKey, src->m_iplFilterKey) == 0)
+				return other->m_file;
+		}
+	}
+
+	// Some streamed models have no loaded text anchor at all.
+	// Put pasted copies into the custom placement IPL instead of writing a
+	// bogus text file with the binary scene name.
+	return GetOrCreateCustomIplFile();
+}
+
 void
 PasteClipboard(void)
 {
@@ -1948,22 +1980,7 @@ PasteClipboard(void)
 		ObjectInst *src = toPaste[i];
 		ObjectInst *srcLod = src->m_lod;
 
-		// Determine destination text IPL file.
-		// For streaming instances, use the LOD's file (which is the text IPL).
-		// If no LOD, scan for a text IPL instance from the same streaming base.
-		GameFile *dstFile = nil;
-		if(src->m_imageIndex < 0){
-			// Source is text IPL — use same file
-			dstFile = src->m_file;
-		}else if(srcLod && srcLod->m_file){
-			// Streaming HD — use its LOD's text IPL file
-			dstFile = srcLod->m_file;
-		}else{
-			// Streaming HD with no LOD — find any text IPL instance
-			// that shares this LOD's file as a fallback.
-			// Last resort: just use src->m_file (will create standalone text IPL)
-			dstFile = src->m_file;
-		}
+		GameFile *dstFile = findPasteDestinationFile(src);
 
 		// Find the max m_iplIndex for this file (text IPL instances only)
 		int maxIplIndex = -1;
