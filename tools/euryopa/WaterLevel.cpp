@@ -1908,6 +1908,15 @@ SaveWater(void)
 		finalPath[sizeof(finalPath)-1] = '\0';
 	}
 
+	if(gSaveDestination == SAVE_DESTINATION_MODLOADER &&
+	   numWaterQuads == 0 &&
+	   numWaterTris == 0){
+		remove(finalPath);
+		gWaterDirty = false;
+		log("SaveWater: skipped empty modloader water.dat override (SA crashes with zero-poly custom water)\n");
+		return true;
+	}
+
 	if(!EnsureParentDirectoriesForPath(finalPath)){
 		log("SaveWater: failed to create directories for %s\n", finalPath);
 		return false;
