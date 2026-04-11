@@ -979,28 +979,6 @@ logicalPathsEqualCiNormalized(const char *a, const char *b)
 	return true;
 }
 
-static bool
-shouldKeepWholeMapSuppressedIpl(const char *iplPath)
-{
-	(void)iplPath;
-	return false;
-}
-
-static bool
-sceneHasLiveTextInstances(const char *scenePath)
-{
-	for(CPtrNode *p = instances.first; p; p = p->next){
-		ObjectInst *inst = (ObjectInst*)p->item;
-		if(inst == nil || inst->m_file == nil || inst->m_imageIndex >= 0)
-			continue;
-		if(strcmp(inst->m_file->name, scenePath) != 0)
-			continue;
-		if(!inst->m_isDeleted)
-			return true;
-	}
-	return false;
-}
-
 static const char*
 getGameDatLogicalPath(void)
 {
@@ -1014,79 +992,18 @@ getGameDatLogicalPath(void)
 	}
 }
 
-static bool gDestroyMapPendingModloaderSuppression = false;
+static const char *WHOLE_MAP_BOOTSTRAP_IPL_LOGICAL_PATH = "data/maps/ariane/whole_map_bootstrap.ipl";
 
-static bool
-writeSuppressedSceneDatOverride(const char **scenePaths, int numScenePaths,
-                               bool suppressAllMapIpls)
+static void
+removeLegacyWholeMapOverrides(void)
 {
 	const char *datLogicalPath = getGameDatLogicalPath();
-	if(datLogicalPath == nil)
-		return false;
-
 	char exportPath[1024];
-	if(!BuildModloaderLogicalExportPath(datLogicalPath, exportPath, sizeof(exportPath)))
-		return false;
-
-	if(numScenePaths <= 0 && !suppressAllMapIpls){
+	if(datLogicalPath &&
+	   BuildModloaderLogicalExportPath(datLogicalPath, exportPath, sizeof(exportPath)))
 		remove(exportPath);
-		return true;
-	}
-
-	char gameRoot[1024];
-	char sourcePath[1024];
-	if(!GetGameRootDirectory(gameRoot, sizeof(gameRoot)) ||
-	   !BuildPath(sourcePath, sizeof(sourcePath), gameRoot, datLogicalPath))
-		return false;
-
-	FILE *fin = fopen(sourcePath, "rb");
-	if(fin == nil)
-		return false;
-
-	std::string out;
-	char linebuf[1024];
-	while(fgets(linebuf, sizeof(linebuf), fin)){
-		char *s = linebuf;
-		while(*s && isspace((unsigned char)*s))
-			s++;
-
-		bool suppress = false;
-		if(*s != '#' && rw::strncmp_ci(s, "IPL", 3) == 0 && isspace((unsigned char)s[3])){
-			char iplPath[512];
-			if(sscanf(s + 3, "%511s", iplPath) == 1){
-				if(suppressAllMapIpls)
-					suppress = !shouldKeepWholeMapSuppressedIpl(iplPath);
-				else
-					for(int i = 0; i < numScenePaths; i++)
-						if(logicalPathsEqualCiNormalized(iplPath, scenePaths[i])){
-							suppress = true;
-							break;
-						}
-			}
-		}
-
-		if(suppress)
-			out += "# ";
-		out += linebuf;
-	}
-	fclose(fin);
-
-	if(!EnsureParentDirectoriesForPath(exportPath))
-		return false;
-
-	char tempPath[1060];
-	snprintf(tempPath, sizeof(tempPath), "%s.ariane.tmp", exportPath);
-	FILE *fout = fopen(tempPath, "wb");
-	if(fout == nil)
-		return false;
-	if(!out.empty())
-		fwrite(out.data(), 1, out.size(), fout);
-	fclose(fout);
-#ifdef _WIN32
-	return MoveFileExA(tempPath, exportPath, MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH) != 0;
-#else
-	return rename(tempPath, exportPath) == 0;
-#endif
+	if(BuildModloaderLogicalExportPath(WHOLE_MAP_BOOTSTRAP_IPL_LOGICAL_PATH, exportPath, sizeof(exportPath)))
+		remove(exportPath);
 }
 
 static bool
@@ -1099,14 +1016,13 @@ saveAllIpls(void)
 	CPtrNode *p;
 	const char *saved[512];
 	const char *checked[512];
-	const char *suppressedScenes[512];
 	int numSaved = 0;
 	int numChecked = 0;
-	int numSuppressedScenes = 0;
 	FileLoader::BinaryIplSaveResult binaryResult = {};
-	bool datOverrideOk = true;
 	bool waterSaveOk = true;
-	bool suppressAllMapIpls = false;
+
+	if(gSaveDestination == SAVE_DESTINATION_MODLOADER)
+		removeLegacyWholeMapOverrides();
 
 	for(p = instances.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
@@ -1126,13 +1042,6 @@ saveAllIpls(void)
 			continue;
 		if(numChecked < 512)
 			checked[numChecked++] = inst->m_file->name;
-		if(gSaveDestination == SAVE_DESTINATION_MODLOADER &&
-		   sceneNeedsSave(inst->m_file->name) &&
-		   !sceneHasLiveTextInstances(inst->m_file->name)){
-			if(numSuppressedScenes < 512)
-				suppressedScenes[numSuppressedScenes++] = inst->m_file->name;
-			continue;
-		}
 		if(sceneNeedsSave(inst->m_file->name) && numSaved < 512){
 			FileLoader::BinaryIplSaveResult sceneResult = FileLoader::SaveScene(inst->m_file->name);
 			mergeBinarySaveResult(&binaryResult, sceneResult);
@@ -1150,21 +1059,16 @@ saveAllIpls(void)
 	else if(binaryResult.numFailedFiles)
 		Toast(TOAST_SAVE, "Failed to save %d file(s)", binaryResult.numFailedFiles);
 
-	if(gSaveDestination == SAVE_DESTINATION_MODLOADER){
-		suppressAllMapIpls = gDestroyMapPendingModloaderSuppression;
-		datOverrideOk = writeSuppressedSceneDatOverride(suppressedScenes, numSuppressedScenes,
-		                                               suppressAllMapIpls);
-		if(datOverrideOk){
-			for(int i = 0; i < numSuppressedScenes && numSaved < 512; i++)
-				saved[numSaved++] = suppressedScenes[i];
-		}else if(numSuppressedScenes > 0 || suppressAllMapIpls)
-			Toast(TOAST_SAVE, "Failed to write %s override", getGameDatLogicalPath());
-	}
-
 	if(params.water == GAME_SA && WaterLevel::gWaterDirty){
+		bool skippedEmptyModloaderWater =
+			gSaveDestination == SAVE_DESTINATION_MODLOADER &&
+			WaterLevel::GetNumQuads() == 0 &&
+			WaterLevel::GetNumTris() == 0;
 		waterSaveOk = WaterLevel::SaveWater();
 		if(!waterSaveOk)
 			Toast(TOAST_SAVE, "Failed to save water.dat");
+		else if(skippedEmptyModloaderWater)
+			Toast(TOAST_SAVE, "Skipped empty modloader water.dat override: SA crashes on zero-poly custom water");
 	}
 
 	if(gSaveDestination == SAVE_DESTINATION_MODLOADER && numSaved > 0){
@@ -1177,16 +1081,6 @@ saveAllIpls(void)
 			const char *winningPath = ModloaderGetSourcePath(saved[i]);
 			if(winningPath && strcmp(winningPath, exportPath) != 0)
 				shadowedText++;
-		}
-		if(numSuppressedScenes > 0){
-			char exportPath[1024];
-			const char *datLogicalPath = getGameDatLogicalPath();
-			if(datLogicalPath &&
-			   BuildModloaderLogicalExportPath(datLogicalPath, exportPath, sizeof(exportPath))){
-				const char *winningPath = ModloaderGetSourcePath(datLogicalPath);
-				if(winningPath && strcmp(winningPath, exportPath) != 0)
-					shadowedText++;
-			}
 		}
 		for(int i = 0; i < binaryResult.numSavedImages; i++){
 			char exportPath[1024];
@@ -1238,18 +1132,9 @@ saveAllIpls(void)
 			inst->m_origTranslation = inst->m_translation;
 			inst->m_origRotation = inst->m_rotation;
 		}
-		for(int i = 0; i < numSuppressedScenes; i++){
-			if(!instanceBelongsToStreamingFamily(inst, suppressedScenes[i]))
-				continue;
-			inst->m_wasSavedDeleted = inst->m_isDeleted;
-			inst->m_savedStateValid = true;
-			inst->m_isDirty = false;
-			inst->m_isAdded = false;
-		}
 	}
 
-	return datOverrideOk &&
-	       waterSaveOk &&
+	return waterSaveOk &&
 	       binaryResult.numBlockedEmptyDeletes == 0 &&
 	       binaryResult.numFailedImages == 0 &&
 	       binaryResult.numFailedFiles == 0;
@@ -1635,8 +1520,6 @@ destroyEntireMap(bool includeWater)
 		Toast(TOAST_DELETE, "Map is already empty");
 		return;
 	}
-
-	gDestroyMapPendingModloaderSuppression = true;
 
 	if(includeWater && params.water == GAME_SA)
 		Toast(TOAST_DELETE, "Destroyed map in editor: %d instance(s), %d water polygon(s)", numDeleted, numWaterPolys);
@@ -3265,7 +3148,9 @@ uiHelpWindow(void)
 	ImGui::BulletText("Selection: click on an object to select it,\n"
 		"Shift+click to add to the selection,\n"
 		"Alt+click to remove from the selection,\n"
-		"Ctrl+click to toggle selection.");
+		"Ctrl+click to toggle selection.\n"
+		"Shift+LMB drag: marquee (rectangle) select.\n"
+		"  +Ctrl: add to selection, +Alt: remove.");
 	ImGui::BulletText("In the editor window, double click an instance to jump there,\n"
 		"Right click a selection to deselect it.\n"
 		"Right click a deleted instance to undelete it.");
