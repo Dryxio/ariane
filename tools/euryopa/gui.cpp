@@ -1916,6 +1916,20 @@ EndEditorDialog(void)
 	ImGui::End();
 }
 
+template <size_t N>
+static void
+InputTextReadonly(const char *label, const char *value)
+{
+	char buf[N];
+	if(value == nil)
+		value = "";
+	strncpy(buf, value, N - 1);
+	buf[N - 1] = '\0';
+	ImGui::InputText(label, buf, N,
+		ImGuiInputTextFlags_ReadOnly |
+		ImGuiInputTextFlags_AutoSelectAll);
+}
+
 static const char *CUSTOM_IMPORT_MANIFEST_LOGICAL_PATH = "ariane_custom.txt";
 static const char *CUSTOM_IMPORT_IDE_LOGICAL_PATH = "data/maps/ariane/custom.ide";
 static const char *CUSTOM_IMPORT_IPL_LOGICAL_PATH = "data/maps/ariane/custom.ipl";
@@ -4339,11 +4353,8 @@ uiInstInfo(ObjectInst *inst)
 	ObjectDef *obj;
 	obj = GetObjectDef(inst->m_objectId);
 
-	static char buf[MODELNAMELEN];
-	strncpy(buf, obj->m_name, MODELNAMELEN);
-	ImGui::InputText("Model##Inst", buf, MODELNAMELEN);
-
-	ImGui::Text("IPL: %s", inst->m_file->name);
+	InputTextReadonly<MODELNAMELEN>("Model##Inst", obj->m_name);
+	InputTextReadonly<1024>("IPL", inst->m_file->name);
 
 	if(inst->m_isDeleted){
 		ImGui::PushStyleColor(ImGuiCol_Text, (ImVec4)ImColor(255, 80, 80));
@@ -4401,17 +4412,14 @@ uiObjInfo(ObjectDef *obj)
 	TxdDef *txd;
 
 	txd = GetTxdDef(obj->m_txdSlot);
-	static char buf[MODELNAMELEN];
 
 	ImGui::Text("ID: %d\n", obj->m_id);
-	strncpy(buf, obj->m_name, MODELNAMELEN);
-	ImGui::InputText("Model", buf, MODELNAMELEN);
-	strncpy(buf, txd->name, MODELNAMELEN);
-	ImGui::InputText("TXD", buf, MODELNAMELEN);
+	InputTextReadonly<MODELNAMELEN>("Model", obj->m_name);
+	InputTextReadonly<MODELNAMELEN>("TXD", txd ? txd->name : "");
 
-	ImGui::Text("IDE: %s", obj->m_file->name);
+	InputTextReadonly<1024>("IDE", obj->m_file ? obj->m_file->name : "");
 	if(obj->m_colModel && !obj->m_gotChildCol)
-		ImGui::Text("COL: %s", obj->m_colModel->file->name);
+		InputTextReadonly<1024>("COL", obj->m_colModel->file ? obj->m_colModel->file->name : "");
 
 	ImGui::Text("Draw dist:");
 	for(i = 0; i < obj->m_numAtomics; i++){
