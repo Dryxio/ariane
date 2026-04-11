@@ -58,6 +58,11 @@ FILE *fopenArianeDataWrite(const char *name);
 void setHotReloadTracePath(const char *path);
 void hotReloadTrace(const char *fmt, ...);
 void addToLogWindow(const char *fmt, va_list args);
+void LoadInitialEditorWindowState(int *width, int *height);
+void ApplyInitialEditorWindowState(void);
+void UpdateEditorWindowState(void);
+void OnEditorWindowResized(int width, int height);
+void SaveEditorSettingsNow(void);
 
 char *getPath(const char *path);
 FILE *fopen_ci(const char *path, const char *mode);

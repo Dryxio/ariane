@@ -33,6 +33,7 @@ static bool showToolsWindow = true;
 static bool gSaNodeJustSelected;
 static bool gBrowserIdeListDirty = true;
 static char gIplFilterSearch[128];
+static char gEditorCameraName[256] = "default";
 
 static bool gAutomaticBackupsEnabled = true;
 static int gAutomaticBackupIntervalSeconds = 300;
@@ -45,8 +46,50 @@ static uint32 gAutomaticBackupLastSeenSeq = 0;
 static uint32 gAutomaticBackupLastHandledSeq = 0;
 static char gAutomaticBackupLastSnapshot[1024];
 
+static ImGuiTextFilter gEditorModelFilter;
+static ImGuiTextFilter gEditorTxdFilter;
+static bool gEditorHighlightMatches;
+
+static ImGuiTextFilter gBrowserCategoryFilter;
+static ImGuiTextFilter gBrowserIdeFilter;
+static ImGuiTextFilter gBrowserSearchFilter;
+static ImGuiTextFilter gBrowserFavFilter;
+static int gBrowserSelectedCategory = -1;
+static char gBrowserSelectedIde[256];
+static bool gBrowserTabRestorePending;
+static int gDiffFilter;
+static int gRenderMode;
+
+enum BrowserTabId
+{
+	BROWSER_TAB_CATEGORIES,
+	BROWSER_TAB_IDE,
+	BROWSER_TAB_SEARCH,
+	BROWSER_TAB_FAVOURITES
+};
+static int gBrowserActiveTab = BROWSER_TAB_CATEGORIES;
+
+struct SavedIplVisibilityState
+{
+	char key[256];
+	bool visible;
+};
+static std::vector<SavedIplVisibilityState> gSavedIplVisibilityStates;
+
+static bool gSavedWindowStateLoaded;
+static bool gSavedWindowPlacementValid;
+static bool gSavedWindowPlacementApplied;
+static int gSavedWindowX;
+static int gSavedWindowY;
+static int gSavedWindowWidth = 1280;
+static int gSavedWindowHeight = 800;
+static bool gSavedWindowMaximized;
+static float gSettingsAutosaveSeconds;
+static bool gPersistentSettingsLoaded;
+
 static void loadSaveSettings(void);
 static void saveSaveSettings(void);
+static void normalizePersistentSettings(void);
 
 static int
 getDefaultCustomImportStartId(void)
@@ -110,6 +153,373 @@ getLegacyRootPath(char *dst, size_t size, const char *name)
 	char rootDir[2048];
 	return getEditorRootDirectory(rootDir, sizeof(rootDir)) &&
 	       buildPath(dst, size, rootDir, name);
+}
+
+static const char*
+skipSpaces(const char *p)
+{
+	while(*p && isspace((unsigned char)*p))
+		p++;
+	return p;
+}
+
+static bool
+splitSettingLine(const char *line, char *key, size_t keySize, const char **value)
+{
+	size_t len;
+	const char *p = skipSpaces(line);
+	if(*p == '\0' || *p == '#')
+		return false;
+
+	len = 0;
+	while(p[len] && !isspace((unsigned char)p[len]))
+		len++;
+	if(len == 0 || len >= keySize)
+		return false;
+
+	memcpy(key, p, len);
+	key[len] = '\0';
+	*value = skipSpaces(p + len);
+	return true;
+}
+
+static bool
+parseIntSetting(const char *value, int *out)
+{
+	return sscanf(skipSpaces(value), "%d", out) == 1;
+}
+
+static bool
+parseFloatSetting(const char *value, float *out)
+{
+	return sscanf(skipSpaces(value), "%f", out) == 1;
+}
+
+static bool
+parseBoolSetting(const char *value, bool *out)
+{
+	int i;
+	if(!parseIntSetting(value, &i))
+		return false;
+	*out = i != 0;
+	return true;
+}
+
+static bool
+parseVec3Setting(const char *value, rw::V3d *out)
+{
+	return sscanf(skipSpaces(value), "%f %f %f", &out->x, &out->y, &out->z) == 3;
+}
+
+static bool
+parseQuotedStringValue(const char *value, char *out, size_t outSize, const char **after = nil)
+{
+	size_t len = 0;
+	const char *p = skipSpaces(value);
+	if(*p != '"' || outSize == 0)
+		return false;
+	p++;
+
+	while(*p && *p != '"'){
+		char c = *p++;
+		if(c == '\\'){
+			c = *p++;
+			if(c == '\0')
+				return false;
+			switch(c){
+			case 'n': c = '\n'; break;
+			case 'r': c = '\r'; break;
+			case 't': c = '\t'; break;
+			case '\\':
+			case '"':
+				break;
+			default:
+				break;
+			}
+		}
+		if(len + 1 < outSize)
+			out[len++] = c;
+	}
+	if(*p != '"')
+		return false;
+
+	out[len] = '\0';
+	if(after)
+		*after = p + 1;
+	return true;
+}
+
+static void
+writeQuotedSetting(FILE *f, const char *key, const char *value)
+{
+	fprintf(f, "%s \"", key);
+	if(value){
+		for(const char *p = value; *p; p++){
+			switch(*p){
+			case '\\':
+			case '"':
+				fputc('\\', f);
+				fputc(*p, f);
+				break;
+			case '\n':
+				fputs("\\n", f);
+				break;
+			case '\r':
+				fputs("\\r", f);
+				break;
+			case '\t':
+				fputs("\\t", f);
+				break;
+			default:
+				fputc(*p, f);
+				break;
+			}
+		}
+	}
+	fputs("\"\n", f);
+}
+
+static void
+writeInlineQuotedString(FILE *f, const char *value)
+{
+	fputc('"', f);
+	if(value){
+		for(const char *p = value; *p; p++){
+			switch(*p){
+			case '\\':
+			case '"':
+				fputc('\\', f);
+				fputc(*p, f);
+				break;
+			case '\n':
+				fputs("\\n", f);
+				break;
+			case '\r':
+				fputs("\\r", f);
+				break;
+			case '\t':
+				fputs("\\t", f);
+				break;
+			default:
+				fputc(*p, f);
+				break;
+			}
+		}
+	}
+	fputc('"', f);
+}
+
+static void
+setTextFilterValue(ImGuiTextFilter &filter, const char *value)
+{
+	if(value == nil || value[0] == '\0'){
+		filter.Clear();
+		return;
+	}
+	strncpy(filter.InputBuf, value, IM_ARRAYSIZE(filter.InputBuf)-1);
+	filter.InputBuf[IM_ARRAYSIZE(filter.InputBuf)-1] = '\0';
+	filter.Build();
+}
+
+static void
+loadWindowStateFromSettingsFile(void)
+{
+	FILE *f;
+	char line[512];
+	char key[128];
+	const char *value;
+	bool haveWindowX = false;
+	bool haveWindowY = false;
+
+	if(gSavedWindowStateLoaded)
+		return;
+	gSavedWindowStateLoaded = true;
+
+	f = fopenArianeDataRead("savesettings.txt", "savesettings.txt");
+	if(f == nil)
+		return;
+
+	while(fgets(line, sizeof(line), f)){
+		if(!splitSettingLine(line, key, sizeof(key), &value))
+			continue;
+		if(strcmp(key, "window_width") == 0){
+			parseIntSetting(value, &gSavedWindowWidth);
+		}else if(strcmp(key, "window_height") == 0){
+			parseIntSetting(value, &gSavedWindowHeight);
+		}else if(strcmp(key, "window_x") == 0){
+			haveWindowX = parseIntSetting(value, &gSavedWindowX);
+		}else if(strcmp(key, "window_y") == 0){
+			haveWindowY = parseIntSetting(value, &gSavedWindowY);
+		}else if(strcmp(key, "window_maximized") == 0){
+			parseBoolSetting(value, &gSavedWindowMaximized);
+		}
+	}
+	fclose(f);
+
+	gSavedWindowWidth = clamp(gSavedWindowWidth, 640, 8192);
+	gSavedWindowHeight = clamp(gSavedWindowHeight, 480, 8192);
+	gSavedWindowPlacementValid = haveWindowX && haveWindowY;
+}
+
+void
+LoadInitialEditorWindowState(int *width, int *height)
+{
+	loadWindowStateFromSettingsFile();
+	if(width)
+		*width = gSavedWindowWidth;
+	if(height)
+		*height = gSavedWindowHeight;
+}
+
+void
+OnEditorWindowResized(int width, int height)
+{
+	gSavedWindowWidth = clamp(width, 1, 8192);
+	gSavedWindowHeight = clamp(height, 1, 8192);
+}
+
+#ifdef _WIN32
+static HWND
+getEditorWindowHandle(void)
+{
+#ifdef RW_D3D9
+	return (HWND)engineOpenParams.window;
+#else
+	return nil;
+#endif
+}
+#endif
+
+void
+ApplyInitialEditorWindowState(void)
+{
+	loadWindowStateFromSettingsFile();
+	if(gSavedWindowPlacementApplied)
+		return;
+	gSavedWindowPlacementApplied = true;
+
+#ifdef _WIN32
+	HWND hwnd = getEditorWindowHandle();
+	if(hwnd && gSavedWindowPlacementValid){
+		SetWindowPos(hwnd, nil, gSavedWindowX, gSavedWindowY,
+			gSavedWindowWidth, gSavedWindowHeight,
+			SWP_NOZORDER | SWP_NOACTIVATE);
+		if(gSavedWindowMaximized)
+			ShowWindow(hwnd, SW_MAXIMIZE);
+	}
+#endif
+}
+
+void
+UpdateEditorWindowState(void)
+{
+#ifdef _WIN32
+	HWND hwnd = getEditorWindowHandle();
+	if(hwnd){
+		WINDOWPLACEMENT placement;
+		placement.length = sizeof(placement);
+		if(GetWindowPlacement(hwnd, &placement)){
+			RECT rect = placement.rcNormalPosition;
+			if(placement.showCmd == SW_SHOWMAXIMIZED){
+				gSavedWindowMaximized = true;
+			}else if(placement.showCmd == SW_SHOWMINIMIZED || placement.showCmd == SW_MINIMIZE ||
+			          placement.showCmd == SW_SHOWMINNOACTIVE){
+				gSavedWindowMaximized = (placement.flags & WPF_RESTORETOMAXIMIZED) != 0;
+			}else{
+				GetWindowRect(hwnd, &rect);
+				gSavedWindowMaximized = false;
+			}
+
+			gSavedWindowX = rect.left;
+			gSavedWindowY = rect.top;
+			gSavedWindowWidth = max((int)(rect.right - rect.left), 1);
+			gSavedWindowHeight = max((int)(rect.bottom - rect.top), 1);
+			gSavedWindowPlacementValid = true;
+		}
+	}
+#endif
+}
+
+static void
+normalizePersistentSettings(void)
+{
+	currentHour = ((currentHour % 24) + 24) % 24;
+	currentMinute = ((currentMinute % 60) + 60) % 60;
+	if(params.numAreas > 0)
+		currentArea = clamp(currentArea, 0, params.numAreas-1);
+	else
+		currentArea = 0;
+	if(params.numWeathers > 0){
+		Weather::oldWeather = clamp(Weather::oldWeather, 0, params.numWeathers-1);
+		Weather::newWeather = clamp(Weather::newWeather, 0, params.numWeathers-1);
+	}else{
+		Weather::oldWeather = 0;
+		Weather::newWeather = 0;
+	}
+	if(params.timecycle != GAME_III && params.numExtraColours > 0 && params.numHours > 0)
+		extraColours = clamp(extraColours, -1, params.numExtraColours*params.numHours - 1);
+	else
+		extraColours = -1;
+	Weather::interpolation = clamp(Weather::interpolation, 0.0f, 1.0f);
+	TheCamera.m_fov = clamp(TheCamera.m_fov, 1.0f, 150.0f);
+	TheCamera.m_LODmult = clamp(TheCamera.m_LODmult, 0.5f, 3.0f);
+	gNeoLightMapStrength = clamp(gNeoLightMapStrength, 0.0f, 1.0f);
+	gDayNightBalance = clamp(gDayNightBalance, 0.0f, 1.0f);
+	gWetRoadEffect = clamp(gWetRoadEffect, 0.0f, 1.0f);
+	gSaPedPathWalkerCount = clamp(gSaPedPathWalkerCount, 1, 32);
+	gSaCarPathTrafficCount = clamp(gSaCarPathTrafficCount, 1, 32);
+	gSaCarPathTrafficSpeedScale = clamp(gSaCarPathTrafficSpeedScale, 0.25f, 3.0f);
+	gSaCarPathParkedCarCount = clamp(gSaCarPathParkedCarCount, 1, 24);
+	gRenderMode = clamp(gRenderMode, 0, 2);
+	gRenderOnlyHD = gRenderMode == 1;
+	gRenderOnlyLod = gRenderMode == 2;
+	gGizmoMode = gGizmoMode == GIZMO_ROTATE ? GIZMO_ROTATE : GIZMO_TRANSLATE;
+	gBrowserActiveTab = clamp(gBrowserActiveTab, (int)BROWSER_TAB_CATEGORIES, (int)BROWSER_TAB_FAVOURITES);
+	gBrowserSelectedCategory = clamp(gBrowserSelectedCategory, -1, NUM_OBJ_CATEGORIES-1);
+	gDiffFilter = max(gDiffFilter, 0);
+	WaterLevel::gWaterSubMode = clamp(WaterLevel::gWaterSubMode, 0, 1);
+	WaterLevel::gWaterCreateShape = clamp(WaterLevel::gWaterCreateShape, 0, 1);
+	WaterLevel::gWaterSnapSize = clamp(WaterLevel::gWaterSnapSize, 1.0f, 100.0f);
+	params.alphaRef = clamp(params.alphaRef, 0, 255);
+
+	switch(params.timecycle){
+	case GAME_SA:
+		if(gColourFilter == PLATFORM_XBOX)
+			gColourFilter = PLATFORM_PC;
+		if(gColourFilter != 0 && gColourFilter != PLATFORM_PS2 &&
+		   gColourFilter != PLATFORM_PC)
+			gColourFilter = PLATFORM_PC;
+		break;
+	case GAME_LCS:
+		gRadiosity = false;
+		if(gColourFilter != 0 && gColourFilter != PLATFORM_PS2 &&
+		   gColourFilter != PLATFORM_PSP)
+			gColourFilter = 0;
+		break;
+	case GAME_VCS:
+		if(gColourFilter != 0 && gColourFilter != PLATFORM_PS2 &&
+		   gColourFilter != PLATFORM_PSP)
+			gColourFilter = 0;
+		break;
+	default:
+		gColourFilter = 0;
+		gRadiosity = false;
+		break;
+	}
+
+	if(params.daynightPipe){
+		if(gBuildingPipeSwitch != PLATFORM_PS2 &&
+		   gBuildingPipeSwitch != PLATFORM_PC &&
+		   gBuildingPipeSwitch != PLATFORM_XBOX)
+			gBuildingPipeSwitch = PLATFORM_PS2;
+	}else if(params.leedsPipe){
+		if(gBuildingPipeSwitch != PLATFORM_NULL &&
+		   gBuildingPipeSwitch != PLATFORM_PSP &&
+		   gBuildingPipeSwitch != PLATFORM_PS2 &&
+		   gBuildingPipeSwitch != PLATFORM_PC)
+			gBuildingPipeSwitch = PLATFORM_PS2;
+	}else
+		gBuildingPipeSwitch = PLATFORM_PS2;
 }
 
 static void
@@ -3412,12 +3822,11 @@ uiView(void)
 	if(gameversion == GAME_SA)
 		ImGui::Checkbox("Play Animations", &gPlayAnimations);
 
-	static int render = 0;
-	ImGui::RadioButton("Render Normal", &render, 0);
-	ImGui::RadioButton("Render only HD", &render, 1);
-	ImGui::RadioButton("Render only LOD", &render, 2);
-	gRenderOnlyHD = !!(render&1);
-	gRenderOnlyLod = !!(render&2);
+	ImGui::RadioButton("Render Normal", &gRenderMode, 0);
+	ImGui::RadioButton("Render only HD", &gRenderMode, 1);
+	ImGui::RadioButton("Render only LOD", &gRenderMode, 2);
+	gRenderOnlyHD = gRenderMode == 1;
+	gRenderOnlyLod = gRenderMode == 2;
 	ImGui::SliderFloat("Draw Distance", &TheCamera.m_LODmult, 0.5f, 3.0f, "%.3f");
 	ImGui::Checkbox("Render all Timed Objects", &gNoTimeCull);
 	if(params.numAreas)
@@ -4087,40 +4496,277 @@ static void
 loadSaveSettings(void)
 {
 	FILE *f;
-	char line[256];
+	char line[1024];
 	char key[128];
-	int value;
+	const char *value;
+	int intValue;
+	bool boolValue;
+	rw::V3d vecValue;
+	int savedSpawnObjectId = -1;
 
 	sanitizeAutomaticBackupSettings();
 	sanitizeCustomImportSettings();
 	gAutomaticBackupLastSeenSeq = GetLatestChangeSeq();
 	gAutomaticBackupLastHandledSeq = gAutomaticBackupLastSeenSeq;
 	gAutomaticBackupLastSnapshot[0] = '\0';
+	gRenderMode = gRenderOnlyHD ? 1 : gRenderOnlyLod ? 2 : 0;
+	gSavedIplVisibilityStates.clear();
+	gBrowserTabRestorePending = true;
+	loadWindowStateFromSettingsFile();
+	gPersistentSettingsLoaded = true;
 
 	f = fopenArianeDataRead("savesettings.txt", "savesettings.txt");
 	if(f == nil)
 		return;
 
 	while(fgets(line, sizeof(line), f)){
-		if(sscanf(line, "%127s %d", key, &value) != 2)
+		if(!splitSettingLine(line, key, sizeof(key), &value))
 			continue;
 		if(strcmp(key, "save_destination") == 0){
-			if(value == SAVE_DESTINATION_MODLOADER)
+			if(parseIntSetting(value, &intValue) && intValue == SAVE_DESTINATION_MODLOADER)
 				gSaveDestination = SAVE_DESTINATION_MODLOADER;
 			else
 				gSaveDestination = SAVE_DESTINATION_ORIGINAL_FILES;
-		}else if(strcmp(key, "automatic_backups") == 0)
-			gAutomaticBackupsEnabled = value != 0;
-		else if(strcmp(key, "automatic_backup_interval") == 0)
-			gAutomaticBackupIntervalSeconds = value;
-		else if(strcmp(key, "automatic_backup_keep") == 0)
-			gAutomaticBackupKeepCount = value;
-		else if(strcmp(key, "custom_import_start_id") == 0)
-			gCustomImportPreferredStartId = value;
+		}else if(strcmp(key, "automatic_backups") == 0){
+			if(parseBoolSetting(value, &boolValue))
+				gAutomaticBackupsEnabled = boolValue;
+		}else if(strcmp(key, "automatic_backup_interval") == 0){
+			parseIntSetting(value, &gAutomaticBackupIntervalSeconds);
+		}else if(strcmp(key, "automatic_backup_keep") == 0){
+			parseIntSetting(value, &gAutomaticBackupKeepCount);
+		}else if(strcmp(key, "custom_import_start_id") == 0){
+			parseIntSetting(value, &gCustomImportPreferredStartId);
+		}else if(strcmp(key, "show_demo_window") == 0){
+			if(parseBoolSetting(value, &boolValue)) showDemoWindow = boolValue;
+		}else if(strcmp(key, "show_editor_window") == 0){
+			if(parseBoolSetting(value, &boolValue)) showEditorWindow = boolValue;
+		}else if(strcmp(key, "show_instance_window") == 0){
+			if(parseBoolSetting(value, &boolValue)) showInstanceWindow = boolValue;
+		}else if(strcmp(key, "show_log_window") == 0){
+			if(parseBoolSetting(value, &boolValue)) showLogWindow = boolValue;
+		}else if(strcmp(key, "show_help_window") == 0){
+			if(parseBoolSetting(value, &boolValue)) showHelpWindow = boolValue;
+		}else if(strcmp(key, "show_time_weather_window") == 0){
+			if(parseBoolSetting(value, &boolValue)) showTimeWeatherWindow = boolValue;
+		}else if(strcmp(key, "show_view_window") == 0){
+			if(parseBoolSetting(value, &boolValue)) showViewWindow = boolValue;
+		}else if(strcmp(key, "show_rendering_window") == 0){
+			if(parseBoolSetting(value, &boolValue)) showRenderingWindow = boolValue;
+		}else if(strcmp(key, "show_browser_window") == 0){
+			if(parseBoolSetting(value, &boolValue)) showBrowserWindow = boolValue;
+		}else if(strcmp(key, "show_diff_window") == 0){
+			if(parseBoolSetting(value, &boolValue)) showDiffWindow = boolValue;
+		}else if(strcmp(key, "show_tools_window") == 0){
+			if(parseBoolSetting(value, &boolValue)) showToolsWindow = boolValue;
+		}else if(strcmp(key, "toast_enabled") == 0){
+			if(parseBoolSetting(value, &boolValue)) toastEnabled = boolValue;
+		}else if(strncmp(key, "toast_category_", 15) == 0){
+			int idx = atoi(key + 15);
+			if(idx >= 0 && idx < TOAST_NUM_CATEGORIES && parseBoolSetting(value, &boolValue))
+				toastCategoryEnabled[idx] = boolValue;
+		}else if(strcmp(key, "time_hour") == 0){
+			parseIntSetting(value, &currentHour);
+		}else if(strcmp(key, "time_minute") == 0){
+			parseIntSetting(value, &currentMinute);
+		}else if(strcmp(key, "current_area") == 0){
+			parseIntSetting(value, &currentArea);
+		}else if(strcmp(key, "weather_old") == 0){
+			parseIntSetting(value, &Weather::oldWeather);
+		}else if(strcmp(key, "weather_new") == 0){
+			parseIntSetting(value, &Weather::newWeather);
+		}else if(strcmp(key, "weather_interpolation") == 0){
+			parseFloatSetting(value, &Weather::interpolation);
+		}else if(strcmp(key, "extra_colours") == 0){
+			parseIntSetting(value, &extraColours);
+		}else if(strcmp(key, "day_night_balance") == 0){
+			parseFloatSetting(value, &gDayNightBalance);
+		}else if(strcmp(key, "wet_road_effect") == 0){
+			parseFloatSetting(value, &gWetRoadEffect);
+		}else if(strcmp(key, "neo_light_map_strength") == 0){
+			parseFloatSetting(value, &gNeoLightMapStrength);
+		}else if(strcmp(key, "camera_position") == 0){
+			if(parseVec3Setting(value, &vecValue))
+				TheCamera.m_position = vecValue;
+		}else if(strcmp(key, "camera_target") == 0){
+			if(parseVec3Setting(value, &vecValue))
+				TheCamera.m_target = vecValue;
+		}else if(strcmp(key, "camera_fov") == 0){
+			parseFloatSetting(value, &TheCamera.m_fov);
+		}else if(strcmp(key, "draw_target") == 0){
+			if(parseBoolSetting(value, &boolValue)) gDrawTarget = boolValue;
+		}else if(strcmp(key, "render_collision") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderCollision = boolValue;
+		}else if(strcmp(key, "render_zones") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderZones = boolValue;
+		}else if(strcmp(key, "render_map_zones") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderMapZones = boolValue;
+		}else if(strcmp(key, "render_navig_zones") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderNavigZones = boolValue;
+		}else if(strcmp(key, "render_info_zones") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderInfoZones = boolValue;
+		}else if(strcmp(key, "render_cull_zones") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderCullZones = boolValue;
+		}else if(strcmp(key, "render_attrib_zones") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderAttribZones = boolValue;
+		}else if(strcmp(key, "render_light_effects") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderLightEffects = boolValue;
+		}else if(strcmp(key, "render_effect_markers") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderEffects = boolValue;
+		}else if(strcmp(key, "render_legacy_ped_paths") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderLegacyPedPaths = boolValue;
+		}else if(strcmp(key, "render_legacy_car_paths") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderLegacyCarPaths = boolValue;
+		}else if(strcmp(key, "render_sa_ped_paths") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderSaPedPaths = boolValue;
+		}else if(strcmp(key, "render_sa_ped_path_walkers") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderSaPedPathWalkers = boolValue;
+		}else if(strcmp(key, "render_sa_car_paths") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderSaCarPaths = boolValue;
+		}else if(strcmp(key, "render_sa_car_path_traffic") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderSaCarPathTraffic = boolValue;
+		}else if(strcmp(key, "render_sa_area_grid") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderSaAreaGrid = boolValue;
+		}else if(strcmp(key, "sa_ped_path_walker_count") == 0){
+			parseIntSetting(value, &gSaPedPathWalkerCount);
+		}else if(strcmp(key, "sa_car_path_traffic_count") == 0){
+			parseIntSetting(value, &gSaCarPathTrafficCount);
+		}else if(strcmp(key, "sa_car_path_traffic_speed_scale") == 0){
+			parseFloatSetting(value, &gSaCarPathTrafficSpeedScale);
+		}else if(strcmp(key, "sa_car_path_traffic_freeze_routes") == 0){
+			if(parseBoolSetting(value, &boolValue)) gSaCarPathTrafficFreezeRoutes = boolValue;
+		}else if(strcmp(key, "render_sa_car_path_parked_cars") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderSaCarPathParkedCars = boolValue;
+		}else if(strcmp(key, "sa_car_path_parked_car_count") == 0){
+			parseIntSetting(value, &gSaCarPathParkedCarCount);
+		}else if(strcmp(key, "render_water") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderWater = boolValue;
+		}else if(strcmp(key, "play_animations") == 0){
+			if(parseBoolSetting(value, &boolValue)) gPlayAnimations = boolValue;
+		}else if(strcmp(key, "render_mode") == 0){
+			parseIntSetting(value, &gRenderMode);
+		}else if(strcmp(key, "draw_distance") == 0){
+			parseFloatSetting(value, &TheCamera.m_LODmult);
+		}else if(strcmp(key, "render_all_timed_objects") == 0){
+			if(parseBoolSetting(value, &boolValue)) gNoTimeCull = boolValue;
+		}else if(strcmp(key, "render_all_areas") == 0){
+			if(parseBoolSetting(value, &boolValue)) gNoAreaCull = boolValue;
+		}else if(strcmp(key, "ipl_filter_search") == 0){
+			parseQuotedStringValue(value, gIplFilterSearch, sizeof(gIplFilterSearch));
+		}else if(strcmp(key, "ipl_visible") == 0){
+			SavedIplVisibilityState state;
+			const char *after = nil;
+			memset(&state, 0, sizeof(state));
+			if(parseQuotedStringValue(value, state.key, sizeof(state.key), &after) &&
+			   parseBoolSetting(after, &state.visible))
+				gSavedIplVisibilityStates.push_back(state);
+		}else if(strcmp(key, "render_postfx") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderPostFX = boolValue;
+		}else if(strcmp(key, "use_blur_ambient") == 0){
+			if(parseBoolSetting(value, &boolValue)) gUseBlurAmb = boolValue;
+		}else if(strcmp(key, "override_blur_ambient") == 0){
+			if(parseBoolSetting(value, &boolValue)) gOverrideBlurAmb = boolValue;
+		}else if(strcmp(key, "colour_filter") == 0){
+			parseIntSetting(value, &gColourFilter);
+		}else if(strcmp(key, "radiosity") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRadiosity = boolValue;
+		}else if(strcmp(key, "building_pipe") == 0){
+			parseIntSetting(value, &gBuildingPipeSwitch);
+		}else if(strcmp(key, "backface_culling") == 0){
+			if(parseBoolSetting(value, &boolValue)) gDoBackfaceCulling = boolValue;
+		}else if(strcmp(key, "ps2_alpha_test") == 0){
+			if(parseBoolSetting(value, &boolValue)) params.ps2AlphaTest = boolValue;
+		}else if(strcmp(key, "alpha_ref") == 0){
+			parseIntSetting(value, &params.alphaRef);
+		}else if(strcmp(key, "render_background") == 0){
+			if(parseBoolSetting(value, &boolValue)) gRenderBackground = boolValue;
+		}else if(strcmp(key, "enable_fog") == 0){
+			if(parseBoolSetting(value, &boolValue)) gEnableFog = boolValue;
+		}else if(strcmp(key, "enable_timecycle_boxes") == 0){
+			if(parseBoolSetting(value, &boolValue)) gEnableTimecycleBoxes = boolValue;
+		}else if(strcmp(key, "gizmo_enabled") == 0){
+			if(parseBoolSetting(value, &boolValue)) gGizmoEnabled = boolValue;
+		}else if(strcmp(key, "gizmo_mode") == 0){
+			parseIntSetting(value, &gGizmoMode);
+		}else if(strcmp(key, "gizmo_snap") == 0){
+			if(parseBoolSetting(value, &boolValue)) gGizmoSnap = boolValue;
+		}else if(strcmp(key, "gizmo_snap_angle") == 0){
+			parseFloatSetting(value, &gGizmoSnapAngle);
+		}else if(strcmp(key, "gizmo_snap_translate") == 0){
+			parseFloatSetting(value, &gGizmoSnapTranslate);
+		}else if(strcmp(key, "place_snap_to_objects") == 0){
+			if(parseBoolSetting(value, &boolValue)) gPlaceSnapToObjects = boolValue;
+		}else if(strcmp(key, "place_snap_to_ground") == 0){
+			if(parseBoolSetting(value, &boolValue)) gPlaceSnapToGround = boolValue;
+		}else if(strcmp(key, "drag_follow_ground") == 0){
+			if(parseBoolSetting(value, &boolValue)) gDragFollowGround = boolValue;
+		}else if(strcmp(key, "drag_align_to_surface") == 0){
+			if(parseBoolSetting(value, &boolValue)) gDragAlignToSurface = boolValue;
+		}else if(strcmp(key, "editor_camera_name") == 0){
+			parseQuotedStringValue(value, gEditorCameraName, sizeof(gEditorCameraName));
+		}else if(strcmp(key, "editor_model_filter") == 0){
+			char buf[256];
+			if(parseQuotedStringValue(value, buf, sizeof(buf)))
+				setTextFilterValue(gEditorModelFilter, buf);
+		}else if(strcmp(key, "editor_txd_filter") == 0){
+			char buf[256];
+			if(parseQuotedStringValue(value, buf, sizeof(buf)))
+				setTextFilterValue(gEditorTxdFilter, buf);
+		}else if(strcmp(key, "editor_highlight_matches") == 0){
+			if(parseBoolSetting(value, &boolValue)) gEditorHighlightMatches = boolValue;
+		}else if(strcmp(key, "browser_selected_category") == 0){
+			parseIntSetting(value, &gBrowserSelectedCategory);
+		}else if(strcmp(key, "browser_selected_ide") == 0){
+			parseQuotedStringValue(value, gBrowserSelectedIde, sizeof(gBrowserSelectedIde));
+		}else if(strcmp(key, "browser_active_tab") == 0){
+			parseIntSetting(value, &gBrowserActiveTab);
+		}else if(strcmp(key, "browser_category_filter") == 0){
+			char buf[256];
+			if(parseQuotedStringValue(value, buf, sizeof(buf)))
+				setTextFilterValue(gBrowserCategoryFilter, buf);
+		}else if(strcmp(key, "browser_ide_filter") == 0){
+			char buf[256];
+			if(parseQuotedStringValue(value, buf, sizeof(buf)))
+				setTextFilterValue(gBrowserIdeFilter, buf);
+		}else if(strcmp(key, "browser_search_filter") == 0){
+			char buf[256];
+			if(parseQuotedStringValue(value, buf, sizeof(buf)))
+				setTextFilterValue(gBrowserSearchFilter, buf);
+		}else if(strcmp(key, "browser_favourites_filter") == 0){
+			char buf[256];
+			if(parseQuotedStringValue(value, buf, sizeof(buf)))
+				setTextFilterValue(gBrowserFavFilter, buf);
+		}else if(strcmp(key, "browser_selected_object") == 0){
+			parseIntSetting(value, &savedSpawnObjectId);
+		}else if(strcmp(key, "diff_filter") == 0){
+			parseIntSetting(value, &gDiffFilter);
+		}else if(strcmp(key, "water_snap_enabled") == 0){
+			if(parseBoolSetting(value, &boolValue)) WaterLevel::gWaterSnapEnabled = boolValue;
+		}else if(strcmp(key, "water_snap_size") == 0){
+			parseFloatSetting(value, &WaterLevel::gWaterSnapSize);
+		}else if(strcmp(key, "water_sub_mode") == 0){
+			parseIntSetting(value, &WaterLevel::gWaterSubMode);
+		}else if(strcmp(key, "water_create_shape") == 0){
+			parseIntSetting(value, &WaterLevel::gWaterCreateShape);
+		}else if(strcmp(key, "water_create_z") == 0){
+			parseFloatSetting(value, &WaterLevel::gWaterCreateZ);
+		}
 	}
 
 	sanitizeAutomaticBackupSettings();
 	sanitizeCustomImportSettings();
+	normalizePersistentSettings();
+
+	RefreshIplVisibilityEntries();
+	for(size_t i = 0; i < gSavedIplVisibilityStates.size(); i++){
+		for(int j = 0; j < GetIplVisibilityEntryCount(); j++){
+			if(strcmp(GetIplVisibilityEntryName(j), gSavedIplVisibilityStates[i].key) == 0){
+				SetIplVisibilityEntryVisible(j, gSavedIplVisibilityStates[i].visible);
+				break;
+			}
+		}
+	}
+	if(savedSpawnObjectId >= 0 && savedSpawnObjectId < NUMOBJECTDEFS && GetObjectDef(savedSpawnObjectId))
+		SetSpawnObjectId(savedSpawnObjectId);
 	fclose(f);
 }
 
@@ -4154,16 +4800,134 @@ saveSaveSettings(void)
 
 	sanitizeAutomaticBackupSettings();
 	sanitizeCustomImportSettings();
+	UpdateEditorWindowState();
+	normalizePersistentSettings();
 	f = fopenArianeDataWrite("savesettings.txt");
 	if(f == nil)
 		return;
 
+	fprintf(f, "window_width %d\n", gSavedWindowWidth);
+	fprintf(f, "window_height %d\n", gSavedWindowHeight);
+	if(gSavedWindowPlacementValid){
+		fprintf(f, "window_x %d\n", gSavedWindowX);
+		fprintf(f, "window_y %d\n", gSavedWindowY);
+	}
+	fprintf(f, "window_maximized %d\n", gSavedWindowMaximized ? 1 : 0);
 	fprintf(f, "save_destination %d\n", (int)gSaveDestination);
 	fprintf(f, "automatic_backups %d\n", gAutomaticBackupsEnabled ? 1 : 0);
 	fprintf(f, "automatic_backup_interval %d\n", gAutomaticBackupIntervalSeconds);
 	fprintf(f, "automatic_backup_keep %d\n", gAutomaticBackupKeepCount);
 	fprintf(f, "custom_import_start_id %d\n", gCustomImportPreferredStartId);
+	fprintf(f, "show_demo_window %d\n", showDemoWindow ? 1 : 0);
+	fprintf(f, "show_editor_window %d\n", showEditorWindow ? 1 : 0);
+	fprintf(f, "show_instance_window %d\n", showInstanceWindow ? 1 : 0);
+	fprintf(f, "show_log_window %d\n", showLogWindow ? 1 : 0);
+	fprintf(f, "show_help_window %d\n", showHelpWindow ? 1 : 0);
+	fprintf(f, "show_time_weather_window %d\n", showTimeWeatherWindow ? 1 : 0);
+	fprintf(f, "show_view_window %d\n", showViewWindow ? 1 : 0);
+	fprintf(f, "show_rendering_window %d\n", showRenderingWindow ? 1 : 0);
+	fprintf(f, "show_browser_window %d\n", showBrowserWindow ? 1 : 0);
+	fprintf(f, "show_diff_window %d\n", showDiffWindow ? 1 : 0);
+	fprintf(f, "show_tools_window %d\n", showToolsWindow ? 1 : 0);
+	fprintf(f, "toast_enabled %d\n", toastEnabled ? 1 : 0);
+	for(int i = 0; i < TOAST_NUM_CATEGORIES; i++)
+		fprintf(f, "toast_category_%d %d\n", i, toastCategoryEnabled[i] ? 1 : 0);
+	fprintf(f, "time_hour %d\n", currentHour);
+	fprintf(f, "time_minute %d\n", currentMinute);
+	fprintf(f, "current_area %d\n", currentArea);
+	fprintf(f, "weather_old %d\n", Weather::oldWeather);
+	fprintf(f, "weather_new %d\n", Weather::newWeather);
+	fprintf(f, "weather_interpolation %.9g\n", Weather::interpolation);
+	fprintf(f, "extra_colours %d\n", extraColours);
+	fprintf(f, "day_night_balance %.9g\n", gDayNightBalance);
+	fprintf(f, "wet_road_effect %.9g\n", gWetRoadEffect);
+	fprintf(f, "neo_light_map_strength %.9g\n", gNeoLightMapStrength);
+	fprintf(f, "camera_position %.9g %.9g %.9g\n", TheCamera.m_position.x, TheCamera.m_position.y, TheCamera.m_position.z);
+	fprintf(f, "camera_target %.9g %.9g %.9g\n", TheCamera.m_target.x, TheCamera.m_target.y, TheCamera.m_target.z);
+	fprintf(f, "camera_fov %.9g\n", TheCamera.m_fov);
+	fprintf(f, "draw_target %d\n", gDrawTarget ? 1 : 0);
+	fprintf(f, "render_collision %d\n", gRenderCollision ? 1 : 0);
+	fprintf(f, "render_zones %d\n", gRenderZones ? 1 : 0);
+	fprintf(f, "render_map_zones %d\n", gRenderMapZones ? 1 : 0);
+	fprintf(f, "render_navig_zones %d\n", gRenderNavigZones ? 1 : 0);
+	fprintf(f, "render_info_zones %d\n", gRenderInfoZones ? 1 : 0);
+	fprintf(f, "render_cull_zones %d\n", gRenderCullZones ? 1 : 0);
+	fprintf(f, "render_attrib_zones %d\n", gRenderAttribZones ? 1 : 0);
+	fprintf(f, "render_light_effects %d\n", gRenderLightEffects ? 1 : 0);
+	fprintf(f, "render_effect_markers %d\n", gRenderEffects ? 1 : 0);
+	fprintf(f, "render_legacy_ped_paths %d\n", gRenderLegacyPedPaths ? 1 : 0);
+	fprintf(f, "render_legacy_car_paths %d\n", gRenderLegacyCarPaths ? 1 : 0);
+	fprintf(f, "render_sa_ped_paths %d\n", gRenderSaPedPaths ? 1 : 0);
+	fprintf(f, "render_sa_ped_path_walkers %d\n", gRenderSaPedPathWalkers ? 1 : 0);
+	fprintf(f, "render_sa_car_paths %d\n", gRenderSaCarPaths ? 1 : 0);
+	fprintf(f, "render_sa_car_path_traffic %d\n", gRenderSaCarPathTraffic ? 1 : 0);
+	fprintf(f, "render_sa_area_grid %d\n", gRenderSaAreaGrid ? 1 : 0);
+	fprintf(f, "sa_ped_path_walker_count %d\n", gSaPedPathWalkerCount);
+	fprintf(f, "sa_car_path_traffic_count %d\n", gSaCarPathTrafficCount);
+	fprintf(f, "sa_car_path_traffic_speed_scale %.9g\n", gSaCarPathTrafficSpeedScale);
+	fprintf(f, "sa_car_path_traffic_freeze_routes %d\n", gSaCarPathTrafficFreezeRoutes ? 1 : 0);
+	fprintf(f, "render_sa_car_path_parked_cars %d\n", gRenderSaCarPathParkedCars ? 1 : 0);
+	fprintf(f, "sa_car_path_parked_car_count %d\n", gSaCarPathParkedCarCount);
+	fprintf(f, "render_water %d\n", gRenderWater ? 1 : 0);
+	fprintf(f, "play_animations %d\n", gPlayAnimations ? 1 : 0);
+	fprintf(f, "render_mode %d\n", gRenderMode);
+	fprintf(f, "draw_distance %.9g\n", TheCamera.m_LODmult);
+	fprintf(f, "render_all_timed_objects %d\n", gNoTimeCull ? 1 : 0);
+	fprintf(f, "render_all_areas %d\n", gNoAreaCull ? 1 : 0);
+	writeQuotedSetting(f, "ipl_filter_search", gIplFilterSearch);
+	for(int i = 0; i < GetIplVisibilityEntryCount(); i++){
+		fprintf(f, "ipl_visible ");
+		writeInlineQuotedString(f, GetIplVisibilityEntryName(i));
+		fprintf(f, " %d\n", GetIplVisibilityEntryVisible(i) ? 1 : 0);
+	}
+	fprintf(f, "render_postfx %d\n", gRenderPostFX ? 1 : 0);
+	fprintf(f, "use_blur_ambient %d\n", gUseBlurAmb ? 1 : 0);
+	fprintf(f, "override_blur_ambient %d\n", gOverrideBlurAmb ? 1 : 0);
+	fprintf(f, "colour_filter %d\n", gColourFilter);
+	fprintf(f, "radiosity %d\n", gRadiosity ? 1 : 0);
+	fprintf(f, "building_pipe %d\n", gBuildingPipeSwitch);
+	fprintf(f, "backface_culling %d\n", gDoBackfaceCulling ? 1 : 0);
+	fprintf(f, "ps2_alpha_test %d\n", params.ps2AlphaTest ? 1 : 0);
+	fprintf(f, "alpha_ref %d\n", params.alphaRef);
+	fprintf(f, "render_background %d\n", gRenderBackground ? 1 : 0);
+	fprintf(f, "enable_fog %d\n", gEnableFog ? 1 : 0);
+	fprintf(f, "enable_timecycle_boxes %d\n", gEnableTimecycleBoxes ? 1 : 0);
+	fprintf(f, "gizmo_enabled %d\n", gGizmoEnabled ? 1 : 0);
+	fprintf(f, "gizmo_mode %d\n", gGizmoMode);
+	fprintf(f, "gizmo_snap %d\n", gGizmoSnap ? 1 : 0);
+	fprintf(f, "gizmo_snap_angle %.9g\n", gGizmoSnapAngle);
+	fprintf(f, "gizmo_snap_translate %.9g\n", gGizmoSnapTranslate);
+	fprintf(f, "place_snap_to_objects %d\n", gPlaceSnapToObjects ? 1 : 0);
+	fprintf(f, "place_snap_to_ground %d\n", gPlaceSnapToGround ? 1 : 0);
+	fprintf(f, "drag_follow_ground %d\n", gDragFollowGround ? 1 : 0);
+	fprintf(f, "drag_align_to_surface %d\n", gDragAlignToSurface ? 1 : 0);
+	writeQuotedSetting(f, "editor_camera_name", gEditorCameraName);
+	writeQuotedSetting(f, "editor_model_filter", gEditorModelFilter.InputBuf);
+	writeQuotedSetting(f, "editor_txd_filter", gEditorTxdFilter.InputBuf);
+	fprintf(f, "editor_highlight_matches %d\n", gEditorHighlightMatches ? 1 : 0);
+	fprintf(f, "browser_selected_category %d\n", gBrowserSelectedCategory);
+	writeQuotedSetting(f, "browser_selected_ide", gBrowserSelectedIde);
+	fprintf(f, "browser_active_tab %d\n", gBrowserActiveTab);
+	writeQuotedSetting(f, "browser_category_filter", gBrowserCategoryFilter.InputBuf);
+	writeQuotedSetting(f, "browser_ide_filter", gBrowserIdeFilter.InputBuf);
+	writeQuotedSetting(f, "browser_search_filter", gBrowserSearchFilter.InputBuf);
+	writeQuotedSetting(f, "browser_favourites_filter", gBrowserFavFilter.InputBuf);
+	fprintf(f, "browser_selected_object %d\n", GetSpawnObjectId());
+	fprintf(f, "diff_filter %d\n", gDiffFilter);
+	fprintf(f, "water_snap_enabled %d\n", WaterLevel::gWaterSnapEnabled ? 1 : 0);
+	fprintf(f, "water_snap_size %.9g\n", WaterLevel::gWaterSnapSize);
+	fprintf(f, "water_sub_mode %d\n", WaterLevel::gWaterSubMode);
+	fprintf(f, "water_create_shape %d\n", WaterLevel::gWaterCreateShape);
+	fprintf(f, "water_create_z %.9g\n", WaterLevel::gWaterCreateZ);
 	fclose(f);
+}
+
+void
+SaveEditorSettingsNow(void)
+{
+	if(!gPersistentSettingsLoaded)
+		return;
+	saveSaveSettings();
 }
 
 static void
@@ -4185,7 +4949,6 @@ static void
 uiEditorWindow(void)
 {
 	static char buf[256];
-	static char name[256] = "default";
 
 	CPtrNode *p;
 	ObjectInst *inst;
@@ -4203,10 +4966,10 @@ uiEditorWindow(void)
 		ImGui::Text("Far: %f", Timecycle::currentColours.farClp);
 		ImGui::Text("mouse: %f %f", TheCamera.mx, TheCamera.my);
 
-		ImGui::InputText("name", name, sizeof(name));
+		ImGui::InputText("name", gEditorCameraName, sizeof(gEditorCameraName));
 		if(ImGui::Button("Save")){
 			CamSetting cam;
-			strncpy(cam.name, name, sizeof(cam.name));
+			strncpy(cam.name, gEditorCameraName, sizeof(cam.name));
 			getCurrentCamSetting(&cam);
 			camSettings.push_back(cam);
 			saveCamSettings();
@@ -4219,13 +4982,13 @@ uiEditorWindow(void)
 			bool del = ImGui::Button("Delete");
 			ImGui::SameLine();
 			if(ImGui::Button("Replace")){
-				strncpy(cam->name, name, sizeof(cam->name));
+				strncpy(cam->name, gEditorCameraName, sizeof(cam->name));
 				getCurrentCamSetting(cam);
 				saveCamSettings();
 			}
 			ImGui::SameLine();
 			if(ImGui::Selectable(buf)){
-				strncpy(name, cam->name, sizeof(name));
+				strncpy(gEditorCameraName, cam->name, sizeof(gEditorCameraName));
 				TheCamera.m_position = cam->pos;
 				TheCamera.m_target = cam->target;
 				TheCamera.m_fov = cam->fov;
@@ -4271,21 +5034,19 @@ uiEditorWindow(void)
 	}
 
 	if(ImGui::TreeNode("Instances")){
-		static ImGuiTextFilter filter;
-		static ImGuiTextFilter filter2;
-		filter.Draw("Model (inc,-exc)"); ImGui::SameLine();
+		gEditorModelFilter.Draw("Model (inc,-exc)"); ImGui::SameLine();
 		if(ImGui::Button("Clear##Model"))
-			filter.Clear();
-		filter2.Draw("Txd (inc,-exc)"); ImGui::SameLine();
+			gEditorModelFilter.Clear();
+		gEditorTxdFilter.Draw("Txd (inc,-exc)"); ImGui::SameLine();
 		if(ImGui::Button("Clear##Txd"))
-			filter2.Clear();
-		static bool highlight;
-		ImGui::Checkbox("Highlight matches", &highlight);
+			gEditorTxdFilter.Clear();
+		ImGui::Checkbox("Highlight matches", &gEditorHighlightMatches);
 		for(p = instances.first; p; p = p->next){
 			inst = (ObjectInst*)p->item;
 			obj = GetObjectDef(inst->m_objectId);
 			txd = GetTxdDef(obj->m_txdSlot);
-			if(filter.PassFilter(obj->m_name) && filter2.PassFilter(txd->name)){
+			if(gEditorModelFilter.PassFilter(obj->m_name) &&
+			   gEditorTxdFilter.PassFilter(txd->name)){
 				int numPops = 0;
 				if(inst->m_isDeleted){
 					ImGui::PushStyleColor(ImGuiCol_Text, (ImVec4)ImColor(128, 128, 128));
@@ -4314,7 +5075,7 @@ uiEditorWindow(void)
 				if(numPops)
 					ImGui::PopStyleColor(numPops);
 				if(!inst->m_isDeleted){
-					if(highlight)
+					if(gEditorHighlightMatches)
 						inst->m_highlight = HIGHLIGHT_FILTER;
 					if(ImGui::IsItemHovered())
 						inst->m_highlight = HIGHLIGHT_HOVER;
@@ -4973,42 +5734,44 @@ uiBrowserWindow(void)
 	if(ImGui::BeginTabBar("##BrowserTabs")){
 
 		// === Categories tab ===
-		if(ImGui::BeginTabItem("Categories")){
-			static int selectedCat = -1;
-			static ImGuiTextFilter catFilter;
-
+		if(ImGui::BeginTabItem("Categories", nil,
+		   gBrowserTabRestorePending && gBrowserActiveTab == BROWSER_TAB_CATEGORIES ?
+		   ImGuiTabItemFlags_SetSelected : 0)){
+			gBrowserActiveTab = BROWSER_TAB_CATEGORIES;
 			// Category dropdown
-			static char catLabel[128] = "All Categories";
+			char catLabel[128];
+			if(gBrowserSelectedCategory >= 0 && gBrowserSelectedCategory < NUM_OBJ_CATEGORIES)
+				snprintf(catLabel, sizeof(catLabel), "%s", objCategories[gBrowserSelectedCategory].name);
+			else
+				snprintf(catLabel, sizeof(catLabel), "All Categories");
 			if(ImGui::BeginCombo("##CatCombo", catLabel)){
-				if(ImGui::Selectable("All Categories", selectedCat == -1)){
-					selectedCat = -1;
-					strcpy(catLabel, "All Categories");
+				if(ImGui::Selectable("All Categories", gBrowserSelectedCategory == -1)){
+					gBrowserSelectedCategory = -1;
 				}
 				static char lb[128];
 				for(int c = 0; c < NUM_OBJ_CATEGORIES; c++){
 					buildCategoryLabel(c, lb, sizeof(lb));
-					bool isSel = (c == selectedCat);
+					bool isSel = (c == gBrowserSelectedCategory);
 					if(ImGui::Selectable(lb, isSel)){
-						selectedCat = c;
-						snprintf(catLabel, sizeof(catLabel), "%s", objCategories[c].name);
+						gBrowserSelectedCategory = c;
 					}
 				}
 				ImGui::EndCombo();
 			}
 
-			catFilter.Draw("Filter##Cat");
+			gBrowserCategoryFilter.Draw("Filter##Cat");
 
 			// Build filtered list
 			numFiltered = 0;
 			for(int i = 0; i < NUMOBJECTDEFS; i++){
 				ObjectDef *obj = GetObjectDef(i);
 				if(obj == nil) continue;
-				if(selectedCat >= 0){
+				if(gBrowserSelectedCategory >= 0){
 					int cat = GetObjectCategory(i);
-					if(cat < 0 || !isCategoryOrChild(cat, selectedCat))
+					if(cat < 0 || !isCategoryOrChild(cat, gBrowserSelectedCategory))
 						continue;
 				}
-				if(!catFilter.PassFilter(obj->m_name)) continue;
+				if(!gBrowserCategoryFilter.PassFilter(obj->m_name)) continue;
 				filtered[numFiltered++] = i;
 			}
 			ImGui::Text("%d objects", numFiltered);
@@ -5018,10 +5781,10 @@ uiBrowserWindow(void)
 		}
 
 		// === IDE tab ===
-		if(ImGui::BeginTabItem("IDE")){
-			static const char *selectedIde = nil;
-			static ImGuiTextFilter ideFilter;
-
+		if(ImGui::BeginTabItem("IDE", nil,
+		   gBrowserTabRestorePending && gBrowserActiveTab == BROWSER_TAB_IDE ?
+		   ImGuiTabItemFlags_SetSelected : 0)){
+			gBrowserActiveTab = BROWSER_TAB_IDE;
 			// Collect unique IDE file names
 			static const char *ideFiles[512];
 			static int numIdeFiles = 0;
@@ -5042,28 +5805,28 @@ uiBrowserWindow(void)
 			}
 
 			// IDE dropdown
-			const char *ideLabel = selectedIde ? selectedIde : "All IDE files";
+			const char *ideLabel = gBrowserSelectedIde[0] ? gBrowserSelectedIde : "All IDE files";
 			if(ImGui::BeginCombo("##IdeCombo", ideLabel)){
-				if(ImGui::Selectable("All IDE files", selectedIde == nil))
-					selectedIde = nil;
+				if(ImGui::Selectable("All IDE files", gBrowserSelectedIde[0] == '\0'))
+					gBrowserSelectedIde[0] = '\0';
 				for(int j = 0; j < numIdeFiles; j++){
-					bool isSel = (selectedIde == ideFiles[j]);
+					bool isSel = strcmp(gBrowserSelectedIde, ideFiles[j]) == 0;
 					if(ImGui::Selectable(ideFiles[j], isSel))
-						selectedIde = ideFiles[j];
+						snprintf(gBrowserSelectedIde, sizeof(gBrowserSelectedIde), "%s", ideFiles[j]);
 				}
 				ImGui::EndCombo();
 			}
 
-			ideFilter.Draw("Filter##Ide");
+			gBrowserIdeFilter.Draw("Filter##Ide");
 
 			numFiltered = 0;
 			for(int i = 0; i < NUMOBJECTDEFS; i++){
 				ObjectDef *obj = GetObjectDef(i);
 				if(obj == nil) continue;
-				if(selectedIde && (obj->m_file == nil ||
-					strcmp(obj->m_file->name, selectedIde) != 0))
+				if(gBrowserSelectedIde[0] != '\0' &&
+				   (obj->m_file == nil || strcmp(obj->m_file->name, gBrowserSelectedIde) != 0))
 					continue;
-				if(!ideFilter.PassFilter(obj->m_name)) continue;
+				if(!gBrowserIdeFilter.PassFilter(obj->m_name)) continue;
 				filtered[numFiltered++] = i;
 			}
 			ImGui::Text("%d objects", numFiltered);
@@ -5073,19 +5836,21 @@ uiBrowserWindow(void)
 		}
 
 		// === Search tab ===
-		if(ImGui::BeginTabItem("Search")){
-			static ImGuiTextFilter searchFilter;
-			searchFilter.Draw("Search##All");
+		if(ImGui::BeginTabItem("Search", nil,
+		   gBrowserTabRestorePending && gBrowserActiveTab == BROWSER_TAB_SEARCH ?
+		   ImGuiTabItemFlags_SetSelected : 0)){
+			gBrowserActiveTab = BROWSER_TAB_SEARCH;
+			gBrowserSearchFilter.Draw("Search##All");
 			ImGui::SameLine();
 			if(ImGui::Button("Clear##SearchClear"))
-				searchFilter.Clear();
+				gBrowserSearchFilter.Clear();
 
 			numFiltered = 0;
-			if(searchFilter.IsActive()){
+			if(gBrowserSearchFilter.IsActive()){
 				for(int i = 0; i < NUMOBJECTDEFS; i++){
 					ObjectDef *obj = GetObjectDef(i);
 					if(obj == nil) continue;
-					if(!searchFilter.PassFilter(obj->m_name)) continue;
+					if(!gBrowserSearchFilter.PassFilter(obj->m_name)) continue;
 					filtered[numFiltered++] = i;
 				}
 			}
@@ -5096,16 +5861,18 @@ uiBrowserWindow(void)
 		}
 
 		// === Favourites tab ===
-		if(ImGui::BeginTabItem("Favourites")){
-			static ImGuiTextFilter favFilter;
-			favFilter.Draw("Filter##Fav");
+		if(ImGui::BeginTabItem("Favourites", nil,
+		   gBrowserTabRestorePending && gBrowserActiveTab == BROWSER_TAB_FAVOURITES ?
+		   ImGuiTabItemFlags_SetSelected : 0)){
+			gBrowserActiveTab = BROWSER_TAB_FAVOURITES;
+			gBrowserFavFilter.Draw("Filter##Fav");
 
 			numFiltered = 0;
 			for(int i = 0; i < NUMOBJECTDEFS; i++){
 				if(!IsFavourite(i)) continue;
 				ObjectDef *obj = GetObjectDef(i);
 				if(obj == nil) continue;
-				if(!favFilter.PassFilter(obj->m_name)) continue;
+				if(!gBrowserFavFilter.PassFilter(obj->m_name)) continue;
 				filtered[numFiltered++] = i;
 			}
 			ImGui::Text("%d favourites", numFiltered);
@@ -5115,6 +5882,7 @@ uiBrowserWindow(void)
 		}
 
 		ImGui::EndTabBar();
+		gBrowserTabRestorePending = false;
 	}
 
 	ImGui::End();
@@ -5149,19 +5917,18 @@ uiDiffWindow(void)
 	ImGui::Separator();
 
 	// Filter buttons (bitmask — 0 = show all)
-	static int diffFilter = 0;
-	if(ImGui::RadioButton("All", diffFilter == 0)) diffFilter = 0;
+	if(ImGui::RadioButton("All", gDiffFilter == 0)) gDiffFilter = 0;
 	ImGui::SameLine();
-	if(ImGui::RadioButton("Added", diffFilter == DIFF_ADDED)) diffFilter = DIFF_ADDED;
+	if(ImGui::RadioButton("Added", gDiffFilter == DIFF_ADDED)) gDiffFilter = DIFF_ADDED;
 	ImGui::SameLine();
-	if(ImGui::RadioButton("Deleted", diffFilter == DIFF_DELETED)) diffFilter = DIFF_DELETED;
+	if(ImGui::RadioButton("Deleted", gDiffFilter == DIFF_DELETED)) gDiffFilter = DIFF_DELETED;
 	ImGui::SameLine();
-	if(ImGui::RadioButton("Moved", diffFilter == DIFF_MOVED)) diffFilter = DIFF_MOVED;
+	if(ImGui::RadioButton("Moved", gDiffFilter == DIFF_MOVED)) gDiffFilter = DIFF_MOVED;
 	ImGui::SameLine();
-	if(ImGui::RadioButton("Rotated", diffFilter == DIFF_ROTATED)) diffFilter = DIFF_ROTATED;
+	if(ImGui::RadioButton("Rotated", gDiffFilter == DIFF_ROTATED)) gDiffFilter = DIFF_ROTATED;
 	if(numRestored > 0){
 		ImGui::SameLine();
-		if(ImGui::RadioButton("Restored", diffFilter == DIFF_RESTORED)) diffFilter = DIFF_RESTORED;
+		if(ImGui::RadioButton("Restored", gDiffFilter == DIFF_RESTORED)) gDiffFilter = DIFF_RESTORED;
 	}
 
 	// Collect changed instances into temp array for sorting
@@ -5171,7 +5938,7 @@ uiDiffWindow(void)
 		ObjectInst *inst = (ObjectInst*)p->item;
 		int flags = GetInstanceDiffFlags(inst);
 		if(flags == 0) continue;
-		if(diffFilter != 0 && !(flags & diffFilter)) continue;
+		if(gDiffFilter != 0 && !(flags & gDiffFilter)) continue;
 		if(numChanged < 4096)
 			changed[numChanged++] = inst;
 	}
@@ -5569,6 +6336,12 @@ gui(void)
 	}
 
 	uiToasts();
+
+	gSettingsAutosaveSeconds += ImGui::GetIO().DeltaTime;
+	if(gSettingsAutosaveSeconds >= 1.0f){
+		saveSaveSettings();
+		gSettingsAutosaveSeconds = 0.0f;
+	}
 
 //	uiTest();
 }

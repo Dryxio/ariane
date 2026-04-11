@@ -3,6 +3,7 @@
 #include "updater.h"
 #include "telemetry.h"
 #include "modloader.h"
+#include <stdlib.h>
 
 #ifdef _WIN32
 #include <direct.h>
@@ -515,13 +516,19 @@ void
 Init(void)
 {
 	static char windowTitle[256];
+	static bool saveHookRegistered;
 	snprintf(windowTitle, sizeof(windowTitle),
 		"Ariane %s [%s] - Map Editor (GTA III, VC, SA)",
 		ARIANE_VERSION, ARIANE_CHANNEL_DISPLAY);
 	sk::globals.windowtitle = windowTitle;
 	sk::globals.width = 1280;
 	sk::globals.height = 800;
+	LoadInitialEditorWindowState(&sk::globals.width, &sk::globals.height);
 	sk::globals.quit = 0;
+	if(!saveHookRegistered){
+		atexit(SaveEditorSettingsNow);
+		saveHookRegistered = true;
+	}
 
 	if(!SetEditorWorkingDirectory())
 		debug("warning: couldn't set working directory to editor root\n");
@@ -703,7 +710,10 @@ AppEventHandler(sk::Event e, void *param)
 		plAttachInput();
 		return EVENTPROCESSED;
 	case RWINITIALIZE:
-		return ::InitRW() ? EVENTPROCESSED : EVENTERROR;
+		if(!::InitRW())
+			return EVENTERROR;
+		ApplyInitialEditorWindowState();
+		return EVENTPROCESSED;
 	case PLUGINATTACH:
 		return attachPlugins() ? EVENTPROCESSED : EVENTERROR;
 	case KEYDOWN:
@@ -733,6 +743,7 @@ AppEventHandler(sk::Event e, void *param)
 
 		sk::globals.width = r->w;
 		sk::globals.height = r->h;
+		OnEditorWindowResized(r->w, r->h);
 		if(TheCamera.m_rwcam){
 			sk::CameraSize(TheCamera.m_rwcam, r);
 			TheCamera.m_rwcam_viewer->frameBuffer = TheCamera.m_rwcam->frameBuffer;
@@ -755,6 +766,7 @@ AppEventHandler(sk::Event e, void *param)
 	}
 	case IDLE:
 		SyncEditorInputState();
+		UpdateEditorWindowState();
 		timeStep = *(float*)param;
 		Idle();
 		return EVENTPROCESSED;
