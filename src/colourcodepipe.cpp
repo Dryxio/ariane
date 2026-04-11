@@ -105,6 +105,49 @@ GetColourCode(int x, int y)
 	return res;
 }
 
+int
+GetColourCodesInRect(int rx, int ry, int w, int h, int32 *out, int maxOut)
+{
+	int count = 0;
+	if(w <= 0 || h <= 0 || maxOut <= 0) return 0;
+
+	IDirect3DSurface9 *backbuffer = nil;
+	d3ddevice->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backbuffer);
+
+	D3DLOCKED_RECT d3dlr;
+	D3DSURFACE_DESC desc;
+	IDirect3DSurface9 *surf = nil;
+	backbuffer->GetDesc(&desc);
+	d3ddevice->CreateOffscreenPlainSurface(desc.Width, desc.Height, desc.Format,
+		D3DPOOL_SYSTEMMEM, &surf, nil);
+	d3ddevice->GetRenderTargetData(backbuffer, surf);
+
+	surf->LockRect(&d3dlr, nil, D3DLOCK_NO_DIRTY_UPDATE|D3DLOCK_READONLY);
+	if(desc.Format == D3DFMT_A8R8G8B8){
+		int xEnd = rx + w < (int)desc.Width  ? rx + w : (int)desc.Width;
+		int yEnd = ry + h < (int)desc.Height ? ry + h : (int)desc.Height;
+		for(int row = ry; row < yEnd; row++){
+			uint8 *scanline = (uint8*)d3dlr.pBits + d3dlr.Pitch*row;
+			for(int col = rx; col < xEnd; col++){
+				uint8 *px = scanline + col*4;
+				int32 code = px[0]<<16 | px[1]<<8 | px[2];
+				if(code == 0) continue;
+				bool found = false;
+				for(int j = 0; j < count; j++)
+					if(out[j] == code){ found = true; break; }
+				if(!found){
+					out[count++] = code;
+					if(count >= maxOut) goto done;
+				}
+			}
+		}
+	}
+done:
+	surf->UnlockRect();
+	surf->Release();
+	backbuffer->Release();
+	return count;
+}
 
 #endif
 
@@ -184,6 +227,37 @@ GetColourCode(int x, int y)
 	glGetIntegerv(GL_VIEWPORT, viewport); 
 	glReadPixels(x, viewport[3]-y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, &col);
 	return col.blue<<16 | col.green<<8 | col.red;
+}
+
+int
+GetColourCodesInRect(int rx, int ry, int w, int h, int32 *out, int maxOut)
+{
+	int count = 0;
+	if(w <= 0 || h <= 0 || maxOut <= 0) return 0;
+
+	int viewport[4];
+	glGetIntegerv(GL_VIEWPORT, viewport);
+
+	int glx = rx;
+	int gly = viewport[3] - ry - h;
+	rw::RGBA *pixels = (rw::RGBA*)rwMalloc(w * h * sizeof(rw::RGBA), 0);
+	if(pixels == nil) return 0;
+	glReadPixels(glx, gly, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+
+	// glReadPixels returns bottom-up rows; iterate all pixels
+	for(int i = 0; i < w*h; i++){
+		int32 code = pixels[i].blue<<16 | pixels[i].green<<8 | pixels[i].red;
+		if(code == 0) continue;
+		bool found = false;
+		for(int j = 0; j < count; j++)
+			if(out[j] == code){ found = true; break; }
+		if(!found){
+			out[count++] = code;
+			if(count >= maxOut) break;
+		}
+	}
+	rwFree(pixels);
+	return count;
 }
 #endif
 
