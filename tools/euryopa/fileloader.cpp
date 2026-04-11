@@ -902,6 +902,9 @@ static void WriteInstLine(FILE *f, ObjectInst *inst, int lodIdx, bool deleted);
 static bool BuildBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDeleted, int *numMoved,
                                     std::vector<uint8> *outBuffer,
                                     std::vector<std::pair<ObjectInst*, int>> *rebuiltIndexUpdates);
+static bool BuildBinaryStandaloneImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDeleted, int *numMoved,
+                                              std::vector<uint8> *outBuffer,
+                                              std::vector<std::pair<ObjectInst*, int>> *rebuiltIndexUpdates);
 
 static int
 CollectRelatedStreamingImages(const char *path, int32 *images, int maxImages)
@@ -1420,8 +1423,8 @@ SaveScene(const char *filename)
 			if(gSaveDestination == SAVE_DESTINATION_MODLOADER){
 				std::vector<uint8> writeBuf;
 				std::vector<std::pair<ObjectInst*, int>> imageRebuiltUpdates;
-				if(!BuildBinaryImageByIndex(relatedImages[i], &result, &numDeleted, &numMoved,
-				                            &writeBuf, &imageRebuiltUpdates)){
+				if(!BuildBinaryStandaloneImageByIndex(relatedImages[i], &result, &numDeleted, &numMoved,
+				                                      &writeBuf, &imageRebuiltUpdates)){
 					binarySaveFailed = true;
 					break;
 				}
@@ -1734,6 +1737,15 @@ BuildBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDelet
 {
 	return BuildBinaryImageByIndexInternal(imgIdx, result, numDeleted, numMoved,
 	                                       outBuffer, rebuiltIndexUpdates, false);
+}
+
+static bool
+BuildBinaryStandaloneImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDeleted, int *numMoved,
+                                  std::vector<uint8> *outBuffer,
+                                  std::vector<std::pair<ObjectInst*, int>> *rebuiltIndexUpdates)
+{
+	return BuildBinaryImageByIndexInternal(imgIdx, result, numDeleted, numMoved,
+	                                       outBuffer, rebuiltIndexUpdates, true);
 }
 
 static bool
