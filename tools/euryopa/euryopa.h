@@ -353,6 +353,12 @@ extern bool gGizmoSnap;
 extern float gGizmoSnapAngle;
 extern float gGizmoSnapTranslate;
 
+// Rect-select (marquee selection)
+extern bool gRectSelectActive;	// true when LMB is consumed by rect-select (blocks camera)
+
+// Batch operation limit (undo, delete, snap, gizmo drag, clipboard, etc.)
+#define MAX_BATCH_OBJECTS 512
+
 // Undo/Redo
 enum UndoType {
 	UNDO_MOVE,
@@ -389,13 +395,13 @@ struct UndoAction {
 	rw::V3d lodOldPos;
 	rw::V3d lodNewPos;
 	// For DELETE: list of deleted instances (inst + LOD cascade)
-	ObjectInst *deletedInsts[64];
+	ObjectInst *deletedInsts[MAX_BATCH_OBJECTS];
 	int numDeleted;
 	// For PASTE: list of pasted instances (to delete on undo)
-	ObjectInst *pastedInsts[64];
+	ObjectInst *pastedInsts[MAX_BATCH_OBJECTS];
 	int numPasted;
 	// For batch transform actions (snap to ground, etc.)
-	UndoTransform transforms[64];
+	UndoTransform transforms[MAX_BATCH_OBJECTS];
 	int numTransforms;
 };
 
@@ -694,6 +700,7 @@ int32 pick(void);
 ObjectInst *AddInstance(void);
 void ClearSelection(void);
 void DeleteSelected(void);
+int DeleteAllInstances(void);
 void RemoveInstFromSectors(ObjectInst *inst);
 
 
@@ -1034,6 +1041,7 @@ void RenderOpaque(void);
 void RenderTransparent(void);
 void RenderEverything(void);
 ObjectInst *GetVisibleInstUnderRay(const Ray &ray, rw::V3d *hitPos = nil, float *hitT = nil);
+void ForEachVisibleInst(void (*fn)(ObjectInst *inst, void *data), void *data);
 
 // Debug Render
 void RenderLine(rw::V3d v1, rw::V3d v2, rw::RGBA c1, rw::RGBA c2);
@@ -1105,6 +1113,7 @@ namespace WaterLevel
 	void SelectWaterPoly(int type, int index);
 	void DeleteSelectedWaterPolys(void);
 	void DuplicateSelectedWaterPolys(void);
+	void ClearAllWater(void);
 	void ReloadWater(void);
 
 	// Undo/Redo
