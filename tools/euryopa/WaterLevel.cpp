@@ -743,6 +743,20 @@ DeleteSelectedWaterPolys(void)
 }
 
 void
+ClearAllWater(void)
+{
+	if(numWaterQuads == 0 && numWaterTris == 0 && numWaterVertices == 0)
+		return;
+	WaterUndoPush();
+	CancelCreateMode();
+	numWaterVertices = 0;
+	numWaterQuads = 0;
+	numWaterTris = 0;
+	ClearWaterSelection();
+	gWaterDirty = true;
+}
+
+void
 DuplicateSelectedWaterPolys(void)
 {
 	if(numWaterPolySelected == 0) return;
