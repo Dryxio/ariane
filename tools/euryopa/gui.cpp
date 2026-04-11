@@ -1472,6 +1472,9 @@ static bool gOpenExportPrefab = false;
 static bool gOpenImportPrefab = false;
 static bool gOpenCustomImport = false;
 static bool gOpenDestroyMap = false;
+static bool gShowExportPrefab = false;
+static bool gShowImportPrefab = false;
+static bool gShowDestroyMap = false;
 static bool gDestroyMapIncludeWater = true;
 static void uiExportPrefabPopup(void);
 static void uiImportPrefabPopup(void);
@@ -1479,6 +1482,29 @@ static void uiCustomImportPopup(void);
 static void uiDestroyMapPopup(void);
 static void trimLineEnding(char *line);
 static int findSuggestedCustomImportId(void);
+
+static bool
+BeginEditorDialog(const char *name, bool *open, ImGuiWindowFlags flags = 0)
+{
+	if(open && !*open)
+		return false;
+
+	const ImGuiViewport *viewport = ImGui::GetMainViewport();
+	ImGui::SetNextWindowPos(viewport->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+	flags |= ImGuiWindowFlags_AlwaysAutoResize |
+	         ImGuiWindowFlags_NoCollapse;
+	if(!ImGui::Begin(name, open, flags)){
+		ImGui::End();
+		return false;
+	}
+	return true;
+}
+
+static void
+EndEditorDialog(void)
+{
+	ImGui::End();
+}
 
 static const char *CUSTOM_IMPORT_MANIFEST_LOGICAL_PATH = "ariane_custom.txt";
 static const char *CUSTOM_IMPORT_IDE_LOGICAL_PATH = "data/maps/ariane/custom.ide";
@@ -1532,11 +1558,12 @@ uiDestroyMapPopup(void)
 {
 	if(gOpenDestroyMap){
 		gDestroyMapIncludeWater = params.water == GAME_SA;
-		ImGui::OpenPopup("Destroy Entire Map");
+		gShowDestroyMap = true;
 		gOpenDestroyMap = false;
+		ImGui::SetNextWindowFocus();
 	}
 
-	if(!ImGui::BeginPopupModal("Destroy Entire Map", nil, ImGuiWindowFlags_AlwaysAutoResize))
+	if(!BeginEditorDialog("Destroy Entire Map", &gShowDestroyMap))
 		return;
 
 	ImGui::TextWrapped("This marks every loaded map instance as deleted in the editor.");
@@ -1552,13 +1579,13 @@ uiDestroyMapPopup(void)
 
 	if(ImGui::Button("Destroy", ImVec2(140, 0))){
 		destroyEntireMap(gDestroyMapIncludeWater && params.water == GAME_SA);
-		ImGui::CloseCurrentPopup();
+		gShowDestroyMap = false;
 	}
 	ImGui::SameLine();
 	if(ImGui::Button("Cancel", ImVec2(140, 0)))
-		ImGui::CloseCurrentPopup();
+		gShowDestroyMap = false;
 
-	ImGui::EndPopup();
+	EndEditorDialog();
 }
 
 struct FileRollbackEntry
@@ -2530,12 +2557,13 @@ uiExportPrefabPopup(void)
 	static char prefabName[128] = "";
 
 	if(gOpenExportPrefab){
-		ImGui::OpenPopup("Export Prefab");
+		gShowExportPrefab = true;
 		gOpenExportPrefab = false;
 		prefabName[0] = '\0';
+		ImGui::SetNextWindowFocus();
 	}
 
-	if(ImGui::BeginPopupModal("Export Prefab", nil, ImGuiWindowFlags_AlwaysAutoResize)){
+	if(BeginEditorDialog("Export Prefab", &gShowExportPrefab)){
 		ImGui::Text("Save selection as prefab");
 		ImGui::InputText("Name", prefabName, sizeof(prefabName));
 
@@ -2546,8 +2574,8 @@ uiExportPrefabPopup(void)
 			if(!GetArianeDataPath(prefabDir, sizeof(prefabDir), "prefabs") ||
 			   snprintf(path, sizeof(path), "%s/%s.ariane", prefabDir, prefabName) >= (int)sizeof(path)){
 				Toast(TOAST_SAVE, "Failed to resolve prefab path");
-				ImGui::CloseCurrentPopup();
-				ImGui::EndPopup();
+				gShowExportPrefab = false;
+				EndEditorDialog();
 				return;
 			}
 			int exported = ExportPrefab(path);
@@ -2555,13 +2583,13 @@ uiExportPrefabPopup(void)
 				Toast(TOAST_SAVE, "Exported %d instance(s) to %s", exported, path);
 			else
 				Toast(TOAST_SAVE, "Failed to export prefab");
-			ImGui::CloseCurrentPopup();
+			gShowExportPrefab = false;
 		}
 		ImGui::SameLine();
 		if(ImGui::Button("Cancel", ImVec2(120, 0)))
-			ImGui::CloseCurrentPopup();
+			gShowExportPrefab = false;
 
-		ImGui::EndPopup();
+		EndEditorDialog();
 	}
 }
 
@@ -2632,7 +2660,7 @@ uiImportPrefabPopup(void)
 
 	if(gOpenImportPrefab){
 		char prefabDir[512];
-		ImGui::OpenPopup("Import Prefab");
+		gShowImportPrefab = true;
 		gOpenImportPrefab = false;
 		manualPath[0] = '\0';
 		selectedFile = -1;
@@ -2640,9 +2668,10 @@ uiImportPrefabPopup(void)
 		if(GetArianeDataPath(prefabDir, sizeof(prefabDir), "prefabs"))
 			scanPrefabDir(prefabDir, prefabFiles, prefabPaths, &numPrefabFiles, 128);
 		scanPrefabDir("prefabs", prefabFiles, prefabPaths, &numPrefabFiles, 128);
+		ImGui::SetNextWindowFocus();
 	}
 
-	if(ImGui::BeginPopupModal("Import Prefab", nil, ImGuiWindowFlags_AlwaysAutoResize)){
+	if(BeginEditorDialog("Import Prefab", &gShowImportPrefab)){
 		ImGui::Text("Load prefab in front of camera");
 
 		if(numPrefabFiles > 0){
@@ -2672,13 +2701,13 @@ uiImportPrefabPopup(void)
 				Toast(TOAST_SPAWN, "Imported %d instance(s) from prefab", imported);
 			else
 				Toast(TOAST_SPAWN, "Failed to import prefab");
-			ImGui::CloseCurrentPopup();
+			gShowImportPrefab = false;
 		}
 		ImGui::SameLine();
 		if(ImGui::Button("Cancel", ImVec2(120, 0)))
-			ImGui::CloseCurrentPopup();
+			gShowImportPrefab = false;
 
-		ImGui::EndPopup();
+		EndEditorDialog();
 	}
 }
 
@@ -3005,11 +3034,11 @@ static void
 uiCustomImportPopup(void)
 {
 	if(gOpenCustomImport){
-		ImGui::OpenPopup("Import Custom Object");
 		gOpenCustomImport = false;
+		ImGui::SetNextWindowFocus();
 	}
 
-	if(!ImGui::BeginPopupModal("Import Custom Object", nil, ImGuiWindowFlags_AlwaysAutoResize))
+	if(!BeginEditorDialog("Import Custom Object", &gCustomImport.active))
 		return;
 
 	ImGui::Text("Import custom object in front of camera");
@@ -3117,7 +3146,7 @@ uiCustomImportPopup(void)
 	ImGui::BeginDisabled(!canImport);
 	if(ImGui::Button("Import", ImVec2(120, 0))){
 		if(finalizeCustomImport())
-			ImGui::CloseCurrentPopup();
+			gCustomImport.active = false;
 	}
 	ImGui::EndDisabled();
 	ImGui::SameLine();
@@ -3125,10 +3154,9 @@ uiCustomImportPopup(void)
 		gCustomImport.active = false;
 		gCustomImport.error[0] = '\0';
 		gCustomImport.warning[0] = '\0';
-		ImGui::CloseCurrentPopup();
 	}
 
-	ImGui::EndPopup();
+	EndEditorDialog();
 }
 
 static void
