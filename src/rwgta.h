@@ -453,6 +453,7 @@ extern bool renderColourCoded;
 extern rw::RGBA colourCode;
 rw::ObjPipeline *makeColourCodePipeline(void);
 rw::int32 GetColourCode(int x, int y);
+int GetColourCodesInRect(int x, int y, int w, int h, rw::int32 *out, int maxOut);
 
 //
 // Leeds building pipe
