@@ -1022,6 +1022,27 @@ DeleteSelected(void)
 	UndoRecordDelete(toDelete, numToDelete);
 }
 
+int
+DeleteAllInstances(void)
+{
+	int numDeleted = 0;
+	ClearSelection();
+
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst == nil || inst->m_isDeleted)
+			continue;
+		// Whole-map delete intentionally skips per-instance LOD cascade work.
+		// Every instance is being deleted in the same pass, so the recursive
+		// ObjectInst::Delete path only adds O(n^2) scans on large SA maps.
+		inst->m_isDeleted = true;
+		StampChangeSeq(inst);
+		inst->m_selected = false;
+		numDeleted++;
+	}
+	return numDeleted;
+}
+
 // Object Spawner state
 bool gPlaceMode;
 static int spawnObjectId = -1;
