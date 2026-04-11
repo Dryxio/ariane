@@ -1197,8 +1197,10 @@ AppendIplToDat(const char *iplpath)
 	if(datfile == nil) return;
 	if(IplEntryExistsInDat(datfile, iplpath)) return;
 
-	char *ospath = getPath(datfile);
-	FILE *f = fopen(ospath, "a");
+	const char *targetPath = ModloaderGetSourcePath(datfile);
+	if(targetPath == nil)
+		targetPath = getPath(datfile);
+	FILE *f = fopen(targetPath, "a");
 	if(f == nil){
 		log("WARNING: could not append to %s\n", datfile);
 		return;

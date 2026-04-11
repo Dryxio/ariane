@@ -44,6 +44,7 @@ static std::vector<char*> additionStrings;
 static bool active = false;
 
 static void NormalizePath(const char *in, char *out, int maxLen);
+static void PreScanDatFile(const char *datPath, std::vector<std::string> &basePaths);
 
 static bool
 BuildGameRootedPath(char *dst, size_t size, const char *name)
@@ -185,6 +186,61 @@ IsRedirectExt(const char *ext)
 	return strcmp(ext, "ide") == 0 || strcmp(ext, "ipl") == 0 ||
 	       strcmp(ext, "col") == 0 || strcmp(ext, "img") == 0 ||
 	       strcmp(ext, "dir") == 0;
+}
+
+static int
+FindBestExactLogicalPathCandidate(const char *logicalPath, std::vector<ModFile> &allModFiles)
+{
+	int bestIdx = -1;
+	for(size_t i = 0; i < allModFiles.size(); i++){
+		ModFile &mf = allModFiles[i];
+		if(strcmp(mf.logicalPath, logicalPath) != 0)
+			continue;
+		if(bestIdx < 0 || IsBetterModFileCandidate(mf, allModFiles[bestIdx]))
+			bestIdx = (int)i;
+	}
+	return bestIdx;
+}
+
+static void
+PreScanDatWithOverride(const char *logicalPath, std::vector<ModFile> &allModFiles,
+                       std::vector<std::string> &basePaths)
+{
+	int bestIdx = FindBestExactLogicalPathCandidate(logicalPath, allModFiles);
+	if(bestIdx >= 0){
+		PreScanDatFile(allModFiles[bestIdx].physicalPath, basePaths);
+		return;
+	}
+	if(doesFileExist(logicalPath))
+		PreScanDatFile(logicalPath, basePaths);
+}
+
+static void
+AddMainDatRedirects(std::vector<ModFile> &allModFiles)
+{
+	static const char *mainDatPaths[] = {
+		"data/default.dat",
+		"data/gta3.dat",
+		"data/gta_vc.dat",
+		"data/gta.dat",
+		"data/gta_lcs.dat",
+		"data/gta_vcs.dat",
+	};
+
+	for(size_t i = 0; i < sizeof(mainDatPaths)/sizeof(mainDatPaths[0]); i++){
+		const char *logicalPath = mainDatPaths[i];
+		if(HasRedirectForLogicalPath(logicalPath))
+			continue;
+
+		int bestIdx = FindBestExactLogicalPathCandidate(logicalPath, allModFiles);
+		if(bestIdx < 0)
+			continue;
+
+		ModFile redirectMf = allModFiles[bestIdx];
+		strncpy(redirectMf.logicalPath, logicalPath, sizeof(redirectMf.logicalPath)-1);
+		redirectMf.logicalPath[sizeof(redirectMf.logicalPath)-1] = '\0';
+		pathRedirects.push_back(redirectMf);
+	}
 }
 
 static bool
@@ -627,23 +683,6 @@ ModloaderInit(void)
 	std::vector<std::pair<std::string, int>> priorities;
 	ParseModloaderIni(modloaderIniPath, priorities);
 
-	// Pre-scan gta.dat files for base paths
-	std::vector<std::string> basePaths;
-	PreScanDatFile("data/default.dat", basePaths);
-	// Scan game-specific dat
-	if(doesFileExist("data/gta3.dat")) PreScanDatFile("data/gta3.dat", basePaths);
-	if(doesFileExist("data/gta_vc.dat")) PreScanDatFile("data/gta_vc.dat", basePaths);
-	if(doesFileExist("data/gta.dat")) PreScanDatFile("data/gta.dat", basePaths);
-	if(doesFileExist("data/gta_lcs.dat")) PreScanDatFile("data/gta_lcs.dat", basePaths);
-	if(doesFileExist("data/gta_vcs.dat")) PreScanDatFile("data/gta_vcs.dat", basePaths);
-
-	// Also add the default IMG paths
-	char normBuf[256];
-	NormalizePath("MODELS\\GTA3.IMG", normBuf, sizeof(normBuf));
-	basePaths.push_back(normBuf);
-	NormalizePath("MODELS\\GTA_INT.IMG", normBuf, sizeof(normBuf));
-	basePaths.push_back(normBuf);
-
 	// Enumerate mod subdirectories
 	std::vector<std::string> modDirs;
 	ListModDirs(modloaderDir, modDirs);
@@ -697,6 +736,23 @@ ModloaderInit(void)
 	if(allModFiles.empty()){
 		return;
 	}
+
+	// Pre-scan the winning main dat files so redirected child paths can come
+	// from total conversions with custom data/default.dat and data/gta*.dat.
+	std::vector<std::string> basePaths;
+	PreScanDatWithOverride("data/default.dat", allModFiles, basePaths);
+	PreScanDatWithOverride("data/gta3.dat", allModFiles, basePaths);
+	PreScanDatWithOverride("data/gta_vc.dat", allModFiles, basePaths);
+	PreScanDatWithOverride("data/gta.dat", allModFiles, basePaths);
+	PreScanDatWithOverride("data/gta_lcs.dat", allModFiles, basePaths);
+	PreScanDatWithOverride("data/gta_vcs.dat", allModFiles, basePaths);
+
+	// Also add the default IMG paths
+	char normBuf[256];
+	NormalizePath("MODELS\\GTA3.IMG", normBuf, sizeof(normBuf));
+	basePaths.push_back(normBuf);
+	NormalizePath("MODELS\\GTA_INT.IMG", normBuf, sizeof(normBuf));
+	basePaths.push_back(normBuf);
 
 	// 0) Loose archive-entry overrides (for example models/gta3.img/foo.ipl)
 	{
@@ -824,6 +880,10 @@ ModloaderInit(void)
 			}
 		}
 	}
+
+	// Main .dat files themselves must redirect so fopen_ci("data/gta.dat")
+	// and friends resolve to the winning modded file.
+	AddMainDatRedirects(allModFiles);
 
 	// 3) Deduplicate additionsInternal by (type, normalized logical path), highest priority wins
 	{
