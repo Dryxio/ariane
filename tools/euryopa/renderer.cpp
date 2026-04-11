@@ -634,6 +634,15 @@ RenderEverything(void)
 	RenderTransparent();
 }
 
+void
+ForEachVisibleInst(void (*fn)(ObjectInst *inst, void *data), void *data)
+{
+	for(int i = 0; i < (int)visibleInsts.size(); i++)
+		fn(visibleInsts[i], data);
+	for(int i = 0; i < (int)sortedInsts.size(); i++)
+		fn(sortedInsts[i].inst, data);
+}
+
 ObjectInst*
 GetVisibleInstUnderRay(const Ray &ray, rw::V3d *hitPos, float *hitT)
 {
