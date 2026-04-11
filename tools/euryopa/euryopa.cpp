@@ -23,6 +23,12 @@ bool gGizmoSnap = false;
 float gGizmoSnapAngle = 15.0f;
 float gGizmoSnapTranslate = 1.0f;
 
+// Rect-select (marquee selection)
+bool gRectSelectActive = false;
+static bool sRectSelectDragging = false;
+static float sRectStartX, sRectStartY;
+static const float RECT_SELECT_THRESHOLD_SQ = 25.0f;	// 5px squared
+
 int gameTxdSlot;
 
 int currentHour = 12;
@@ -1077,7 +1083,7 @@ FindOrAddTransform(UndoTransform *transforms, int *numTransforms, ObjectInst *in
 	for(int i = 0; i < *numTransforms; i++)
 		if(transforms[i].inst == inst)
 			return &transforms[i];
-	if(*numTransforms >= 64)
+	if(*numTransforms >= MAX_BATCH_OBJECTS)
 		return nil;
 	UndoTransform *t = &transforms[(*numTransforms)++];
 	memset(t, 0, sizeof(*t));
@@ -1138,7 +1144,7 @@ ApplyTransform(UndoTransform &t)
 int
 SnapSelectedToGround(bool alignRotation)
 {
-	ObjectInst *targets[64];
+	ObjectInst *targets[MAX_BATCH_OBJECTS];
 	int numTargets = 0;
 	int skipped = 0;
 
@@ -1154,7 +1160,7 @@ SnapSelectedToGround(bool alignRotation)
 			skipped++;
 			continue;
 		}
-		if(numTargets < 64)
+		if(numTargets < MAX_BATCH_OBJECTS)
 			targets[numTargets++] = inst;
 	}
 
@@ -1164,7 +1170,7 @@ SnapSelectedToGround(bool alignRotation)
 		return 0;
 	}
 
-	UndoTransform transforms[64];
+	UndoTransform transforms[MAX_BATCH_OBJECTS];
 	int numTransforms = 0;
 	int snapped = 0;
 
@@ -1283,12 +1289,178 @@ GetPlacementPosition(void)
 	return surfacePos;
 }
 
+// --- Rect-select (marquee selection) ---
+
+// Called early in Draw(), before Camera.Process, to detect Shift+LMB start
+// and set gRectSelectActive so the camera knows to skip LMB look.
+static void
+updateRectSelectEarly(void)
+{
+	ImGuiIO &io = ImGui::GetIO();
+	bool blockInput = io.WantCaptureMouse || gGizmoHovered || gGizmoUsing;
+
+	// Start: Shift+LMB just pressed, not blocked
+	if(!gRectSelectActive && !blockInput &&
+	   CPad::IsShiftDown() && CPad::IsMButtonJustDown(1) &&
+	   !gPlaceMode && !WaterLevel::gWaterEditMode){
+		gRectSelectActive = true;
+		sRectSelectDragging = false;
+		sRectStartX = (float)CPad::newMouseState.x;
+		sRectStartY = (float)CPad::newMouseState.y;
+	}
+
+	// Threshold: promote pending to dragging
+	if(gRectSelectActive && !sRectSelectDragging && CPad::IsMButtonDown(1)){
+		float dx = (float)CPad::newMouseState.x - sRectStartX;
+		float dy = (float)CPad::newMouseState.y - sRectStartY;
+		if(dx*dx + dy*dy > RECT_SELECT_THRESHOLD_SQ)
+			sRectSelectDragging = true;
+	}
+
+	// Cancel if LMB released before threshold (was a Shift+click, not a drag)
+	if(gRectSelectActive && !sRectSelectDragging && !CPad::IsMButtonDown(1))
+		gRectSelectActive = false;
+}
+
+struct RectSelectCtx {
+	float x1, y1, x2, y2;
+	bool removeMode;
+	int count;
+};
+
+// Project an instance's bounding box to a screen-space AABB and test overlap
+// with the selection rectangle.  Returns true if the projected bounds overlap.
+// Falls back to bounding-sphere center when no collision model is available.
+static bool
+instOverlapsScreenRect(ObjectInst *inst, float rx1, float ry1, float rx2, float ry2)
+{
+	ObjectDef *obj = GetObjectDef(inst->m_objectId);
+
+	if(obj && obj->m_colModel){
+		CColModel *col = obj->m_colModel;
+		float sxMin = 1e30f, syMin = 1e30f;
+		float sxMax = -1e30f, syMax = -1e30f;
+		int projected = 0;
+
+		for(int ix = 0; ix < 2; ix++)
+		for(int iy = 0; iy < 2; iy++)
+		for(int iz = 0; iz < 2; iz++){
+			rw::V3d v;
+			v.x = ix ? col->boundingBox.max.x : col->boundingBox.min.x;
+			v.y = iy ? col->boundingBox.max.y : col->boundingBox.min.y;
+			v.z = iz ? col->boundingBox.max.z : col->boundingBox.min.z;
+			rw::V3d::transformPoints(&v, &v, 1, &inst->m_matrix);
+
+			rw::V3d sp;
+			float sw, sh;
+			if(!Sprite::CalcScreenCoors(v, &sp, &sw, &sh, false))
+				continue;
+			if(sp.x < sxMin) sxMin = sp.x;
+			if(sp.y < syMin) syMin = sp.y;
+			if(sp.x > sxMax) sxMax = sp.x;
+			if(sp.y > syMax) syMax = sp.y;
+			projected++;
+		}
+
+		if(projected == 0)
+			return false;
+
+		// AABB overlap test
+		return sxMin <= rx2 && sxMax >= rx1 && syMin <= ry2 && syMax >= ry1;
+	}
+
+	// No collision model — fall back to object position
+	rw::V3d sp;
+	float sw, sh;
+	if(!Sprite::CalcScreenCoors(inst->m_translation, &sp, &sw, &sh, false))
+		return false;
+	return sp.x >= rx1 && sp.x <= rx2 && sp.y >= ry1 && sp.y <= ry2;
+}
+
+static void
+rectSelectHighlightInst(ObjectInst *inst, void *data)
+{
+	if(inst->m_isDeleted) return;
+	RectSelectCtx *ctx = (RectSelectCtx*)data;
+
+	if(instOverlapsScreenRect(inst, ctx->x1, ctx->y1, ctx->x2, ctx->y2)){
+		if(inst->m_highlight < HIGHLIGHT_HOVER)
+			inst->m_highlight = HIGHLIGHT_HOVER;
+	}
+}
+
+// Called late in Draw(), after handleTool: draws overlay, previews, commits on release
+static void
+handleRectSelect(void)
+{
+	if(!sRectSelectDragging) return;
+
+	float curX = (float)CPad::newMouseState.x;
+	float curY = (float)CPad::newMouseState.y;
+
+	// Normalise rect
+	RectSelectCtx ctx;
+	ctx.x1 = sRectStartX < curX ? sRectStartX : curX;
+	ctx.y1 = sRectStartY < curY ? sRectStartY : curY;
+	ctx.x2 = sRectStartX > curX ? sRectStartX : curX;
+	ctx.y2 = sRectStartY > curY ? sRectStartY : curY;
+	ctx.removeMode = CPad::IsAltDown();
+	ctx.count = 0;
+
+	// Draw selection rectangle overlay
+	ImDrawList *dl = ImGui::GetForegroundDrawList();
+	ImVec2 p0(ctx.x1, ctx.y1);
+	ImVec2 p1(ctx.x2, ctx.y2);
+	dl->AddRectFilled(p0, p1, IM_COL32(100, 150, 255, 40));
+	dl->AddRect(p0, p1, IM_COL32(100, 150, 255, 200), 0.0f, 0, 1.5f);
+
+	if(CPad::IsMButtonDown(1)){
+		// Still dragging — preview highlights
+		ForEachVisibleInst(rectSelectHighlightInst, &ctx);
+	}else{
+		// LMB released — commit selection via colour-coded picking pass
+		bool addMode = CPad::IsCtrlDown();
+		if(!addMode && !ctx.removeMode)
+			ClearSelection();
+
+		// Render scene with colour codes and read the selection rectangle
+		static rw::RGBA black = { 0, 0, 0, 0xFF };
+		TheCamera.m_rwcam->clear(&black, rw::Camera::CLEARIMAGE|rw::Camera::CLEARZ);
+		RenderEverythingColourCoded();
+
+		int rx = (int)ctx.x1;
+		int ry = (int)ctx.y1;
+		int rw = (int)(ctx.x2 - ctx.x1 + 0.5f);
+		int rh = (int)(ctx.y2 - ctx.y1 + 0.5f);
+		int32 codes[MAX_BATCH_OBJECTS];
+		int numCodes = gta::GetColourCodesInRect(rx, ry, rw, rh, codes, MAX_BATCH_OBJECTS);
+
+		int count = 0;
+		for(int i = 0; i < numCodes; i++){
+			ObjectInst *inst = GetInstanceByID(codes[i]);
+			if(inst && !inst->m_isDeleted){
+				if(ctx.removeMode)
+					inst->Deselect();
+				else
+					inst->Select();
+				count++;
+			}
+		}
+
+		if(count > 0)
+			Toast(TOAST_SELECTION, "Selected %d object(s)", count);
+
+		sRectSelectDragging = false;
+		gRectSelectActive = false;
+	}
+}
+
 void
 handleTool(void)
 {
 	// Don't process viewport clicks when ImGui wants the mouse
 	ImGuiIO &io = ImGui::GetIO();
-	if(io.WantCaptureMouse || gGizmoHovered || gGizmoUsing || ImGuizmo::IsOver())
+	if(io.WantCaptureMouse || gGizmoHovered || gGizmoUsing || ImGuizmo::IsOver() || gRectSelectActive)
 		return;
 
 	// Water edit mode intercepts all clicks
@@ -1613,7 +1785,7 @@ dogizmo(void)
 	static float dragGroundOffset;
 	static rw::Quat dragGroundBaseRot;
 	// Snapshot of all affected objects for multi-select translate
-	static UndoTransform dragTransforms[64];
+	static UndoTransform dragTransforms[MAX_BATCH_OBJECTS];
 	static int dragNumTransforms;
 
 	rw::Camera *cam;
@@ -1688,11 +1860,11 @@ dogizmo(void)
 			}
 		}
 		if(dragOverflow)
-			Toast(TOAST_SELECTION, "Selection too large: some objects won't move (max 64)");
+			Toast(TOAST_SELECTION, "Selection too large: some objects won't move (max %d)", MAX_BATCH_OBJECTS);
 	}
 	// Record undo when drag ends
 	if(!isUsing && wasDragging){
-		UndoTransform finalTransforms[64];
+		UndoTransform finalTransforms[MAX_BATCH_OBJECTS];
 		int numFinal = 0;
 		for(int i = 0; i < dragNumTransforms; i++){
 			ObjectInst *obj = dragTransforms[i].inst;
@@ -1859,6 +2031,7 @@ Draw(void)
 	TheCamera.m_rwcam_viewer->fogPlane = Timecycle::currentColours.fogSt;
 
 	CPad::UpdatePads();
+	updateRectSelectEarly();
 	TheCamera.Process();
 	TheCamera.update();
 	if(gUseViewerCam)
@@ -1886,6 +2059,8 @@ Draw(void)
 	dogizmo();
 
 	handleTool();
+
+	handleRectSelect();
 
 	DefinedState();
 	Scene.camera->clear(&clearcol, rw::Camera::CLEARIMAGE|rw::Camera::CLEARZ);
