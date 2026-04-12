@@ -17,6 +17,8 @@ AddInstArraySlot(int n)
 	ObjectInst **instArray = rwNewT(ObjectInst*, n, 0);
 	instArrays[numInstArrays++] = instArray;
 	instArraySizes[numInstArrays-1] = n;
+	log("AddInstArraySlot: allocated slot %d/%d for %d text inst(s)\n",
+	    numInstArrays-1, NUMSCENES, n);
 	return numInstArrays-1;
 }
 

@@ -608,6 +608,7 @@ SetupRelatedIPLs(const char *path, int instArraySlot)
 	char *t, scenename[256];	// maximum is way less anyway....
 	int len;
 	int i;
+	int numRelated = 0;
 	IplDef *ipl;
 
 	filename = strrchr(path, '\\');
@@ -632,8 +633,11 @@ SetupRelatedIPLs(const char *path, int instArraySlot)
 			if(rw::strncmp_ci(scenename, ipl->name, len) == 0){
 				ipl->instArraySlot = instArraySlot;
 				LoadIpl(i, path);
+				numRelated++;
 			}
 		}
+	log("SetupRelatedIPLs: %s -> %d streamed IPL(s) using slot %d\n",
+	    path, numRelated, instArraySlot);
 }
 
 // SA only
@@ -699,8 +703,11 @@ LoadScene(const char *filename)
 		int i = -1;
 		if(tmpInsts.size()){
 			i = AddInstArraySlot((int)tmpInsts.size());
-			if(i < 0)
+			if(i < 0){
+				log("LoadScene: failed to allocate scene slot for %s with %d text inst(s)\n",
+				    filename, (int)tmpInsts.size());
 				return;
+			}
 			ObjectInst **ia = GetInstArray(i);
 			memcpy(ia, tmpInsts.data(), tmpInsts.size()*sizeof(ObjectInst*));
 		}
