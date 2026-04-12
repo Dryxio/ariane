@@ -156,6 +156,7 @@ struct Node {
 struct AreaData {
 	bool loaded;
 	bool dirty;
+	char logicalPath[256];
 	char sourcePath[1024];
 	uint32 numNodes;
 	uint32 numVehicleNodes;
@@ -190,6 +191,7 @@ static bool gLoadSucceeded;
 static bool gLoadFailed;
 static LoadSourceMode gLoadSourceMode = LOAD_SOURCE_AUTO;
 static ActiveLoadSource gActiveLoadSource = ACTIVE_LOAD_SOURCE_NONE;
+static char gActiveLoadSourceDetail[256];
 static bool gUsedLenientImgRead;
 static int gLastLoadFailureArea = -1;
 static char gLastLoadFailurePath[1024];
@@ -2357,10 +2359,43 @@ clearPreviewParkedCars(void)
 }
 
 static bool
-buildAreaImgLogicalPath(int areaId, char *dst, size_t size)
+buildAreaImgLogicalPathForArchive(int areaId, const char *archiveLogicalPath, char *dst, size_t size)
 {
-	int written = snprintf(dst, size, "models/gta3.img/nodes%d.dat", areaId);
+	int written = snprintf(dst, size, "%s/nodes%d.dat", archiveLogicalPath, areaId);
 	return written >= 0 && (size_t)written < size;
+}
+
+static bool
+buildAreaPathsImgLogicalPath(int areaId, char *dst, size_t size)
+{
+	return buildAreaImgLogicalPathForArchive(areaId, "models/paths.img", dst, size);
+}
+
+static bool
+buildAreaGta3ImgLogicalPath(int areaId, char *dst, size_t size)
+{
+	return buildAreaImgLogicalPathForArchive(areaId, "models/gta3.img", dst, size);
+}
+
+static bool
+extractArchiveLogicalPath(const char *logicalPath, char *dst, size_t size)
+{
+	if(dst == nil || size == 0)
+		return false;
+	dst[0] = '\0';
+	if(logicalPath == nil || logicalPath[0] == '\0')
+		return false;
+
+	const char *slash = strrchr(logicalPath, '/');
+	if(slash == nil)
+		return false;
+
+	size_t len = slash - logicalPath;
+	if(len >= size)
+		return false;
+	memcpy(dst, logicalPath, len);
+	dst[len] = '\0';
+	return true;
 }
 
 static uint32
@@ -2389,18 +2424,35 @@ loadAreaImgData(int areaId, std::vector<uint8> &data, char *outSourcePath, size_
                 char *outLogicalPath, size_t outLogicalPathSize)
 {
 	char logicalPath[64];
+	char fallbackLogicalPath[64];
 	data.clear();
 	if(outSourcePath && outSourcePathSize > 0)
 		outSourcePath[0] = '\0';
 	if(outLogicalPath && outLogicalPathSize > 0)
 		outLogicalPath[0] = '\0';
-	if(!buildAreaImgLogicalPath(areaId, logicalPath, sizeof(logicalPath)))
+	if(!buildAreaPathsImgLogicalPath(areaId, logicalPath, sizeof(logicalPath)) ||
+	   !buildAreaGta3ImgLogicalPath(areaId, fallbackLogicalPath, sizeof(fallbackLogicalPath)))
 		return false;
+
+	if(ReadCdImageEntryByLogicalPath(logicalPath, data, outSourcePath, outSourcePathSize)){
+		if(outLogicalPath && outLogicalPathSize > 0){
+			strncpy(outLogicalPath, logicalPath, outLogicalPathSize-1);
+			outLogicalPath[outLogicalPathSize-1] = '\0';
+		}
+		return true;
+	}
+	if(ReadCdImageEntryByLogicalPath(fallbackLogicalPath, data, outSourcePath, outSourcePathSize)){
+		if(outLogicalPath && outLogicalPathSize > 0){
+			strncpy(outLogicalPath, fallbackLogicalPath, outLogicalPathSize-1);
+			outLogicalPath[outLogicalPathSize-1] = '\0';
+		}
+		return true;
+	}
 	if(outLogicalPath && outLogicalPathSize > 0){
 		strncpy(outLogicalPath, logicalPath, outLogicalPathSize-1);
 		outLogicalPath[outLogicalPathSize-1] = '\0';
 	}
-	return ReadCdImageEntryByLogicalPath(logicalPath, data, outSourcePath, outSourcePathSize);
+	return false;
 }
 
 static bool
@@ -4594,7 +4646,7 @@ static const char*
 loadSourceModeLabel(LoadSourceMode mode)
 {
 	switch(mode){
-	case LOAD_SOURCE_IMG: return "IMG";
+	case LOAD_SOURCE_IMG: return "IMG archive";
 	case LOAD_SOURCE_LOOSE: return "data/Paths";
 	case LOAD_SOURCE_AUTO:
 	default: return "Auto";
@@ -4605,7 +4657,7 @@ static const char*
 activeLoadSourceLabel(ActiveLoadSource source)
 {
 	switch(source){
-	case ACTIVE_LOAD_SOURCE_IMG: return "IMG";
+	case ACTIVE_LOAD_SOURCE_IMG: return "IMG archive";
 	case ACTIVE_LOAD_SOURCE_LOOSE: return "data/Paths";
 	default: return "none";
 	}
@@ -4623,6 +4675,7 @@ clearAreas(void)
 
 static bool
 parseAreaData(int areaId, const std::vector<uint8> &fileData, const char *sourcePath,
+              const char *logicalPath,
               AreaData *outArea, size_t *outRequiredBytes, char *outReason, size_t outReasonSize)
 {
 	size_t offset = 0;
@@ -4638,6 +4691,10 @@ parseAreaData(int areaId, const std::vector<uint8> &fileData, const char *source
 	const uint8 *fileBytes = &fileData[0];
 
 	AreaData area = {};
+	if(logicalPath){
+		strncpy(area.logicalPath, logicalPath, sizeof(area.logicalPath)-1);
+		area.logicalPath[sizeof(area.logicalPath)-1] = '\0';
+	}
 	strncpy(area.sourcePath, sourcePath, sizeof(area.sourcePath)-1);
 	area.sourcePath[sizeof(area.sourcePath)-1] = '\0';
 
@@ -4750,18 +4807,18 @@ loadAreaFromSource(int areaId, ActiveLoadSource source)
 	AreaData parsed;
 	size_t originalSize = fileData.size();
 	if(source == ACTIVE_LOAD_SOURCE_IMG &&
-	   !parseAreaData(areaId, fileData, sourcePath, &parsed, &requiredBytes, reason, sizeof(reason)) &&
+	   !parseAreaData(areaId, fileData, sourcePath, logicalPath, &parsed, &requiredBytes, reason, sizeof(reason)) &&
 	   isShortReadFailure(reason) &&
 	   requiredBytes > fileData.size() &&
 	   requiredBytes - fileData.size() <= MAX_LENIENT_IMG_OVERREAD_BYTES &&
 	   logicalPath[0] != '\0' &&
 	   ReadCdImageEntryByLogicalPathMinSize(logicalPath, requiredBytes, fileData, sourcePath, sizeof(sourcePath)) &&
-	   parseAreaData(areaId, fileData, sourcePath, &parsed, &requiredBytes, reason, sizeof(reason))){
+	   parseAreaData(areaId, fileData, sourcePath, logicalPath, &parsed, &requiredBytes, reason, sizeof(reason))){
 		int spillBytes = (int)(requiredBytes > originalSize ? requiredBytes - originalSize : 0);
 		gUsedLenientImgRead = true;
 		log("SAPaths: lenient IMG read recovered area %d from %s (needed %d extra bytes)\n",
 		    areaId, sourcePath, spillBytes);
-	}else if(!parseAreaData(areaId, fileData, sourcePath, &parsed, &requiredBytes, reason, sizeof(reason))){
+	}else if(!parseAreaData(areaId, fileData, sourcePath, logicalPath, &parsed, &requiredBytes, reason, sizeof(reason))){
 		gLastLoadFailureArea = areaId;
 		snprintf(gLastLoadFailurePath, sizeof(gLastLoadFailurePath), "%s", sourcePath[0] ? sourcePath : logicalPath);
 		snprintf(gLastLoadFailureReason, sizeof(gLastLoadFailureReason), "%s", reason[0] ? reason : "parse_failed");
@@ -4793,6 +4850,49 @@ loadAllAreasFromSource(ActiveLoadSource source)
 	return true;
 }
 
+static void
+updateActiveLoadSourceDetail(void)
+{
+	gActiveLoadSourceDetail[0] = '\0';
+
+	if(gActiveLoadSource == ACTIVE_LOAD_SOURCE_LOOSE){
+		strncpy(gActiveLoadSourceDetail, "data/Paths", sizeof(gActiveLoadSourceDetail)-1);
+		gActiveLoadSourceDetail[sizeof(gActiveLoadSourceDetail)-1] = '\0';
+		return;
+	}
+	if(gActiveLoadSource != ACTIVE_LOAD_SOURCE_IMG)
+		return;
+
+	char firstArchive[256];
+	firstArchive[0] = '\0';
+	bool mixedArchives = false;
+	for(int areaId = 0; areaId < NUM_PATH_AREAS; areaId++){
+		const AreaData &area = gAreas[areaId];
+		if(!area.loaded || area.logicalPath[0] == '\0')
+			continue;
+
+		char archiveLogicalPath[256];
+		if(!extractArchiveLogicalPath(area.logicalPath, archiveLogicalPath, sizeof(archiveLogicalPath)))
+			continue;
+
+		if(firstArchive[0] == '\0'){
+			strncpy(firstArchive, archiveLogicalPath, sizeof(firstArchive)-1);
+			firstArchive[sizeof(firstArchive)-1] = '\0';
+		}else if(strcmp(firstArchive, archiveLogicalPath) != 0){
+			mixedArchives = true;
+			break;
+		}
+	}
+
+	if(mixedArchives){
+		strncpy(gActiveLoadSourceDetail, "mixed IMG archives", sizeof(gActiveLoadSourceDetail)-1);
+		gActiveLoadSourceDetail[sizeof(gActiveLoadSourceDetail)-1] = '\0';
+	}else if(firstArchive[0] != '\0'){
+		strncpy(gActiveLoadSourceDetail, firstArchive, sizeof(gActiveLoadSourceDetail)-1);
+		gActiveLoadSourceDetail[sizeof(gActiveLoadSourceDetail)-1] = '\0';
+	}
+}
+
 void
 Reset(void)
 {
@@ -4804,6 +4904,7 @@ Reset(void)
 	gLoadSucceeded = false;
 	gLoadFailed = false;
 	gActiveLoadSource = ACTIVE_LOAD_SOURCE_NONE;
+	gActiveLoadSourceDetail[0] = '\0';
 	gUsedLenientImgRead = false;
 	gLastLoadFailureArea = -1;
 	gLastLoadFailurePath[0] = '\0';
@@ -4822,6 +4923,7 @@ EnsureLoaded(void)
 	gLoadSucceeded = false;
 	gLoadFailed = false;
 	gUsedLenientImgRead = false;
+	gActiveLoadSourceDetail[0] = '\0';
 	gLastLoadFailureArea = -1;
 	gLastLoadFailurePath[0] = '\0';
 	gLastLoadFailureReason[0] = '\0';
@@ -4848,6 +4950,7 @@ EnsureLoaded(void)
 		if(loadAllAreasFromSource(attempts[i])){
 			gLoadSucceeded = true;
 			gActiveLoadSource = attempts[i];
+			updateActiveLoadSourceDetail();
 			break;
 		}
 	}
@@ -4856,7 +4959,7 @@ EnsureLoaded(void)
 	if(gLoadSucceeded){
 		log("SAPaths: loaded %d streamed path areas from %s%s\n",
 		    NUM_PATH_AREAS,
-		    activeLoadSourceLabel(gActiveLoadSource),
+		    gActiveLoadSourceDetail[0] ? gActiveLoadSourceDetail : activeLoadSourceLabel(gActiveLoadSource),
 		    gUsedLenientImgRead ? " (lenient IMG read)" : "");
 	}else{
 		clearAreas();
@@ -6976,8 +7079,13 @@ buildAreaLogicalPathForActiveSource(int areaId, char *dst, size_t size)
 	case ACTIVE_LOAD_SOURCE_LOOSE:
 		return buildAreaLegacyLogicalPath(areaId, dst, size);
 	case ACTIVE_LOAD_SOURCE_IMG:
+		if(areaId >= 0 && areaId < NUM_PATH_AREAS && gAreas[areaId].logicalPath[0] != '\0'){
+			int written = snprintf(dst, size, "%s", gAreas[areaId].logicalPath);
+			return written >= 0 && (size_t)written < size;
+		}
+		return buildAreaPathsImgLogicalPath(areaId, dst, size);
 	default:
-		return buildAreaImgLogicalPath(areaId, dst, size);
+		return buildAreaGta3ImgLogicalPath(areaId, dst, size);
 	}
 }
 
@@ -7115,7 +7223,7 @@ DrawInfoPanel(void)
 	int dirtyAreas = GetDirtyAreaCount();
 	const char *modeLabels[] = {
 		"Auto",
-		"IMG (models/gta3.img)",
+		"IMG (models/paths.img or models/gta3.img)",
 		"Loose (data/Paths)"
 	};
 	int mode = (int)gLoadSourceMode;
@@ -7142,7 +7250,8 @@ DrawInfoPanel(void)
 		ImGui::EndDisabled();
 
 	ImGui::TextDisabled("Requested: %s", loadSourceModeLabel(gLoadSourceMode));
-	ImGui::TextDisabled("Active: %s%s", activeLoadSourceLabel(gActiveLoadSource),
+	ImGui::TextDisabled("Active: %s%s",
+	                    gActiveLoadSourceDetail[0] ? gActiveLoadSourceDetail : activeLoadSourceLabel(gActiveLoadSource),
 	                    gUsedLenientImgRead ? " (lenient IMG read)" : "");
 
 	if(gLoadFailed){
