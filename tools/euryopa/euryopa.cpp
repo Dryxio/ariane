@@ -1618,6 +1618,10 @@ LoadGame(void)
 	AddColSlot("generic");
 	AddIplSlot("generic");
 
+	AddCdImage("MODELS\\GTA3.IMG");
+	if(isSA())
+		AddCdImage("MODELS\\GTA_INT.IMG");
+
 	if(ModloaderIsActive()){
 		ModloaderDatEntry imgEntries[64];
 		int nImg = ModloaderGetAdditions(imgEntries, 64);
