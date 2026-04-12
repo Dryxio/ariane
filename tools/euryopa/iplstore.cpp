@@ -1,4 +1,5 @@
 #include "euryopa.h"
+#include "modloader.h"
 
 static ObjectInst **instArrays[NUMSCENES];
 static int instArraySizes[NUMSCENES];
@@ -81,13 +82,10 @@ LoadIpl(int slot, const char *sceneName)
 	uint8 *buffer;
 	FileObjectInstance *insts;
 	GameFile *file;
+	const char *loosePath;
+	bool looseFile;
 
 	IplDef *ipl = GetIplDef(slot);
-
-	if(ipl->imageIndex < 0){
-		log("warning: no streaming info for ipl %s\n", ipl->name);
-		return;
-	}
 
 	ObjectInst *lodinst;
 	ObjectInst **instArray = nil;
@@ -97,8 +95,33 @@ LoadIpl(int slot, const char *sceneName)
 		instArraySize = GetInstArraySize(ipl->instArraySlot);
 	}
 
-	buffer = ReadFileFromImage(ipl->imageIndex, &size);
-	file = GetGameFileFromImage(ipl->imageIndex);
+	loosePath = ModloaderFindOverride(ipl->name, "ipl");
+	looseFile = false;
+	file = nil;
+	buffer = nil;
+
+	if(loosePath){
+		buffer = ReadLooseFile(loosePath, &size);
+		if(buffer){
+			looseFile = true;
+			if(ipl->imageIndex >= 0)
+				file = GetGameFileFromImage(ipl->imageIndex);
+		}
+	}
+	if(looseFile && *(uint32*)buffer != 0x79726E62){
+		free(buffer);
+		buffer = nil;
+		looseFile = false;
+	}
+	if(buffer == nil){
+		if(ipl->imageIndex < 0){
+			log("warning: no streaming info for ipl %s\n", ipl->name);
+			return;
+		}
+		buffer = ReadFileFromImage(ipl->imageIndex, &size);
+		file = GetGameFileFromImage(ipl->imageIndex);
+	}
+
 	if(*(uint32*)buffer == 0x79726E62){	// bnry
 		int16 numInsts = *(int16*)(buffer+4);
 		insts = (FileObjectInstance*)(buffer + *(int32*)(buffer+0x1C));
@@ -119,6 +142,8 @@ LoadIpl(int slot, const char *sceneName)
 
 			ObjectInst *inst = AddInstance();
 			inst->Init(insts);
+			if(obj->m_isBigBuilding)
+				inst->SetupBigBuilding();
 			inst->m_file = file;
 			inst->m_imageIndex = ipl->imageIndex;
 			inst->m_binInstIndex = i;
@@ -138,6 +163,8 @@ LoadIpl(int slot, const char *sceneName)
 				}else{
 					inst->m_lod = lodinst;
 					lodinst->m_numChildren++;
+					if(!lodinst->m_isBigBuilding)
+						lodinst->SetupBigBuilding();
 					ObjectDef *lodobj = GetObjectDef(lodinst->m_objectId);
 					if(lodobj && lodinst->m_numChildren == 1 && obj->m_colModel && lodobj->m_colModel != obj->m_colModel)
 						lodobj->m_colModel = obj->m_colModel;
@@ -151,4 +178,7 @@ LoadIpl(int slot, const char *sceneName)
 		// cars: 0x3C
 	}
 	// TODO: parse text file (but no cars section :/)
+
+	if(looseFile)
+		free(buffer);
 }

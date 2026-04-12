@@ -1,4 +1,5 @@
 #include "euryopa.h"
+#include "modloader.h"
 
 static ColDef collist[NUMCOLS];
 static int numCols;
@@ -49,7 +50,7 @@ LoadAllCollisions(void)
 	int i;
 	for(i = 0; i < numCols; i++){
 		col = GetColDef(i);
-		if(col->imageIndex >= 0)
+		if(col->imageIndex >= 0 || ModloaderFindOverride(col->name, "col"))
 			LoadCol(i);
 	}
 }
@@ -64,15 +65,34 @@ LoadCol(int slot)
 	int version;
 	ObjectDef *obj;
 	GameFile *file;
+	const char *loosePath;
+	bool looseFile;
 	ColDef *col = GetColDef(slot);
 
-	if(col->imageIndex < 0){
+	loosePath = ModloaderFindOverride(col->name, "col");
+	looseFile = false;
+	file = nil;
+	if(loosePath){
+		buffer = ReadLooseFile(loosePath, &size);
+		if(buffer){
+			looseFile = true;
+			if(col->imageIndex >= 0)
+				file = GetGameFileFromImage(col->imageIndex);
+		}
+	}
+	if(!looseFile){
+		if(col->imageIndex < 0){
+			log("warning: no streaming info for col %s\n", col->name);
+			return;
+		}
+		buffer = ReadFileFromImage(col->imageIndex, &size);
+		file = GetGameFileFromImage(col->imageIndex);
+	}
+
+	if(buffer == nil){
 		log("warning: no streaming info for col %s\n", col->name);
 		return;
 	}
-
-	buffer = ReadFileFromImage(col->imageIndex, &size);
-	file = GetGameFileFromImage(col->imageIndex);
 	offset = 0;
 	while(offset < size){
 		header = (ColFileHeader*)(buffer+offset);
@@ -113,4 +133,7 @@ LoadCol(int slot)
 			printf("Couldn't find object %s for collision\n", header->name);
 		offset += header->modelsize-24;
 	}
+
+	if(looseFile)
+		free(buffer);
 }

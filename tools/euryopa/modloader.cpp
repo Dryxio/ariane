@@ -34,7 +34,7 @@ struct InternalAddition {
 	int priority;
 };
 
-static std::vector<ModFile> dffTxdOverrides;  // effective DFF/TXD (after priority dedup)
+static std::vector<ModFile> looseOverrides;   // effective loose basename overrides (after priority dedup)
 static std::vector<ModFile> pathRedirects;    // effective IDE/IPL/COL/IMG redirects
 static std::vector<ImageEntryOverride> imageEntryOverrides; // effective loose overrides for archive entries
 static std::vector<InternalAddition> additionsInternal; // with priority for dedup
@@ -660,7 +660,7 @@ void
 ModloaderInit(void)
 {
 	active = false;
-	dffTxdOverrides.clear();
+	looseOverrides.clear();
 	pathRedirects.clear();
 	imageEntryOverrides.clear();
 	additionsInternal.clear();
@@ -802,39 +802,39 @@ ModloaderInit(void)
 
 	// Priority resolution
 
-	// 1) DFF/TXD overrides: group by (basename, ext), keep highest priority
+	// 1) Loose basename overrides: group by (basename, ext), keep highest priority.
+	// These are used for streamable loose files that upstream Mod Loader accepts
+	// outside explicit *.img/<entry> layouts too, such as DFF/TXD/COL/binary IPL.
 	{
-		// Sort by basename+ext, then priority descending
-		std::vector<ModFile> dffTxdCandidates;
+		std::vector<ModFile> looseCandidates;
 		for(size_t i = 0; i < allModFiles.size(); i++){
 			ModFile &mf = allModFiles[i];
-			if(strcmp(mf.ext, "dff") == 0 || strcmp(mf.ext, "txd") == 0)
-				dffTxdCandidates.push_back(mf);
+			if(strcmp(mf.ext, "dff") == 0 || strcmp(mf.ext, "txd") == 0 ||
+			   strcmp(mf.ext, "col") == 0 || strcmp(mf.ext, "ipl") == 0)
+				looseCandidates.push_back(mf);
 		}
-		// Deduplicate: group by (basename, ext), pick highest priority
-		for(size_t i = 0; i < dffTxdCandidates.size(); i++){
+		for(size_t i = 0; i < looseCandidates.size(); i++){
 			bool dominated = false;
-			for(size_t j = 0; j < dffTxdCandidates.size(); j++){
+			for(size_t j = 0; j < looseCandidates.size(); j++){
 				if(i == j) continue;
-				if(strcmp(dffTxdCandidates[i].basename, dffTxdCandidates[j].basename) == 0 &&
-				   strcmp(dffTxdCandidates[i].ext, dffTxdCandidates[j].ext) == 0 &&
-				   IsBetterModFileCandidate(dffTxdCandidates[j], dffTxdCandidates[i])){
+				if(strcmp(looseCandidates[i].basename, looseCandidates[j].basename) == 0 &&
+				   strcmp(looseCandidates[i].ext, looseCandidates[j].ext) == 0 &&
+				   IsBetterModFileCandidate(looseCandidates[j], looseCandidates[i])){
 					dominated = true;
 					break;
 				}
 			}
 			if(!dominated){
-				// Check not already added (same basename+ext)
 				bool dup = false;
-				for(size_t k = 0; k < dffTxdOverrides.size(); k++){
-					if(strcmp(dffTxdOverrides[k].basename, dffTxdCandidates[i].basename) == 0 &&
-					   strcmp(dffTxdOverrides[k].ext, dffTxdCandidates[i].ext) == 0){
+				for(size_t k = 0; k < looseOverrides.size(); k++){
+					if(strcmp(looseOverrides[k].basename, looseCandidates[i].basename) == 0 &&
+					   strcmp(looseOverrides[k].ext, looseCandidates[i].ext) == 0){
 						dup = true;
 						break;
 					}
 				}
 				if(!dup)
-					dffTxdOverrides.push_back(dffTxdCandidates[i]);
+					looseOverrides.push_back(looseCandidates[i]);
 			}
 		}
 	}
@@ -999,7 +999,7 @@ ModloaderInit(void)
 
 	active = true;
 	log("modloader: %d overrides, %d redirects, %d image-entry overrides, %d additions from %d mods\n",
-	    (int)dffTxdOverrides.size(), (int)pathRedirects.size(),
+	    (int)looseOverrides.size(), (int)pathRedirects.size(),
 	    (int)imageEntryOverrides.size(),
 	    (int)additions.size(), numMods);
 }
@@ -1053,10 +1053,10 @@ ModloaderFindOverride(const char *basename, const char *ext)
 	}
 	lowerExt[i] = '\0';
 
-	for(size_t j = 0; j < dffTxdOverrides.size(); j++){
-		if(strcmp(dffTxdOverrides[j].basename, lowerBase) == 0 &&
-		   strcmp(dffTxdOverrides[j].ext, lowerExt) == 0)
-			return dffTxdOverrides[j].physicalPath;
+	for(size_t j = 0; j < looseOverrides.size(); j++){
+		if(strcmp(looseOverrides[j].basename, lowerBase) == 0 &&
+		   strcmp(looseOverrides[j].ext, lowerExt) == 0)
+			return looseOverrides[j].physicalPath;
 	}
 	return nil;
 }
