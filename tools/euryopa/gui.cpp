@@ -2908,12 +2908,7 @@ uiMainmenu(void)
 				beginEmptyCustomImport();
 			}
 			ImGui::SetItemTooltip("Import a custom DFF/TXD into the editor as a new placeable object.\nAutomatically registers it in your game files, ready to use in game.");
-			ImGui::Separator();
-			if(ImGui::MenuItem("Destroy Entire Map...")){
-				gOpenDestroyMap = true;
-			}
-			ImGui::SetItemTooltip("Marks every loaded map instance as deleted.\nOptionally clears SA water in the same step.");
-			ImGui::Separator();
+			// TODO: restore once whole-map export is safe for runtime use.
 			if(ImGui::MenuItem(ICON_FA_RIGHT_FROM_BRACKET " Exit", "Alt+F4")) sk::globals.quit = 1;
 			ImGui::EndMenu();
 		}
@@ -3609,6 +3604,7 @@ uiHelpWindow(void)
 	ImGui::BulletText("Use the filter in the instance list to find instances by name.");
 	ImGui::Separator();
 	ImGui::BulletText("Gizmo: W = Translate, Q = Rotate\n"
+		"Hold Shift while dragging to use the selected snap increment.\n"
 		"Select an object or SA path node to manipulate it.\n"
 		"SA path nodes use translate only.");
 	ImGui::BulletText("Delete/Backspace: delete selected building(s)\n"
@@ -5150,9 +5146,11 @@ uiToolsWindow(void)
 		if(ImGui::RadioButton("Rotate (Q)", gGizmoMode == GIZMO_ROTATE))
 			gGizmoMode = GIZMO_ROTATE;
 
-		ImGui::Checkbox("Grid Snap", &gGizmoSnap);
-		ImGui::SetItemTooltip("Snap gizmo movements to fixed increments.");
+		ImGui::Checkbox("Snap with Shift", &gGizmoSnap);
+		ImGui::SetItemTooltip("Enable snap increments for the gizmo while Shift is held.");
 		if(gGizmoSnap){
+			ImGui::SameLine();
+			ImGui::TextDisabled("(hold Shift to snap)");
 			char buf[32];
 			ImGui::SameLine();
 			if(gGizmoMode == GIZMO_ROTATE){
@@ -6050,7 +6048,7 @@ gui(void)
 
 	Path::guiHoveredNode = nil;
 	uiMainmenu();
-	uiDestroyMapPopup();
+	// TODO: restore when the Destroy Entire Map workflow is finished.
 	UpdaterDrawGui();
 	automaticBackupTick();
 
