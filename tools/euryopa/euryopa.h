@@ -59,6 +59,7 @@ void setHotReloadTracePath(const char *path);
 void hotReloadTrace(const char *fmt, ...);
 void addToLogWindow(const char *fmt, va_list args);
 void LoadInitialEditorWindowState(int *width, int *height);
+void LoadInitialAntialiasingSettings(void);
 void ApplyInitialEditorWindowState(void);
 void UpdateEditorWindowState(void);
 void OnEditorWindowResized(int width, int height);
@@ -160,6 +161,7 @@ extern float gSaCarPathTrafficSpeedScale;
 extern bool gSaCarPathTrafficFreezeRoutes;
 extern bool gRenderSaCarPathParkedCars;
 extern int gSaCarPathParkedCarCount;
+extern uint32 gRequestedAASamples;
 
 // SA postfx
 extern int  gColourFilter;
