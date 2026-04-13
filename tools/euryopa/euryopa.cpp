@@ -87,7 +87,6 @@ float gSaCarPathTrafficSpeedScale = 1.0f;
 bool gSaCarPathTrafficFreezeRoutes = false;
 bool gRenderSaCarPathParkedCars = false;
 int gSaCarPathParkedCarCount = 8;
-uint32 gRequestedAASamples = 1;
 
 // SA postfx
 int  gColourFilter;

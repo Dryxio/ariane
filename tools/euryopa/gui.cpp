@@ -90,74 +90,6 @@ static bool gPersistentSettingsLoaded;
 static void loadSaveSettings(void);
 static void saveSaveSettings(void);
 static void normalizePersistentSettings(void);
-static bool splitSettingLine(const char *line, char *key, size_t keySize, const char **value);
-static bool parseIntSetting(const char *value, int *out);
-
-static uint32
-sanitizeAASamples(uint32 samples, uint32 maxSamples = 0)
-{
-	if(samples <= 1)
-		return 1;
-
-	switch(samples){
-	case 2:
-	case 4:
-	case 8:
-	case 16:
-		break;
-	default:
-		return 1;
-	}
-
-	if(maxSamples > 1){
-		while(samples > maxSamples && samples > 1)
-			samples >>= 1;
-		if(samples < 2)
-			return 1;
-	}
-
-	return samples;
-}
-
-static const char*
-getAASamplesLabel(uint32 samples)
-{
-	switch(samples){
-	case 1: return "Off";
-	case 2: return "2x MSAA";
-	case 4: return "4x MSAA";
-	case 8: return "8x MSAA";
-	case 16: return "16x MSAA";
-	default: return "Custom";
-	}
-}
-
-void
-LoadInitialAntialiasingSettings(void)
-{
-	FILE *f;
-	char line[1024];
-	char key[128];
-	const char *value;
-	int intValue;
-
-	gRequestedAASamples = 1;
-
-	f = fopenArianeDataRead("savesettings.txt", "savesettings.txt");
-	if(f == nil)
-		return;
-
-	while(fgets(line, sizeof(line), f)){
-		if(!splitSettingLine(line, key, sizeof(key), &value))
-			continue;
-		if(strcmp(key, "aa_samples") == 0 && parseIntSetting(value, &intValue)){
-			gRequestedAASamples = sanitizeAASamples((uint32)max(intValue, 1));
-			break;
-		}
-	}
-
-	fclose(f);
-}
 
 static int
 getDefaultCustomImportStartId(void)
@@ -3958,40 +3890,7 @@ uiView(void)
 static void
 uiRendering(void)
 {
-	uint32 activeAASamples = sanitizeAASamples(rw::Engine::getMultiSamplingLevels());
-	uint32 maxAASamples = sanitizeAASamples(rw::Engine::getMaxMultiSamplingLevels());
-	static const uint32 aaOptions[] = { 1, 2, 4, 8, 16 };
-
 	ImGui::Checkbox("Draw PostFX", &gRenderPostFX);
-	if(ImGui::BeginCombo("Anti-aliasing", getAASamplesLabel(gRequestedAASamples))){
-		for(uint32 samples : aaOptions){
-			if(samples > 1 && (maxAASamples <= 1 || samples > maxAASamples))
-				continue;
-
-			bool selected = gRequestedAASamples == samples;
-			if(ImGui::Selectable(getAASamplesLabel(samples), selected)){
-				if(gRequestedAASamples != samples){
-					gRequestedAASamples = samples;
-					sk::requestedMultiSamplingLevels = samples;
-					SaveEditorSettingsNow();
-					Toast(TOAST_SAVE, "Anti-aliasing set to %s. Restart Ariane to apply it.",
-						getAASamplesLabel(samples));
-				}
-			}
-			if(selected)
-				ImGui::SetItemDefaultFocus();
-		}
-		ImGui::EndCombo();
-	}
-	if(maxAASamples <= 1){
-		ImGui::TextDisabled("MSAA is not reported by the current renderer/device.");
-	}else{
-		ImGui::TextDisabled("Current session: %s", getAASamplesLabel(activeAASamples));
-		ImGui::SameLine();
-		ImGui::TextDisabled("Max: %s", getAASamplesLabel(maxAASamples));
-		if(activeAASamples != gRequestedAASamples)
-			ImGui::TextDisabled("Restart Ariane to apply the new anti-aliasing level.");
-	}
 	if(params.timecycle == GAME_VC){
 		ImGui::Checkbox("Use Blur Ambient", &gUseBlurAmb); ImGui::SameLine();
 		ImGui::Checkbox("Override", &gOverrideBlurAmb);
@@ -4766,9 +4665,6 @@ loadSaveSettings(void)
 				gSavedIplVisibilityStates.push_back(state);
 		}else if(strcmp(key, "render_postfx") == 0){
 			if(parseBoolSetting(value, &boolValue)) gRenderPostFX = boolValue;
-		}else if(strcmp(key, "aa_samples") == 0){
-			if(parseIntSetting(value, &intValue))
-				gRequestedAASamples = sanitizeAASamples((uint32)max(intValue, 1));
 		}else if(strcmp(key, "use_blur_ambient") == 0){
 			if(parseBoolSetting(value, &boolValue)) gUseBlurAmb = boolValue;
 		}else if(strcmp(key, "override_blur_ambient") == 0){
@@ -4863,9 +4759,6 @@ loadSaveSettings(void)
 	sanitizeAutomaticBackupSettings();
 	sanitizeCustomImportSettings();
 	normalizePersistentSettings();
-	gRequestedAASamples = sanitizeAASamples(gRequestedAASamples,
-		rw::Engine::getMaxMultiSamplingLevels());
-	sk::requestedMultiSamplingLevels = gRequestedAASamples;
 
 	RefreshIplVisibilityEntries();
 	for(size_t i = 0; i < gSavedIplVisibilityStates.size(); i++){
@@ -4992,7 +4885,6 @@ saveSaveSettings(void)
 		fprintf(f, " %d\n", GetIplVisibilityEntryVisible(i) ? 1 : 0);
 	}
 	fprintf(f, "render_postfx %d\n", gRenderPostFX ? 1 : 0);
-	fprintf(f, "aa_samples %u\n", (unsigned)gRequestedAASamples);
 	fprintf(f, "use_blur_ambient %d\n", gUseBlurAmb ? 1 : 0);
 	fprintf(f, "override_blur_ambient %d\n", gOverrideBlurAmb ? 1 : 0);
 	fprintf(f, "colour_filter %d\n", gColourFilter);
