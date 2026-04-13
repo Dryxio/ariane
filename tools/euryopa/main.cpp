@@ -623,6 +623,8 @@ ConvertTxd(rw::TexDictionary *txd)
 bool
 InitRW(void)
 {
+	LoadInitialAntialiasingSettings();
+	sk::requestedMultiSamplingLevels = gRequestedAASamples;
 	if(!sk::InitRW())
 		return false;
 	rw::d3d::isP8supported = false;
