@@ -1162,9 +1162,16 @@ FormatInstLine(char *dst, size_t size, ObjectInst *inst, int lodIdx, bool delete
 			inst->m_rotation.x, inst->m_rotation.y, inst->m_rotation.z, inst->m_rotation.w,
 			lodIdx);
 	}
-	return snprintf(dst, size, "%s%d, %s, %d, %f, %f, %f, 1, 1, 1, %f, %f, %f, %f\n",
+	if(isVC()){
+		return snprintf(dst, size, "%s%d, %s, %d, %f, %f, %f, 1, 1, 1, %f, %f, %f, %f\n",
+			prefix,
+			inst->m_objectId, obj->m_name, area,
+			inst->m_translation.x, inst->m_translation.y, inst->m_translation.z,
+			inst->m_rotation.x, inst->m_rotation.y, inst->m_rotation.z, inst->m_rotation.w);
+	}
+	return snprintf(dst, size, "%s%d, %s, %f, %f, %f, 1, 1, 1, %f, %f, %f, %f\n",
 		prefix,
-		inst->m_objectId, obj->m_name, area,
+		inst->m_objectId, obj->m_name,
 		inst->m_translation.x, inst->m_translation.y, inst->m_translation.z,
 		inst->m_rotation.x, inst->m_rotation.y, inst->m_rotation.z, inst->m_rotation.w);
 }
