@@ -188,6 +188,12 @@ IsRedirectExt(const char *ext)
 	       strcmp(ext, "dir") == 0;
 }
 
+static bool
+IsLooseBasenameOverrideExt(const char *ext)
+{
+	return strcmp(ext, "dff") == 0 || strcmp(ext, "txd") == 0;
+}
+
 static int
 FindBestExactLogicalPathCandidate(const char *logicalPath, std::vector<ModFile> &allModFiles)
 {
@@ -803,14 +809,13 @@ ModloaderInit(void)
 	// Priority resolution
 
 	// 1) Loose basename overrides: group by (basename, ext), keep highest priority.
-	// These are used for streamable loose files that upstream Mod Loader accepts
-	// outside explicit *.img/<entry> layouts too, such as DFF/TXD/COL/binary IPL.
+	// Keep this restricted to DFF/TXD. IPL/COL names are not globally unique enough
+	// for basename-only matching and can redirect unrelated assets/scenes.
 	{
 		std::vector<ModFile> looseCandidates;
 		for(size_t i = 0; i < allModFiles.size(); i++){
 			ModFile &mf = allModFiles[i];
-			if(strcmp(mf.ext, "dff") == 0 || strcmp(mf.ext, "txd") == 0 ||
-			   strcmp(mf.ext, "col") == 0 || strcmp(mf.ext, "ipl") == 0)
+			if(IsLooseBasenameOverrideExt(mf.ext))
 				looseCandidates.push_back(mf);
 		}
 		for(size_t i = 0; i < looseCandidates.size(); i++){
@@ -1052,6 +1057,8 @@ ModloaderFindOverride(const char *basename, const char *ext)
 		lowerExt[i] = c;
 	}
 	lowerExt[i] = '\0';
+	if(!IsLooseBasenameOverrideExt(lowerExt))
+		return nil;
 
 	for(size_t j = 0; j < looseOverrides.size(); j++){
 		if(strcmp(looseOverrides[j].basename, lowerBase) == 0 &&
