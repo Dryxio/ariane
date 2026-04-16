@@ -1244,15 +1244,20 @@ GetMaxIplIndexForFile(GameFile *file)
 }
 
 static ObjectInst*
-createSpawnedInstance(int objectId, rw::V3d position, GameFile *file, int iplIndex)
+createSpawnedInstance(int objectId, rw::V3d position, GameFile *file, int iplIndex,
+	const rw::Quat *orientation = nil)
 {
 	ObjectInst *inst = AddInstance();
 	inst->m_objectId = objectId;
 	inst->m_area = currentArea;
-	inst->m_rotation.x = 0;
-	inst->m_rotation.y = 0;
-	inst->m_rotation.z = 0;
-	inst->m_rotation.w = 1;
+	if(orientation){
+		inst->m_rotation = *orientation;
+	}else{
+		inst->m_rotation.x = 0;
+		inst->m_rotation.y = 0;
+		inst->m_rotation.z = 0;
+		inst->m_rotation.w = 1;
+	}
 	inst->m_translation = position;
 	inst->m_lodId = -1;
 	inst->m_lod = nil;
@@ -1318,7 +1323,7 @@ finalizeLinkedLod(ObjectInst *hdInst, ObjectInst *lodInst)
 }
 
 void
-SpawnPlaceObject(rw::V3d position)
+SpawnPlaceObject(rw::V3d position, const rw::Quat *orientation)
 {
 	if(spawnObjectId < 0) return;
 	ObjectDef *obj = GetObjectDef(spawnObjectId);
@@ -1340,15 +1345,16 @@ SpawnPlaceObject(rw::V3d position)
 			lodObjId = obj->m_relatedModel->m_id;
 	}
 
-	// Create LOD first (if exists)
+	// Create LOD first (if exists). Orientation is applied at creation time so
+	// the cloned RW frame is built with the correct matrix (see createSpawnedInstance).
 	ObjectInst *lodInst = nil;
 	if(lodObjId >= 0 && GetObjectDef(lodObjId)){
-		lodInst = createSpawnedInstance(lodObjId, position, file, ++maxIdx);
+		lodInst = createSpawnedInstance(lodObjId, position, file, ++maxIdx, orientation);
 		pasted[numPasted++] = lodInst;
 	}
 
 	// Create HD instance
-	ObjectInst *hdInst = createSpawnedInstance(spawnObjectId, position, file, ++maxIdx);
+	ObjectInst *hdInst = createSpawnedInstance(spawnObjectId, position, file, ++maxIdx, orientation);
 	if(lodInst)
 		finalizeLinkedLod(hdInst, lodInst);
 

@@ -4809,6 +4809,14 @@ loadSaveSettings(void)
 			if(parseBoolSetting(value, &boolValue)) gDragFollowGround = boolValue;
 		}else if(strcmp(key, "drag_align_to_surface") == 0){
 			if(parseBoolSetting(value, &boolValue)) gDragAlignToSurface = boolValue;
+		}else if(strcmp(key, "brush_z_offset") == 0){
+			parseFloatSetting(value, &gBrushZOffset);
+		}else if(strcmp(key, "brush_align_to_surface") == 0){
+			if(parseBoolSetting(value, &boolValue)) gBrushAlignToSurface = boolValue;
+		}else if(strcmp(key, "brush_random_yaw") == 0){
+			if(parseBoolSetting(value, &boolValue)) gBrushRandomYaw = boolValue;
+		}else if(strcmp(key, "brush_spacing") == 0){
+			parseFloatSetting(value, &gBrushSpacing);
 		}else if(strcmp(key, "editor_camera_name") == 0){
 			parseQuotedStringValue(value, gEditorCameraName, sizeof(gEditorCameraName));
 		}else if(strcmp(key, "editor_model_filter") == 0){
@@ -5013,6 +5021,10 @@ saveSaveSettings(void)
 	fprintf(f, "place_snap_to_ground %d\n", gPlaceSnapToGround ? 1 : 0);
 	fprintf(f, "drag_follow_ground %d\n", gDragFollowGround ? 1 : 0);
 	fprintf(f, "drag_align_to_surface %d\n", gDragAlignToSurface ? 1 : 0);
+	fprintf(f, "brush_z_offset %.9g\n", gBrushZOffset);
+	fprintf(f, "brush_align_to_surface %d\n", gBrushAlignToSurface ? 1 : 0);
+	fprintf(f, "brush_random_yaw %d\n", gBrushRandomYaw ? 1 : 0);
+	fprintf(f, "brush_spacing %.9g\n", gBrushSpacing);
 	writeQuotedSetting(f, "editor_camera_name", gEditorCameraName);
 	writeQuotedSetting(f, "editor_model_filter", gEditorModelFilter.InputBuf);
 	writeQuotedSetting(f, "editor_txd_filter", gEditorTxdFilter.InputBuf);
@@ -5303,6 +5315,57 @@ uiToolsWindow(void)
 	ImGui::SetItemTooltip("When placing objects, snap to the surface of existing objects under the cursor.");
 	ImGui::Checkbox("Snap to ground", &gPlaceSnapToGround);
 	ImGui::SetItemTooltip("When placing objects, snap to the ground below the cursor.");
+
+	ImGui::Separator();
+
+	// Brush tool
+	ImGui::Text("Brush Tool");
+	{
+		int brushObjId = GetSpawnObjectId();
+		ObjectDef *brushObj = brushObjId >= 0 ? GetObjectDef(brushObjId) : nil;
+
+		if(gBrushMode){
+			ImVec4 active(0.95f, 0.75f, 0.20f, 1.0f);
+			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.35f, 0.25f, 0.05f, 1.0f));
+			if(ImGui::Button("Exit Brush (Esc)"))
+				ExitBrushMode();
+			ImGui::PopStyleColor();
+			ImGui::SameLine();
+			if(brushObj)
+				ImGui::TextColored(active, "Painting: %s", brushObj->m_name);
+			else
+				ImGui::TextColored(active, "No object selected");
+		}else{
+			ImGui::BeginDisabled(brushObjId < 0);
+			if(ImGui::Button("Start Brush"))
+				EnterBrushMode(brushObjId);
+			ImGui::EndDisabled();
+			ImGui::SameLine();
+			if(brushObj)
+				ImGui::TextDisabled("Ready: %s", brushObj->m_name);
+			else
+				ImGui::TextDisabled("Select an object in the Browser first");
+		}
+
+		ImGui::SetNextItemWidth(120);
+		ImGui::InputFloat("Z offset (m)", &gBrushZOffset, 0.1f, 1.0f, "%.2f");
+		ImGui::SetItemTooltip("Shift along surface normal-Z after ground snap.\n"
+			"Negative sinks the object into the ground (useful for trees on slopes).\n"
+			"Positive lifts it off the surface.");
+
+		ImGui::Checkbox("Align to surface##brush", &gBrushAlignToSurface);
+		ImGui::SetItemTooltip("Rotate placed objects so their up-axis matches the surface normal.\n"
+			"Use with care — some tree models look better upright on slopes.");
+
+		ImGui::Checkbox("Random yaw", &gBrushRandomYaw);
+		ImGui::SetItemTooltip("Randomize yaw rotation per placement, for natural-looking foliage.");
+
+		ImGui::SetNextItemWidth(120);
+		ImGui::InputFloat("Spacing (m)", &gBrushSpacing, 0.25f, 1.0f, "%.2f");
+		if(gBrushSpacing < 0.1f) gBrushSpacing = 0.1f;
+		ImGui::SetItemTooltip("Minimum distance between placements while dragging.\n"
+			"Lower = denser; single clicks always place regardless of spacing.");
+	}
 
 	ImGui::Separator();
 
@@ -5824,14 +5887,27 @@ uiBrowserWindow(void)
 				}
 			}
 
-			// Action buttons
+			// Action buttons — Place and Brush are mutually exclusive
 			if(gPlaceMode){
 				if(ImGui::Button("Exit Place Mode"))
 					SpawnExitPlaceMode();
 			}else{
-				if(ImGui::Button("Place"))
+				if(ImGui::Button("Place")){
+					if(gBrushMode) ExitBrushMode();
 					gPlaceMode = true;
+				}
 			}
+			ImGui::SameLine();
+			if(gBrushMode){
+				if(ImGui::Button("Exit Brush"))
+					ExitBrushMode();
+			}else{
+				if(ImGui::Button("Brush"))
+					EnterBrushMode(selId);
+			}
+			ImGui::SetItemTooltip("Paint instances onto surfaces.\n"
+				"Click to place one, drag to paint continuously.\n"
+				"Configure Z offset, surface align and spacing in the Tools window.");
 			ImGui::SameLine();
 			if(IsFavourite(selId)){
 				if(ImGui::Button("Unfavourite"))
@@ -6318,17 +6394,21 @@ gui(void)
 
 	if(CPad::IsKeyJustDown('B')){
 		showBrowserWindow ^= 1;
-		if(!showBrowserWindow && gPlaceMode)
-			SpawnExitPlaceMode();
+		if(!showBrowserWindow){
+			if(gPlaceMode) SpawnExitPlaceMode();
+			if(gBrushMode) ExitBrushMode();
+		}
 	}
 	if(showBrowserWindow){
 		uiBrowserWindow();
 		// ImGui X button can set showBrowserWindow to false
-		if(!showBrowserWindow && gPlaceMode)
-			SpawnExitPlaceMode();
+		if(!showBrowserWindow){
+			if(gPlaceMode) SpawnExitPlaceMode();
+			if(gBrushMode) ExitBrushMode();
+		}
 	}
 
-	// Escape: cancel creation, exit water mode, or exit place mode
+	// Escape: cancel creation, exit water mode, exit brush, or exit place mode
 	if(CPad::IsKeyJustDown(KEY_ESC)){
 		if(WaterLevel::gWaterCreateMode > 0){
 			WaterLevel::CancelCreateMode();
@@ -6336,6 +6416,8 @@ gui(void)
 			WaterLevel::gWaterEditMode = false;
 			WaterLevel::ClearWaterSelection();
 			WaterLevel::gWaterSubMode = 0;
+		}else if(gBrushMode){
+			ExitBrushMode();
 		}else if(gPlaceMode)
 			SpawnExitPlaceMode();
 	}
@@ -6345,8 +6427,8 @@ gui(void)
 		WaterLevel::gWaterEditMode = !WaterLevel::gWaterEditMode;
 		if(WaterLevel::gWaterEditMode){
 			ClearSelection();
-			if(gPlaceMode)
-				SpawnExitPlaceMode();
+			if(gPlaceMode) SpawnExitPlaceMode();
+			if(gBrushMode) ExitBrushMode();
 		}else{
 			WaterLevel::CancelCreateMode();
 			WaterLevel::ClearWaterSelection();
@@ -6396,6 +6478,56 @@ gui(void)
 			ImGui::TextColored(ImVec4(1,1,0,1),
 				"PLACE: %s  [Click=Place | Shift+Click=Multi | RMB/Esc=Cancel]", obj->m_name);
 			ImGui::End();
+		}
+	}
+
+	// Brush mode overlay + on-surface preview marker
+	if(gBrushMode && GetSpawnObjectId() >= 0){
+		ObjectDef *obj = GetObjectDef(GetSpawnObjectId());
+		if(obj){
+			ImGui::SetNextWindowPos(ImVec2(10, ImGui::GetIO().DisplaySize.y - 40));
+			ImGui::SetNextWindowBgAlpha(0.6f);
+			ImGui::Begin("##BrushMode", nil,
+				ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+				ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+				ImGuiWindowFlags_NoFocusOnAppearing);
+			ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.20f, 1),
+				"BRUSH: %s  [Click=Place | Drag=Paint | RMB/Esc=Cancel]  z%+.2f  sp=%.1fm%s%s",
+				obj->m_name, gBrushZOffset, gBrushSpacing,
+				gBrushAlignToSurface ? "  align" : "",
+				gBrushRandomYaw ? "  yaw" : "");
+			ImGui::End();
+
+			// On-surface marker — only if not over an ImGui panel
+			ImGuiIO &brushIO = ImGui::GetIO();
+			if(!brushIO.WantCaptureMouse){
+				rw::V3d bHit, bNormal;
+				if(GetBrushSurfaceHit(&bHit, &bNormal)){
+					rw::V3d markerPos = bHit;
+					markerPos.z += GetPlacementBaseOffset(GetSpawnObjectId());
+					markerPos.z += gBrushZOffset;
+
+					rw::V3d sp;
+					float sw, sh;
+					if(Sprite::CalcScreenCoors(markerPos, &sp, &sw, &sh, false)){
+						ImDrawList *dl = ImGui::GetForegroundDrawList();
+						// Radius in pixels: slightly scales with depth so it stays visible
+						float r = 14.0f * sw;
+						if(r < 6.0f) r = 6.0f;
+						if(r > 64.0f) r = 64.0f;
+						ImU32 outer = IM_COL32(240, 190, 50, 230);
+						ImU32 inner = IM_COL32(255, 220, 100, 70);
+						dl->AddCircleFilled(ImVec2(sp.x, sp.y), r, inner, 32);
+						dl->AddCircle(ImVec2(sp.x, sp.y), r, outer, 32, 2.0f);
+						dl->AddCircle(ImVec2(sp.x, sp.y), r * 0.35f, outer, 16, 1.5f);
+						// Crosshair
+						dl->AddLine(ImVec2(sp.x - r, sp.y), ImVec2(sp.x - r * 0.5f, sp.y), outer, 1.5f);
+						dl->AddLine(ImVec2(sp.x + r * 0.5f, sp.y), ImVec2(sp.x + r, sp.y), outer, 1.5f);
+						dl->AddLine(ImVec2(sp.x, sp.y - r), ImVec2(sp.x, sp.y - r * 0.5f), outer, 1.5f);
+						dl->AddLine(ImVec2(sp.x, sp.y + r * 0.5f), ImVec2(sp.x, sp.y + r), outer, 1.5f);
+					}
+				}
+			}
 		}
 	}
 

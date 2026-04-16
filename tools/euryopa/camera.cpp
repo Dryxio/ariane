@@ -33,7 +33,7 @@ CCamera::Process(void)
 
 	// Mouse
 	// first person
-	if(!blockMouse && !gRectSelectActive && CPad::IsMButtonDown(1)){
+	if(!blockMouse && !gRectSelectActive && !gBrushMode && CPad::IsMButtonDown(1)){
 		if(CPad::IsAltDown() && CPad::IsCtrlDown()){
 			float dy = (CPad::oldMouseState.y - CPad::newMouseState.y);
 			dolly(dy*scl);
