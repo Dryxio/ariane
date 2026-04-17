@@ -25,8 +25,13 @@ bool gDragAlignToSurface = false;
 bool gBrushMode = false;
 float gBrushZOffset = 0.0f;
 bool gBrushAlignToSurface = false;
-bool gBrushRandomYaw = false;
+float gBrushYawMin = 0.0f;
+float gBrushYawMax = 0.0f;
 float gBrushSpacing = 2.0f;
+float gBrushRadius = 0.0f;
+int gBrushCount = 1;
+float gBrushDelayMs = 0.0f;
+static const int BRUSH_MAX_PER_BURST = 128;
 bool gGizmoSnap = false;
 float gGizmoSnapAngle = 15.0f;
 float gGizmoSnapTranslate = 1.0f;
@@ -1371,39 +1376,109 @@ ExitBrushMode(void)
 	gBrushMode = false;
 }
 
-// Last drag-painted position; used to enforce gBrushSpacing while LMB is held.
+// Drag-paint state: last sample position + time, used to gate continuous paint.
 static rw::V3d sBrushLastPaintPos = { 0.0f, 0.0f, 0.0f };
 static bool sBrushHasLastPaint = false;
+static double sBrushLastPaintTime = 0.0;
 
+static float
+brushRandomUnit(void)
+{
+	return (float)rand() / (float)RAND_MAX;
+}
+
+// Pick a uniform random point inside the brush disc (in world XY), centered at `center`.
+static rw::V3d
+brushSampleInDisc(rw::V3d center, float radius)
+{
+	if(radius <= 0.0001f)
+		return center;
+	// Uniform disc: r = R*sqrt(u), theta = 2π*v
+	float u = brushRandomUnit();
+	float v = brushRandomUnit();
+	float r = radius * sqrtf(u);
+	float theta = v * 6.28318530718f;
+	rw::V3d p = center;
+	p.x += r * cosf(theta);
+	p.y += r * sinf(theta);
+	return p;
+}
+
+// Build the per-spawn rotation quaternion: random yaw in [yawMin,yawMax],
+// optionally swung to the surface normal.
+static rw::Quat
+brushBuildRotation(rw::V3d hitNormal)
+{
+	rw::Quat rot = { 0.0f, 0.0f, 0.0f, 1.0f };
+	float yawSpan = gBrushYawMax - gBrushYawMin;
+	float yawDeg = gBrushYawMin + (yawSpan > 0.0f ? yawSpan * brushRandomUnit() : 0.0f);
+	if(fabs(yawDeg) > 0.0001f){
+		float yawRad = yawDeg * (3.14159265358979323846f / 180.0f);
+		rot = rw::Quat::rotation(yawRad, { 0.0f, 0.0f, 1.0f });
+	}
+	if(gBrushAlignToSurface)
+		rot = BuildGroundAlignedRotationFromRotation(rot, hitNormal);
+	return rot;
+}
+
+// A single brush burst: fires N placements (N = clamp(gBrushCount) for radius > 0, else 1)
+// and batches them into a single undo entry. Each sample is ground-snapped
+// independently so the brush tracks terrain even across a wide disc.
 static void
-brushPlaceAt(rw::V3d hitPos, rw::V3d hitNormal)
+brushBurstAt(rw::V3d hitPos, rw::V3d hitNormal)
 {
 	int objId = GetSpawnObjectId();
 	if(objId < 0) return;
 
-	// Lift by the object's base-of-bounding-box offset so the model sits ON
-	// the surface (matches the normal placement path in GetPlacementPosition).
-	// Then apply the user-authored Z offset on top (negative to sink into slopes).
-	rw::V3d pos = hitPos;
-	pos.z += GetPlacementBaseOffset(objId);
-	pos.z += gBrushZOffset;
+	float baseOff = GetPlacementBaseOffset(objId);
 
-	rw::Quat rot = { 0.0f, 0.0f, 0.0f, 1.0f };
-	if(gBrushRandomYaw){
-		float yaw = ((float)rand() / (float)RAND_MAX) * 6.28318530718f;
-		rot = rw::Quat::rotation(yaw, { 0.0f, 0.0f, 1.0f });
+	int count = 1;
+	if(gBrushRadius > 0.01f){
+		count = gBrushCount;
+		if(count < 1) count = 1;
+		if(count > BRUSH_MAX_PER_BURST) count = BRUSH_MAX_PER_BURST;
 	}
-	if(gBrushAlignToSurface){
-		rot = BuildGroundAlignedRotationFromRotation(rot, hitNormal);
-		SpawnPlaceObject(pos, &rot);
-	}else if(gBrushRandomYaw){
-		SpawnPlaceObject(pos, &rot);
-	}else{
-		SpawnPlaceObject(pos);
+
+	ObjectInst *batch[MAX_BATCH_OBJECTS];
+	int n = 0;
+	ClearSelection();
+
+	for(int i = 0; i < count; i++){
+		if(n + 2 > MAX_BATCH_OBJECTS)
+			break;
+
+		rw::V3d samplePos, sampleNormal = hitNormal;
+		if(count == 1 || gBrushRadius <= 0.01f){
+			samplePos = hitPos;
+		}else{
+			rw::V3d discPoint = brushSampleInDisc(hitPos, gBrushRadius);
+			rw::V3d snapped;
+			if(GetGroundPlacementSurface(discPoint, &snapped, &sampleNormal, /*ignoreSelection=*/true))
+				samplePos = snapped;
+			else
+				continue;  // sample outside world bounds — skip
+		}
+
+		rw::Quat rot = brushBuildRotation(sampleNormal);
+
+		samplePos.z += baseOff;
+		samplePos.z += gBrushZOffset;
+
+		n += SpawnPlaceObjectNoUndo(samplePos, &rot, &batch[n], MAX_BATCH_OBJECTS - n);
+	}
+
+	if(n > 0){
+		UndoRecordPaste(batch, n);
+		ObjectDef *obj = GetObjectDef(objId);
+		if(count > 1)
+			Toast(TOAST_SPAWN, "Painted %d x %s", count, obj ? obj->m_name : "?");
+		else
+			Toast(TOAST_SPAWN, "Placed %s", obj ? obj->m_name : "?");
 	}
 
 	sBrushLastPaintPos = hitPos;
 	sBrushHasLastPaint = true;
+	sBrushLastPaintTime = ImGui::GetTime();
 }
 
 static void
@@ -1413,7 +1488,7 @@ handleBrushTool(void)
 	if(io.WantCaptureMouse || gGizmoHovered || gGizmoUsing || ImGuizmo::IsOver())
 		return;
 
-	// Cancel
+	// Cancel: MMB-click (legacy place-mode convention) or Esc.
 	if(CPad::IsMButtonClicked(2) || CPad::IsKeyJustDown(KEY_ESC)){
 		ExitBrushMode();
 		return;
@@ -1427,22 +1502,31 @@ handleBrushTool(void)
 		return;
 	}
 
-	// LMB just pressed — place one, start a paint stroke
+	// LMB just pressed — place immediately, start a paint stroke.
 	if(CPad::IsMButtonJustDown(1)){
-		brushPlaceAt(hitPos, hitNormal);
+		brushBurstAt(hitPos, hitNormal);
 		return;
 	}
 
-	// LMB held and moved — continuous paint, gated by gBrushSpacing
-	if(CPad::IsMButtonDown(1) && sBrushHasLastPaint && gBrushSpacing > 0.01f){
-		rw::V3d d = sub(hitPos, sBrushLastPaintPos);
-		float d2 = d.x*d.x + d.y*d.y + d.z*d.z;
-		float s2 = gBrushSpacing * gBrushSpacing;
-		if(d2 >= s2)
-			brushPlaceAt(hitPos, hitNormal);
+	// LMB held and moved — continuous paint, gated by spacing AND optional delay.
+	if(CPad::IsMButtonDown(1) && sBrushHasLastPaint){
+		bool spacingOk = true;
+		if(gBrushSpacing > 0.01f){
+			rw::V3d d = sub(hitPos, sBrushLastPaintPos);
+			float d2 = d.x*d.x + d.y*d.y + d.z*d.z;
+			float s2 = gBrushSpacing * gBrushSpacing;
+			spacingOk = d2 >= s2;
+		}
+		bool delayOk = true;
+		if(gBrushDelayMs > 0.1f){
+			double elapsedMs = (ImGui::GetTime() - sBrushLastPaintTime) * 1000.0;
+			delayOk = elapsedMs >= gBrushDelayMs;
+		}
+		if(spacingOk && delayOk)
+			brushBurstAt(hitPos, hitNormal);
 	}
 
-	// LMB released — end stroke
+	// LMB released — end stroke.
 	if(!CPad::IsMButtonDown(1))
 		sBrushHasLastPaint = false;
 }

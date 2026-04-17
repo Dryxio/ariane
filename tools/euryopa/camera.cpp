@@ -32,8 +32,10 @@ CCamera::Process(void)
 //	m_mouseDir = normalize(m_mouseDir);
 
 	// Mouse
-	// first person
-	if(!blockMouse && !gRectSelectActive && !gBrushMode && CPad::IsMButtonDown(1)){
+	// first person (LMB outside brush mode; RMB-drag while brushing so LMB stays free for painting)
+	bool lookLmb = !gBrushMode && !gRectSelectActive && CPad::IsMButtonDown(1);
+	bool lookRmb = gBrushMode && CPad::IsMButtonDown(3);
+	if(!blockMouse && (lookLmb || lookRmb)){
 		if(CPad::IsAltDown() && CPad::IsCtrlDown()){
 			float dy = (CPad::oldMouseState.y - CPad::newMouseState.y);
 			dolly(dy*scl);

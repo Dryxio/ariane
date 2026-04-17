@@ -1322,20 +1322,23 @@ finalizeLinkedLod(ObjectInst *hdInst, ObjectInst *lodInst)
 	InsertInstIntoSectors(lodInst);
 }
 
-void
-SpawnPlaceObject(rw::V3d position, const rw::Quat *orientation)
+// Core spawn helper: creates HD (+ optional LOD), applies orientation,
+// selects the HD, and fills outInsts. Does NOT clear selection, does NOT
+// record undo, does NOT emit a toast — caller handles those so scatter/brush
+// can batch an entire stroke into one undo entry.
+// Returns the number of insts written to outInsts (1 or 2).
+int
+SpawnPlaceObjectNoUndo(rw::V3d position, const rw::Quat *orientation,
+	ObjectInst **outInsts, int outCapacity)
 {
-	if(spawnObjectId < 0) return;
+	if(spawnObjectId < 0) return 0;
 	ObjectDef *obj = GetObjectDef(spawnObjectId);
-	if(obj == nil) return;
+	if(obj == nil) return 0;
+	if(outInsts == nil || outCapacity <= 0) return 0;
 
 	GameFile *file = GetOrCreateCustomIplFile();
 	int maxIdx = GetMaxIplIndexForFile(file);
 
-	ObjectInst *pasted[4];
-	int numPasted = 0;
-
-	// Resolve LOD object
 	int lodObjId = -1;
 	if(isSA()){
 		if(spawnObjectId < LOD_LOOKUP_SIZE)
@@ -1345,22 +1348,34 @@ SpawnPlaceObject(rw::V3d position, const rw::Quat *orientation)
 			lodObjId = obj->m_relatedModel->m_id;
 	}
 
-	// Create LOD first (if exists). Orientation is applied at creation time so
-	// the cloned RW frame is built with the correct matrix (see createSpawnedInstance).
+	int n = 0;
 	ObjectInst *lodInst = nil;
-	if(lodObjId >= 0 && GetObjectDef(lodObjId)){
+	if(lodObjId >= 0 && GetObjectDef(lodObjId) && n < outCapacity){
 		lodInst = createSpawnedInstance(lodObjId, position, file, ++maxIdx, orientation);
-		pasted[numPasted++] = lodInst;
+		outInsts[n++] = lodInst;
 	}
 
-	// Create HD instance
+	if(n >= outCapacity) return n;
 	ObjectInst *hdInst = createSpawnedInstance(spawnObjectId, position, file, ++maxIdx, orientation);
 	if(lodInst)
 		finalizeLinkedLod(hdInst, lodInst);
-
-	ClearSelection();
 	hdInst->Select();
-	pasted[numPasted++] = hdInst;
+	outInsts[n++] = hdInst;
+
+	return n;
+}
+
+void
+SpawnPlaceObject(rw::V3d position, const rw::Quat *orientation)
+{
+	if(spawnObjectId < 0) return;
+	ObjectDef *obj = GetObjectDef(spawnObjectId);
+	if(obj == nil) return;
+
+	ObjectInst *pasted[4];
+	ClearSelection();
+	int numPasted = SpawnPlaceObjectNoUndo(position, orientation, pasted, 4);
+	if(numPasted == 0) return;
 
 	UndoRecordPaste(pasted, numPasted);
 	Toast(TOAST_SPAWN, "Placed %s", obj->m_name);
