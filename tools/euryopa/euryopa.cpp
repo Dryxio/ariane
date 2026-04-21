@@ -68,6 +68,7 @@ bool gUseViewerCam;
 bool gDrawTarget = true;
 float gFlyFastMul = 2.0f;
 float gFlySlowMul = 0.5f;
+float gFovWheelStep = 2.0f;
 
 struct IplVisibilityEntry
 {
@@ -2300,6 +2301,18 @@ Draw(void)
 
 	ImGui_ImplRW_NewFrame(timeStep);
 	ImGuizmo::BeginFrame();
+
+	// Mouse wheel over the 3D viewport adjusts FOV.
+	// Must run after NewFrame: AddMouseWheelEvent() only queues the event, and
+	// io.MouseWheel is populated by NewFrame and cleared by EndFrame.
+	{
+		ImGuiIO &io = ImGui::GetIO();
+		if(!io.WantCaptureMouse && io.MouseWheel != 0.0f){
+			TheCamera.m_fov -= io.MouseWheel * gFovWheelStep;
+			if(TheCamera.m_fov < 1.0f)   TheCamera.m_fov = 1.0f;
+			if(TheCamera.m_fov > 150.0f) TheCamera.m_fov = 150.0f;
+		}
+	}
 
 	LoadAllRequestedObjects();
 	BuildRenderList();

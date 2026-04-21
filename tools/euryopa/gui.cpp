@@ -533,6 +533,7 @@ normalizePersistentSettings(void)
 	TheCamera.m_LODmult = clamp(TheCamera.m_LODmult, 0.5f, 3.0f);
 	gFlyFastMul = clamp(gFlyFastMul, 1.0f, 10.0f);
 	gFlySlowMul = clamp(gFlySlowMul, 0.05f, 1.0f);
+	gFovWheelStep = clamp(gFovWheelStep, 0.1f, 15.0f);
 	gNeoLightMapStrength = clamp(gNeoLightMapStrength, 0.0f, 1.0f);
 	gDayNightBalance = clamp(gDayNightBalance, 0.0f, 1.0f);
 	gWetRoadEffect = clamp(gWetRoadEffect, 0.0f, 1.0f);
@@ -3657,6 +3658,7 @@ uiHelpWindow(void)
 		"LMB: first person look around\n"
 		"Ctrl+Alt+LMB; W/S: move forward/backward\n"
 		"Shift+WASD: fast fly, Alt+WASD: slow fly (speeds set in Editor > Camera)\n"
+		"Mouse wheel (over viewport): FOV zoom\n"
 		"MMB: pan\n"
 		"Alt+MMB: arc rotate around target\n"
 		"Ctrl+Alt+MMB: zoom into target\n"
@@ -4758,6 +4760,8 @@ loadSaveSettings(void)
 			parseFloatSetting(value, &gFlyFastMul);
 		}else if(strcmp(key, "fly_slow_mul") == 0){
 			parseFloatSetting(value, &gFlySlowMul);
+		}else if(strcmp(key, "fov_wheel_step") == 0){
+			parseFloatSetting(value, &gFovWheelStep);
 		}else if(strcmp(key, "render_all_timed_objects") == 0){
 			if(parseBoolSetting(value, &boolValue)) gNoTimeCull = boolValue;
 		}else if(strcmp(key, "render_all_areas") == 0){
@@ -5014,6 +5018,7 @@ saveSaveSettings(void)
 	fprintf(f, "draw_distance %.9g\n", TheCamera.m_LODmult);
 	fprintf(f, "fly_fast_mul %.9g\n", gFlyFastMul);
 	fprintf(f, "fly_slow_mul %.9g\n", gFlySlowMul);
+	fprintf(f, "fov_wheel_step %.9g\n", gFovWheelStep);
 	fprintf(f, "render_all_timed_objects %d\n", gNoTimeCull ? 1 : 0);
 	fprintf(f, "render_all_areas %d\n", gNoAreaCull ? 1 : 0);
 	writeQuotedSetting(f, "ipl_filter_search", gIplFilterSearch);
@@ -5114,6 +5119,10 @@ uiEditorWindow(void)
 		ImGui::SameLine();
 		ImGui::Checkbox("show", &gDrawTarget);
 		ImGui::SliderFloat("FOV", (float*)&TheCamera.m_fov, 1.0f, 150.0f, "%.0f");
+		ImGui::SameLine();
+		if(ImGui::Button("Reset##fov"))
+			TheCamera.m_fov = 70.0f;
+		ImGui::SliderFloat("FOV wheel step", &gFovWheelStep, 0.1f, 15.0f, "%.2f deg");
 		ImGui::SliderFloat("Fly speed fast (Shift)", &gFlyFastMul, 1.0f, 10.0f, "x%.2f");
 		ImGui::SliderFloat("Fly speed slow (Alt)", &gFlySlowMul, 0.05f, 1.0f, "x%.2f");
 		ImGui::Text("Far: %f", Timecycle::currentColours.farClp);

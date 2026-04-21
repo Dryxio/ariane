@@ -419,7 +419,13 @@ RenderSkyPolys(void)
 	rw::V3d pos = TheCamera.m_position;
 	at.z = 0.0f;
 	at = normalize(at);
-	rw::V3d right = { at.y*1.4f, -at.x*1.4f, 0.0f };
+	// Scale sky-box half-width to current horizontal FOV so the box doesn't
+	// leave visible gaps at wide FOV. Default 1.4 (~108° hfov) is the floor.
+	float halfH = atan(TheCamera.m_aspectRatio *
+	                   tan(TheCamera.m_fov * 0.5f * 3.14159265359f / 180.0f));
+	float sideScale = tan(halfH) * 1.2f;
+	if(sideScale < 1.4f) sideScale = 1.4f;
+	rw::V3d right = { at.y*sideScale, -at.x*sideScale, 0.0f };
 	float f = (pos.z - 25.0f)/80.0f;	// below horizon fog
 	f = clamp(f, 0.0f, 1.0f);
 

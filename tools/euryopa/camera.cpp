@@ -18,6 +18,7 @@ CCamera::Process(void)
 
 	ImGuiIO &io = ImGui::GetIO();
 	bool blockMouse = io.WantCaptureMouse || gGizmoHovered || gGizmoUsing;
+
 	this->mx = CPad::newMouseState.x/io.DisplaySize.x;
 	this->my = CPad::newMouseState.y/io.DisplaySize.y;
 	this->mx = this->mx*2.0f - 1.0f;

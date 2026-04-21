@@ -129,6 +129,7 @@ extern bool gUseViewerCam;
 extern bool gDrawTarget;
 extern float gFlyFastMul;
 extern float gFlySlowMul;
+extern float gFovWheelStep;
 void SetInstIplFilterKey(ObjectInst *inst, const char *sceneName);
 bool IsInstVisibleByIplFilter(const ObjectInst *inst);
 void RefreshIplVisibilityEntries(void);
