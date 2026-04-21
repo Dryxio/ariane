@@ -5356,9 +5356,8 @@ uiToolsWindow(void)
 
 	ImGui::Separator();
 
-	// Brush tool
-	ImGui::Text("Brush Tool");
-	{
+	// Brush tool — collapsed by default to keep the Tools window compact.
+	if(ImGui::CollapsingHeader("Brush Tool")){
 		int brushObjId = GetSpawnObjectId();
 		ObjectDef *brushObj = brushObjId >= 0 ? GetObjectDef(brushObjId) : nil;
 
