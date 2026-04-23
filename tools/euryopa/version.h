@@ -1,7 +1,8 @@
 #pragma once
 
-// Ariane version — bump this when releasing updates
-#define ARIANE_VERSION "1.3"
+// Ariane version — bump this when releasing updates.
+// Keep this monotonic for the updater: after 1.29, use 1.30, not 1.3.
+#define ARIANE_VERSION "1.30"
 
 // Update channel — set at build time via preprocessor define
 // Defaults to "master" if not set by the build system
