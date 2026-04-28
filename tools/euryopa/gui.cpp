@@ -4410,6 +4410,7 @@ uiFxTable(ObjectInst *inst)
 
 	for(int i = 0; i < obj->m_numEffects; i++) {
 		Effect *e = Effects::GetEffect(obj->m_effectIndex+i);
+		ImGui::PushID(i);
 		ImGui::ColorButton("##col", mkColor(e->col),
 				ImGuiColorEditFlags_NoTooltip |
 				ImGuiColorEditFlags_NoBorder,
@@ -4431,6 +4432,7 @@ uiFxTable(ObjectInst *inst)
 			if(ImGui::IsMouseDoubleClicked(0))
 				e->JumpTo(inst);
 		}
+		ImGui::PopID();
 	}
 	ImGui::EndChild();
 }

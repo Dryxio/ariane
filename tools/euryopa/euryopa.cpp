@@ -1874,8 +1874,8 @@ LoadGame(void)
 		AddCdImage("MODELS\\GTA_INT.IMG");
 
 	if(ModloaderIsActive()){
-		ModloaderDatEntry imgEntries[64];
-		int nImg = ModloaderGetAdditions(imgEntries, 64);
+		ModloaderDatEntry imgEntries[512];
+		int nImg = ModloaderGetAdditions(imgEntries, 512);
 		for(int i = 0; i < nImg; i++)
 			if(strcmp(imgEntries[i].type, "IMG") == 0 || strcmp(imgEntries[i].type, "CDIMAGE") == 0)
 				AddCdImage(imgEntries[i].logicalPath);

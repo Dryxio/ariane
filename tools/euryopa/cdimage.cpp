@@ -305,41 +305,30 @@ ReadDirectory(CdImage *cdimg, FILE *f, int n, bool ver2)
 	}
 }
 
-void
-AddCdImage(const char *path)
+static bool
+AddCdImageResolved(const char *path, const char *resolvedPath, bool useDirRedirect)
 {
 	FILE *img, *dir;
 	char dirpath[1024];
-	char resolvedPath[1024];
 	char resolvedDirPath[1024];
 	char *p;
 	int fourcc, n;
 	int imgindex;
 	CdImage *cdimg;
 
+	img = fopen(resolvedPath, "rb");
+	if(img == nil){
+		log("warning: cdimage %s couldn't be opened\n", path);
+		return false;
+	}
+
 	if(numCdImages < NUMCDIMAGES){
 		imgindex = numCdImages++;
 		cdimg = &cdImages[imgindex];
 	}else{
 		log("warning: no room for more than %d cdimages\n", NUMCDIMAGES);
-		return;
-	}
-
-	const char *redirect = ModloaderRedirectPath(path);
-	if(redirect){
-		strncpy(resolvedPath, redirect, sizeof(resolvedPath)-1);
-		resolvedPath[sizeof(resolvedPath)-1] = '\0';
-	}else{
-		strncpy(resolvedPath, path, sizeof(resolvedPath)-1);
-		resolvedPath[sizeof(resolvedPath)-1] = '\0';
-		rw::makePath(resolvedPath);
-	}
-
-	img = fopen(resolvedPath, "rb");
-	if(img == nil){
-		log("warning: cdimage %s couldn't be opened\n", path);
-		numCdImages--;
-		return;
+		fclose(img);
+		return false;
 	}
 	cdimg->logicalName = strdup(path);
 	cdimg->sourcePath = strdup(resolvedPath);
@@ -359,7 +348,7 @@ AddCdImage(const char *path)
 		dirpath[sizeof(dirpath)-1] = '\0';
 		p = strrchr(dirpath, '.');
 		strcpy(p+1, "dir");
-		redirect = ModloaderRedirectPath(dirpath);
+		const char *redirect = useDirRedirect ? ModloaderRedirectPath(dirpath) : nil;
 		if(redirect){
 			strncpy(resolvedDirPath, redirect, sizeof(resolvedDirPath)-1);
 			resolvedDirPath[sizeof(resolvedDirPath)-1] = '\0';
@@ -376,7 +365,7 @@ AddCdImage(const char *path)
 			free(cdimg->logicalName);
 			free(cdimg->sourcePath);
 			fclose(img);
-			return;
+			return false;
 		}
 		fseek(dir, 0, SEEK_END);
 		n = ftell(dir);
@@ -386,6 +375,39 @@ AddCdImage(const char *path)
 		fclose(dir);
 	}
 	log("AddCdImage: opened %s from %s\n", cdimg->logicalName, cdimg->sourcePath);
+	return true;
+}
+
+void
+AddCdImage(const char *path)
+{
+	char resolvedPath[1024];
+	char stockPath[1024];
+
+	const char *redirect = ModloaderRedirectPath(path);
+	if(redirect){
+		strncpy(stockPath, path, sizeof(stockPath)-1);
+		stockPath[sizeof(stockPath)-1] = '\0';
+		rw::makePath(stockPath);
+
+		// Mod Loader IMG files are overlays: entries present in the mod archive
+		// override stock entries, but missing stock TXDs/DFFs must remain visible.
+		FILE *stock = fopen(stockPath, "rb");
+		if(stock){
+			fclose(stock);
+			AddCdImageResolved(path, stockPath, false);
+		}
+
+		strncpy(resolvedPath, redirect, sizeof(resolvedPath)-1);
+		resolvedPath[sizeof(resolvedPath)-1] = '\0';
+		AddCdImageResolved(path, resolvedPath, true);
+		return;
+	}
+
+	strncpy(resolvedPath, path, sizeof(resolvedPath)-1);
+	resolvedPath[sizeof(resolvedPath)-1] = '\0';
+	rw::makePath(resolvedPath);
+	AddCdImageResolved(path, resolvedPath, true);
 }
 
 static void
