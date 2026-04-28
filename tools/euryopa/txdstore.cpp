@@ -100,15 +100,47 @@ CreateTxd(int i)
 		td->txd = rw::TexDictionary::create();
 }
 
+static bool
+ReadTxdFromBuffer(TxdDef *td, uint8 *buffer, int size, const char *sourcePath, rw::TexDictionary **outTxd)
+{
+	rw::StreamMemory stream;
+	rw::TexDictionary *txd = nil;
+	const char *source = sourcePath && sourcePath[0] ? sourcePath : "unknown source";
+	bool ok = false;
+
+	if(outTxd)
+		*outTxd = nil;
+	if(buffer == nil || size <= 0){
+		log("warning: failed to read txd %s from %s\n", td->name, source);
+		return false;
+	}
+
+	log("LoadTxd: %s from %s (%d bytes)\n", td->name, source, size);
+	stream.open((uint8*)buffer, size);
+	if(findChunk(&stream, rw::ID_TEXDICTIONARY, nil, nil)){
+		txd = rw::TexDictionary::streamRead(&stream);
+		if(txd){
+			ConvertTxd(txd);
+			ok = true;
+		}else{
+			log("warning: failed to parse txd %s from %s\n", td->name, source);
+		}
+	}else{
+		log("warning: no TXD dictionary chunk for txd %s from %s\n", td->name, source);
+	}
+	stream.close();
+
+	if(ok && outTxd)
+		*outTxd = txd;
+	return ok;
+}
+
 void
 LoadTxd(int i)
 {
 	uint8 *buffer = nil;
 	int size = 0;
-	bool looseFile = false;
-	bool streamOpen = false;
 	char sourcePath[1024];
-	rw::StreamMemory stream;
 	TxdDef *td = GetTxdDef(i);
 	if(td == nil)
 		return;
@@ -121,56 +153,44 @@ LoadTxd(int i)
 	const char *loosePath = ModloaderFindOverride(td->name, "txd");
 	if(loosePath){
 		buffer = ReadLooseFile(loosePath, &size);
-		looseFile = true;
 		strncpy(sourcePath, loosePath, sizeof(sourcePath)-1);
 		sourcePath[sizeof(sourcePath)-1] = '\0';
-	}else{
-		if(td->imageIndex < 0){
+		ReadTxdFromBuffer(td, buffer, size, sourcePath, &td->txd);
+		if(buffer)
+			free(buffer);
+	}
+
+	for(int imageIndex = td->imageIndex; td->txd == nil && imageIndex >= 0; ){
+		buffer = ReadFileFromImage(imageIndex, &size);
+		if(!GetCdImageEntrySourcePath(imageIndex, sourcePath, sizeof(sourcePath)))
+			snprintf(sourcePath, sizeof(sourcePath), "image index %d", imageIndex);
+		if(ReadTxdFromBuffer(td, buffer, size, sourcePath, &td->txd))
+			break;
+
+		int previous = -1;
+		if(!GetPreviousCdImageEntryIndex(imageIndex, &previous))
+			break;
+		char previousPath[1024];
+		if(!GetCdImageEntrySourcePath(previous, previousPath, sizeof(previousPath)))
+			snprintf(previousPath, sizeof(previousPath), "image index %d", previous);
+		log("warning: falling back txd %s from %s to previous entry %s\n",
+			td->name, sourcePath[0] ? sourcePath : "unknown source", previousPath);
+		imageIndex = previous;
+	}
+
+	if(td->txd == nil){
+		if(td->imageIndex < 0 && loosePath == nil){
 			log("warning: no streaming info for txd %s\n", td->name);
-			td->txd = rw::TexDictionary::create();
-			goto finish;
-		}
-		buffer = ReadFileFromImage(td->imageIndex, &size);
-		if(!GetCdImageEntrySourcePath(td->imageIndex, sourcePath, sizeof(sourcePath)))
-			snprintf(sourcePath, sizeof(sourcePath), "image index %d", td->imageIndex);
-	}
-
-	if(buffer == nil || size <= 0){
-		log("warning: failed to read txd %s from %s; using empty txd\n",
-			td->name, sourcePath[0] ? sourcePath : "unknown source");
-		td->txd = rw::TexDictionary::create();
-		goto finish;
-	}
-
-	log("LoadTxd: %s from %s (%d bytes)\n",
-		td->name, sourcePath[0] ? sourcePath : "unknown source", size);
-	stream.open((uint8*)buffer, size);
-	streamOpen = true;
-	if(findChunk(&stream, rw::ID_TEXDICTIONARY, nil, nil)){
-		td->txd = rw::TexDictionary::streamRead(&stream);
-		if(td->txd){
-			ConvertTxd(td->txd);
 		}else{
-			log("warning: failed to parse txd %s from %s; using empty txd\n",
-				td->name, sourcePath[0] ? sourcePath : "unknown source");
-			td->txd = rw::TexDictionary::create();
+			log("warning: using empty txd %s after all sources failed\n", td->name);
 		}
-	}else{
-		log("warning: no TXD dictionary chunk for txd %s from %s; using empty txd\n",
-			td->name, sourcePath[0] ? sourcePath : "unknown source");
 		td->txd = rw::TexDictionary::create();
 	}
 
-finish:
 	if(td->parentId >= 0){
 		rw::TexDictionary *partxd = GetTxdDef(td->parentId)->txd;
 		*PLUGINOFFSET(rw::TexDictionary*, td->txd, txdStoreOffset) = partxd;
 	}
-
-	if(streamOpen)
-		stream.close();
-	if(looseFile && buffer)
-		free(buffer);
 }
 
 void

@@ -848,6 +848,41 @@ GetCdImageEntrySourcePath(int i, char *outSourcePath, size_t outSourcePathSize)
 	return true;
 }
 
+bool
+GetPreviousCdImageEntryIndex(int i, int *outIndex)
+{
+	int img = i>>24 & 0xFF;
+	int dir = i & 0xFFFFFF;
+	CdImage *cdimg;
+	DirEntry *want;
+
+	if(outIndex)
+		*outIndex = -1;
+	if(img < 0 || img >= numCdImages)
+		return false;
+	cdimg = &cdImages[img];
+	if(dir < 0 || dir >= cdimg->directorySize)
+		return false;
+	want = &cdimg->directory[dir];
+
+	for(int imgIdx = img; imgIdx >= 0; imgIdx--){
+		CdImage *candidateImg = &cdImages[imgIdx];
+		int dirIdx = imgIdx == img ? dir-1 : candidateImg->directorySize-1;
+		for(; dirIdx >= 0; dirIdx--){
+			DirEntry *candidate = &candidateImg->directory[dirIdx];
+			if(candidate->filetype != want->filetype)
+				continue;
+			if(rw::strcmp_ci(candidate->name, want->name) != 0)
+				continue;
+			if(outIndex)
+				*outIndex = dirIdx | (candidateImg->index << 24);
+			return true;
+		}
+	}
+
+	return false;
+}
+
 uint8*
 ReadFileFromImage(int i, int *size)
 {
