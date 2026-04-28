@@ -812,6 +812,42 @@ GetCdImageSourcePath(int i)
 	return cdImages[img].sourcePath;
 }
 
+bool
+GetCdImageEntrySourcePath(int i, char *outSourcePath, size_t outSourcePathSize)
+{
+	int img = i>>24 & 0xFF;
+	int dir = i & 0xFFFFFF;
+	CdImage *cdimg;
+	DirEntry *de;
+
+	if(outSourcePath && outSourcePathSize > 0)
+		outSourcePath[0] = '\0';
+	if(outSourcePath == nil || outSourcePathSize == 0)
+		return false;
+	if(img < 0 || img >= numCdImages)
+		return false;
+	cdimg = &cdImages[img];
+	if(dir < 0 || dir >= cdimg->directorySize)
+		return false;
+	de = &cdimg->directory[dir];
+
+	if(de->file && de->file->sourcePath && de->file->sourcePath[0] != '\0'){
+		strncpy(outSourcePath, de->file->sourcePath, outSourcePathSize-1);
+		outSourcePath[outSourcePathSize-1] = '\0';
+		return true;
+	}
+
+	char entryFilename[32];
+	if(BuildDirEntryFilename(de, entryFilename, sizeof(entryFilename))){
+		snprintf(outSourcePath, outSourcePathSize, "%s::%s", cdimg->sourcePath, entryFilename);
+		return true;
+	}
+
+	strncpy(outSourcePath, cdimg->sourcePath, outSourcePathSize-1);
+	outSourcePath[outSourcePathSize-1] = '\0';
+	return true;
+}
+
 uint8*
 ReadFileFromImage(int i, int *size)
 {

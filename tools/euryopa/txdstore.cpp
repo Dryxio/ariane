@@ -103,42 +103,74 @@ CreateTxd(int i)
 void
 LoadTxd(int i)
 {
-	uint8 *buffer;
-	int size;
+	uint8 *buffer = nil;
+	int size = 0;
 	bool looseFile = false;
+	bool streamOpen = false;
+	char sourcePath[1024];
 	rw::StreamMemory stream;
 	TxdDef *td = GetTxdDef(i);
+	if(td == nil)
+		return;
 	if(td->txd)
 		return;
 	if(td->parentId >= 0)
 		LoadTxd(td->parentId);
 
+	sourcePath[0] = '\0';
 	const char *loosePath = ModloaderFindOverride(td->name, "txd");
 	if(loosePath){
 		buffer = ReadLooseFile(loosePath, &size);
 		looseFile = true;
+		strncpy(sourcePath, loosePath, sizeof(sourcePath)-1);
+		sourcePath[sizeof(sourcePath)-1] = '\0';
 	}else{
 		if(td->imageIndex < 0){
 			log("warning: no streaming info for txd %s\n", td->name);
-			return;
+			td->txd = rw::TexDictionary::create();
+			goto finish;
 		}
 		buffer = ReadFileFromImage(td->imageIndex, &size);
+		if(!GetCdImageEntrySourcePath(td->imageIndex, sourcePath, sizeof(sourcePath)))
+			snprintf(sourcePath, sizeof(sourcePath), "image index %d", td->imageIndex);
 	}
 
+	if(buffer == nil || size <= 0){
+		log("warning: failed to read txd %s from %s; using empty txd\n",
+			td->name, sourcePath[0] ? sourcePath : "unknown source");
+		td->txd = rw::TexDictionary::create();
+		goto finish;
+	}
+
+	log("LoadTxd: %s from %s (%d bytes)\n",
+		td->name, sourcePath[0] ? sourcePath : "unknown source", size);
 	stream.open((uint8*)buffer, size);
+	streamOpen = true;
 	if(findChunk(&stream, rw::ID_TEXDICTIONARY, nil, nil)){
 		td->txd = rw::TexDictionary::streamRead(&stream);
-		ConvertTxd(td->txd);
-	}else
+		if(td->txd){
+			ConvertTxd(td->txd);
+		}else{
+			log("warning: failed to parse txd %s from %s; using empty txd\n",
+				td->name, sourcePath[0] ? sourcePath : "unknown source");
+			td->txd = rw::TexDictionary::create();
+		}
+	}else{
+		log("warning: no TXD dictionary chunk for txd %s from %s; using empty txd\n",
+			td->name, sourcePath[0] ? sourcePath : "unknown source");
 		td->txd = rw::TexDictionary::create();
+	}
 
+finish:
 	if(td->parentId >= 0){
 		rw::TexDictionary *partxd = GetTxdDef(td->parentId)->txd;
 		*PLUGINOFFSET(rw::TexDictionary*, td->txd, txdStoreOffset) = partxd;
 	}
 
-	stream.close();
-	if(looseFile) free(buffer);
+	if(streamOpen)
+		stream.close();
+	if(looseFile && buffer)
+		free(buffer);
 }
 
 void

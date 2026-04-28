@@ -513,6 +513,7 @@ uint8 *ReadFileFromImage(int i, int *size);
 GameFile *GetGameFileFromImage(int i);
 const char *GetCdImageLogicalName(int i);
 const char *GetCdImageSourcePath(int i);
+bool GetCdImageEntrySourcePath(int i, char *outSourcePath, size_t outSourcePathSize);
 bool WriteFileToImage(int i, uint8 *data, int size);
 bool BuildModloaderImageEntryExportPath(int i, char *dst, size_t size);
 void RequestObject(int id);

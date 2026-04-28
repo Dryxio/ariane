@@ -620,6 +620,8 @@ void
 ConvertTxd(rw::TexDictionary *txd)
 {
 	rw::Texture *tex;
+	if(txd == nil)
+		return;
 	FORLIST(lnk, txd->textures){
 		tex = rw::Texture::fromDict(lnk);
 		rw::Raster *ras = tex->raster;
