@@ -5,6 +5,9 @@ static TxdDef txdlist[NUMTEXDICTS];
 static int numTxds;
 static int32 txdStoreOffset;	// RW plugin
 static rw::TexDictionary *pushedTxd;
+static const char *txdLookupObjectName;
+static int txdLookupSlot = -1;
+static int missingTextureWarnings;
 
 rw::TexDictionary *defaultTxd;
 
@@ -232,6 +235,56 @@ TxdSetParent(const char *child, const char *parent)
 	GetTxdDef(c)->parentId = p;
 }
 
+void
+SetTxdLookupContext(const char *objectName, int txdSlot)
+{
+	txdLookupObjectName = objectName;
+	txdLookupSlot = txdSlot;
+}
+
+static const char*
+FindTxdNameByDictionary(rw::TexDictionary *txd)
+{
+	for(int i = 0; i < numTxds; i++)
+		if(txdlist[i].txd == txd)
+			return txdlist[i].name;
+	if(txd == defaultTxd)
+		return "default";
+	return "unknown";
+}
+
+static void
+LogMissingTexture(const char *name)
+{
+	char chain[512];
+	size_t used = 0;
+	rw::TexDictionary *txd = rw::TexDictionary::getCurrent();
+
+	if(missingTextureWarnings >= 2000)
+		return;
+	missingTextureWarnings++;
+
+	chain[0] = '\0';
+	while(txd && used < sizeof(chain)-1){
+		const char *txdName = FindTxdNameByDictionary(txd);
+		int written = snprintf(chain + used, sizeof(chain) - used, "%s%s",
+			used ? " -> " : "", txdName);
+		if(written < 0)
+			break;
+		if((size_t)written >= sizeof(chain) - used){
+			used = sizeof(chain)-1;
+			break;
+		}
+		used += written;
+		txd = *PLUGINOFFSET(rw::TexDictionary*, txd, txdStoreOffset);
+	}
+
+	log("warning: missing texture %s while loading object %s txdSlot %d chain [%s]\n",
+		name ? name : "(null)",
+		txdLookupObjectName ? txdLookupObjectName : "(unknown)",
+		txdLookupSlot,
+		chain[0] ? chain : "none");
+}
 
 rw::Texture*
 TxdStoreFindCB(const char *name)
@@ -245,6 +298,7 @@ TxdStoreFindCB(const char *name)
 		if(tex) return tex;
 		txd = *PLUGINOFFSET(rw::TexDictionary*, txd, txdStoreOffset);
 	}
+	LogMissingTexture(name);
 	return nil;
 }
 

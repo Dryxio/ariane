@@ -412,10 +412,12 @@ ObjectDef::Load(void)
 		LoadTxd(this->m_txdSlot);
 	TxdMakeCurrent(this->m_txdSlot);
 
+	SetTxdLookupContext(this->m_name, this->m_txdSlot);
 	if(m_type == ATOMIC)
 		LoadAtomic();
 	else if(m_type == CLUMP)
 		LoadClump();
+	SetTxdLookupContext(nil, -1);
 }
 
 void
