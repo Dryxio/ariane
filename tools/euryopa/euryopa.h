@@ -1017,7 +1017,7 @@ void LoadScene(const char *filename);
 void LoadCollisionFile(const char *path);
 rw::TexDictionary *LoadTexDictionary(const char *path);
 BinaryIplSaveResult SaveScene(const char *filename);
-BinaryIplSaveResult SaveBinaryIpls(void);
+BinaryIplSaveResult SaveBinaryIpls(const int32 *skipImages = nil, int numSkipImages = 0);
 AutomaticBackupResult CreateAutomaticBackup(const char *rootDir, int keepCount);
 }
 

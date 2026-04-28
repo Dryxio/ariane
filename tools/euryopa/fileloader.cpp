@@ -1583,6 +1583,15 @@ rememberBinaryImage(int32 *images, int *numImages, int32 imageIndex)
 		images[(*numImages)++] = imageIndex;
 }
 
+static bool
+imageIsInList(int32 imageIndex, const int32 *images, int numImages)
+{
+	for(int i = 0; i < numImages; i++)
+		if(images[i] == imageIndex)
+			return true;
+	return false;
+}
+
 struct BinaryIplHeader
 {
 	uint32 fourcc;
@@ -1799,7 +1808,7 @@ SaveBinaryImageByIndex(int32 imgIdx, BinaryIplSaveResult *result, int *numDelete
 }
 
 BinaryIplSaveResult
-SaveBinaryIpls(void)
+SaveBinaryIpls(const int32 *skipImages, int numSkipImages)
 {
 	BinaryIplSaveResult result = {};
 	int numDeleted = 0, numMoved = 0;
@@ -1811,6 +1820,8 @@ SaveBinaryIpls(void)
 		ObjectInst *inst = (ObjectInst*)p->item;
 		if(!binaryInstNeedsSave(inst))
 			continue;
+		if(skipImages && imageIsInList(inst->m_imageIndex, skipImages, numSkipImages))
+			continue;
 		rememberBinaryImage(imagesToProcess, &numImagesToProcess, inst->m_imageIndex);
 	}
 
@@ -1818,8 +1829,52 @@ SaveBinaryIpls(void)
 	if(numImagesToProcess == 0)
 		return result;
 
-	for(int ii = 0; ii < numImagesToProcess; ii++)
-		SaveBinaryImageByIndex(imagesToProcess[ii], &result, &numDeleted, &numMoved);
+	if(gSaveDestination == SAVE_DESTINATION_MODLOADER){
+		std::vector<PendingSaveFile> pendingFiles;
+		std::vector<std::pair<ObjectInst*, int>> rebuiltIndexUpdates;
+		int32 imagesQueued[256];
+		int numImagesQueued = 0;
+
+		for(int ii = 0; ii < numImagesToProcess; ii++){
+			std::vector<uint8> writeBuf;
+			std::vector<std::pair<ObjectInst*, int>> imageRebuiltUpdates;
+			if(!BuildBinaryStandaloneImageByIndex(imagesToProcess[ii], &result, &numDeleted, &numMoved,
+			                                      &writeBuf, &imageRebuiltUpdates))
+				continue;
+			if(writeBuf.empty())
+				continue;
+
+			char exportPath[1024];
+			if(!BuildModloaderImageEntryExportPath(imagesToProcess[ii], exportPath, sizeof(exportPath))){
+				result.numFailedFiles++;
+				rememberBinaryImage(result.failedImages, &result.numFailedImages, imagesToProcess[ii]);
+				continue;
+			}
+
+			PendingSaveFile pending;
+			pending.finalPath = exportPath;
+			pending.data.swap(writeBuf);
+			pendingFiles.push_back(pending);
+			rebuiltIndexUpdates.insert(rebuiltIndexUpdates.end(),
+			                           imageRebuiltUpdates.begin(), imageRebuiltUpdates.end());
+			rememberBinaryImage(imagesQueued, &numImagesQueued, imagesToProcess[ii]);
+		}
+
+		if(!pendingFiles.empty()){
+			if(!CommitPendingSaveFiles(pendingFiles)){
+				result.numFailedFiles++;
+				return result;
+			}
+			for(size_t i = 0; i < rebuiltIndexUpdates.size(); i++)
+				rebuiltIndexUpdates[i].first->m_binInstIndex = rebuiltIndexUpdates[i].second;
+			for(int i = 0; i < numImagesQueued; i++)
+				rememberBinaryImage(result.savedImages, &result.numSavedImages, imagesQueued[i]);
+			ModloaderInit();
+		}
+	}else{
+		for(int ii = 0; ii < numImagesToProcess; ii++)
+			SaveBinaryImageByIndex(imagesToProcess[ii], &result, &numDeleted, &numMoved);
+	}
 
 	if(numDeleted)
 		log("Binary IPLs: %d delete(s) persisted\n", numDeleted);

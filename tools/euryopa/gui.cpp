@@ -1533,6 +1533,10 @@ saveAllIpls(void)
 		}
 	}
 
+	FileLoader::BinaryIplSaveResult standaloneBinaryResult =
+		FileLoader::SaveBinaryIpls(binaryResult.savedImages, binaryResult.numSavedImages);
+	mergeBinarySaveResult(&binaryResult, standaloneBinaryResult);
+
 	if(binaryResult.numBlockedEmptyDeletes)
 		Toast(TOAST_SAVE, "Blocked %d binary delete(s): can't empty a streaming IPL", binaryResult.numBlockedEmptyDeletes);
 	else if(binaryResult.numFailedImages)
@@ -1552,7 +1556,8 @@ saveAllIpls(void)
 			Toast(TOAST_SAVE, "Skipped empty modloader water.dat override: SA crashes on zero-poly custom water");
 	}
 
-	if(gSaveDestination == SAVE_DESTINATION_MODLOADER && numSaved > 0){
+	if(gSaveDestination == SAVE_DESTINATION_MODLOADER &&
+	   (numSaved > 0 || binaryResult.numSavedImages > 0)){
 		int shadowedText = 0;
 		int shadowedBinary = 0;
 		for(int i = 0; i < numSaved; i++){
