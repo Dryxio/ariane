@@ -138,12 +138,23 @@ ReadTxdFromBuffer(TxdDef *td, uint8 *buffer, int size, const char *sourcePath, r
 	return ok;
 }
 
+static void
+AddTexDictionaryTextures(rw::TexDictionary *dst, rw::TexDictionary *src)
+{
+	if(dst == nil || src == nil)
+		return;
+	FORLIST(lnk, src->textures)
+		dst->addFront(rw::Texture::fromDict(lnk));
+}
+
 void
 LoadTxd(int i)
 {
 	uint8 *buffer = nil;
 	int size = 0;
 	char sourcePath[1024];
+	int imageStack[64];
+	int numImages = 0;
 	TxdDef *td = GetTxdDef(i);
 	if(td == nil)
 		return;
@@ -154,31 +165,60 @@ LoadTxd(int i)
 
 	sourcePath[0] = '\0';
 	const char *loosePath = ModloaderFindOverride(td->name, "txd");
-	if(loosePath){
-		buffer = ReadLooseFile(loosePath, &size);
-		strncpy(sourcePath, loosePath, sizeof(sourcePath)-1);
-		sourcePath[sizeof(sourcePath)-1] = '\0';
-		ReadTxdFromBuffer(td, buffer, size, sourcePath, &td->txd);
-		if(buffer)
-			free(buffer);
-	}
 
-	for(int imageIndex = td->imageIndex; td->txd == nil && imageIndex >= 0; ){
-		buffer = ReadFileFromImage(imageIndex, &size);
-		if(!GetCdImageEntrySourcePath(imageIndex, sourcePath, sizeof(sourcePath)))
-			snprintf(sourcePath, sizeof(sourcePath), "image index %d", imageIndex);
-		if(ReadTxdFromBuffer(td, buffer, size, sourcePath, &td->txd))
-			break;
-
+	for(int imageIndex = td->imageIndex; imageIndex >= 0 && numImages < (int)nelem(imageStack); ){
+		imageStack[numImages++] = imageIndex;
 		int previous = -1;
 		if(!GetPreviousCdImageEntryIndex(imageIndex, &previous))
 			break;
-		char previousPath[1024];
-		if(!GetCdImageEntrySourcePath(previous, previousPath, sizeof(previousPath)))
-			snprintf(previousPath, sizeof(previousPath), "image index %d", previous);
-		log("warning: falling back txd %s from %s to previous entry %s\n",
-			td->name, sourcePath[0] ? sourcePath : "unknown source", previousPath);
 		imageIndex = previous;
+	}
+
+	for(int stackIndex = numImages-1; stackIndex >= 0; stackIndex--){
+		int imageIndex = imageStack[stackIndex];
+		rw::TexDictionary *sourceTxd = nil;
+		buffer = ReadFileFromImage(imageIndex, &size);
+		if(!GetCdImageEntrySourcePath(imageIndex, sourcePath, sizeof(sourcePath)))
+			snprintf(sourcePath, sizeof(sourcePath), "image index %d", imageIndex);
+		if(!ReadTxdFromBuffer(td, buffer, size, sourcePath, &sourceTxd)){
+			if(stackIndex > 0){
+				int previous = imageStack[stackIndex-1];
+				char previousPath[1024];
+				if(!GetCdImageEntrySourcePath(previous, previousPath, sizeof(previousPath)))
+					snprintf(previousPath, sizeof(previousPath), "image index %d", previous);
+				log("warning: falling back txd %s from %s to previous entry %s\n",
+					td->name, sourcePath[0] ? sourcePath : "unknown source", previousPath);
+			}
+			continue;
+		}
+
+		if(td->txd == nil){
+			td->txd = sourceTxd;
+		}else{
+			log("LoadTxd: merging overlay txd %s from %s\n",
+				td->name, sourcePath[0] ? sourcePath : "unknown source");
+			AddTexDictionaryTextures(td->txd, sourceTxd);
+			sourceTxd->destroy();
+		}
+	}
+
+	if(loosePath){
+		rw::TexDictionary *sourceTxd = nil;
+		buffer = ReadLooseFile(loosePath, &size);
+		strncpy(sourcePath, loosePath, sizeof(sourcePath)-1);
+		sourcePath[sizeof(sourcePath)-1] = '\0';
+		if(ReadTxdFromBuffer(td, buffer, size, sourcePath, &sourceTxd)){
+			if(td->txd == nil){
+				td->txd = sourceTxd;
+			}else{
+				log("LoadTxd: merging loose override txd %s from %s\n",
+					td->name, sourcePath[0] ? sourcePath : "unknown source");
+				AddTexDictionaryTextures(td->txd, sourceTxd);
+				sourceTxd->destroy();
+			}
+		}
+		if(buffer)
+			free(buffer);
 	}
 
 	if(td->txd == nil){
