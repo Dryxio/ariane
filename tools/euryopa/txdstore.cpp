@@ -3,7 +3,7 @@
 
 static TxdDef txdlist[NUMTEXDICTS];
 static int numTxds;
-static int32 txdStoreOffset;	// RW plugin
+static int32 txdStoreOffset;	// RW plugin 
 static rw::TexDictionary *pushedTxd;
 static const char *txdLookupObjectName;
 static int txdLookupSlot = -1;
