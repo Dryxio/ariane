@@ -1,0 +1,112 @@
+Rendering:
+ - 2dfx
+ - paths
+ - car spawns
+ - zones
+
+Design:
+ - feature matrix
+ - Scenes
+ - Selection types
+
+Interface:
+ - keep mouse in window
+ - tools
+  - select
+  - move
+  - rotate
+  - snap?
+ - instance dialog
+ - object dialog
+ - other dialogs
+ - params:
+  - time
+  - weather
+  - LOD distance
+
+*********************************
+
+Edit Objects
+
+Definitions:
+	Objects (objs, tobj, hier?, -cars, -peds, -weap, anim)
+	Txds (txdp)
+	2dfx (how exactly?)
+	path (how exactly?)
+Placements:
+	Instances (inst)
+	Zones (zone, cull, auzo, tcyc)
+	pick?
+	path (how exactly?)
+	occl
+	?mult
+	?grge
+	enex
+	cars
+	jump
+
+*********************************
+
+UI
+
+Hotkeys
+ T - time and weather
+ V - view
+ R - rendering
+ I - Object & Instance Info
+
+Quick access
+------------
+	hour
+	minute
+	draw dist mult
+	area
+
+Time & Weather
+--------------
+	hour
+	minute
+	old weather
+	new weather
+	interpolation
+	extracolour
+	|DN balance
+	|neo lightmap
+
+View (which things are drawn)
+----
+	Collisions
+	TimeCycle boxes
+	etc.
+	play animations
+	water
+	LOD/HD
+	 normal
+	 only HD
+	 only LOD
+	 draw dist mult
+	time cull
+	area cull
+	 area setting
+
+Rendering (how things are drawn)
+---------
+	postfx
+	 on/off
+	 VC blur ambient override
+	 colourfilter options
+	  III: overlay, fake overlay
+	  VC: overlay
+	  SA: none, PS2, PC/Xbox, ^ mobile
+	      radiosity
+	 radiosity
+	custom pipes
+	 SA buildings: PS2, PC, Xbox
+	backface culling
+	alpha test
+	 ps2
+	 ref val
+	background
+	fog
+	use TimeCycle boxes
+	^ TimeCycle override

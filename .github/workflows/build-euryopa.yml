@@ -1,0 +1,113 @@
+name: Build Euryopa
+
+on:
+  push:
+    branches: [master, PE]
+  pull_request:
+    branches: [master, PE]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  LIBRW: ${{ github.workspace }}/librw
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout ariane
+        uses: actions/checkout@v4
+        with:
+          path: ariane
+
+      - name: Checkout librw
+        uses: actions/checkout@v4
+        with:
+          repository: Southland-FR/librw
+          path: librw
+          # If this repo is private, add a PAT secret:
+          # token: ${{ secrets.LIBRW_TOKEN }}
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install Premake5
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-windows.zip" -OutFile premake5.zip
+          Expand-Archive premake5.zip -DestinationPath premake5
+          echo "${{ github.workspace }}\premake5" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Read version from header
+        id: version
+        shell: pwsh
+        working-directory: ariane
+        run: |
+          $content = Get-Content "tools/euryopa/version.h" -Raw
+          if ($content -match '#define\s+ARIANE_VERSION\s+"([^"]+)"') {
+            $ver = $Matches[1]
+          } else {
+            $ver = "0.0.0"
+          }
+          $branch = "${{ github.ref_name }}"
+          $shortsha = "${{ github.sha }}".Substring(0, 7)
+          echo "version=$ver" >> $env:GITHUB_OUTPUT
+          echo "tag=v${ver}-${branch}-${shortsha}" >> $env:GITHUB_OUTPUT
+          echo "channel=$branch" >> $env:GITHUB_OUTPUT
+
+      - name: Generate librw project files
+        shell: cmd
+        working-directory: librw
+        run: premake5 vs2019
+
+      - name: Build librw
+        shell: cmd
+        working-directory: librw/build
+        run: msbuild librw.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:librw /m
+
+      - name: Patch librw imgui missing d3d9 declarations
+        shell: pwsh
+        run: |
+          $file = "librw/skeleton/imgui/imgui_impl_rw.cpp"
+          $patch = @"
+          #include <rw.h>
+          #ifdef RW_D3D9
+          #include <d3d9.h>
+          namespace rw { namespace d3d { extern IDirect3DDevice9 *d3ddevice; } }
+          #endif
+          "@
+          (Get-Content $file) -replace '#include <rw.h>', $patch | Set-Content $file
+
+      - name: Generate ariane project files
+        shell: cmd
+        working-directory: ariane
+        run: premake5 vs2019 --channel=${{ steps.version.outputs.channel }}
+
+      - name: Build euryopa
+        shell: cmd
+        working-directory: ariane/build
+        run: msbuild librwgta.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:librwgta;euryopa /m
+
+      - name: Upload euryopa.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: ariane-windows-d3d9
+          path: ariane/bin/win-amd64-d3d9/Release/ariane.exe
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: Ariane ${{ steps.version.outputs.version }} (${{ steps.version.outputs.channel }})
+          body: |
+            Ariane ${{ steps.version.outputs.version }} — channel: **${{ steps.version.outputs.channel }}**
+          files: ariane/bin/win-amd64-d3d9/Release/ariane.exe
+          draft: false
+          prerelease: ${{ steps.version.outputs.channel == 'PE' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
