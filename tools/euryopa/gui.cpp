@@ -68,6 +68,7 @@ enum BrowserTabId
 	BROWSER_TAB_FAVOURITES
 };
 static int gBrowserActiveTab = BROWSER_TAB_CATEGORIES;
+static bool gCopyableTextCopiedThisFrame;
 
 struct SavedIplVisibilityState
 {
@@ -1104,7 +1105,7 @@ instanceBelongsToStreamingFamily(ObjectInst *inst, const char *scenePath)
 		return false;
 
 	if(inst->m_imageIndex < 0)
-		return strcmp(inst->m_file->name, scenePath) == 0;
+		return LogicalPathEquals(inst->m_file->name, scenePath);
 
 	if(!buildStreamingFamilyPrefix(scenePath, prefix, sizeof(prefix)))
 		return false;
@@ -1162,7 +1163,7 @@ sceneNeedsSave(const char *scenePath)
 		ObjectInst *inst = (ObjectInst*)p->item;
 		if(inst == nil || inst->m_file == nil || inst->m_imageIndex >= 0)
 			continue;
-		if(strcmp(inst->m_file->name, scenePath) != 0)
+		if(!LogicalPathEquals(inst->m_file->name, scenePath))
 			continue;
 		if(textInstNeedsSave(inst))
 			return true;
@@ -1191,7 +1192,7 @@ saveWouldNeedStreamingBinaryDiskWrite(void)
 
 		bool alreadyChecked = false;
 		for(int i = 0; i < numCheckedScenes; i++)
-			if(strcmp(checkedScenes[i], inst->m_file->name) == 0){
+			if(LogicalPathEquals(checkedScenes[i], inst->m_file->name)){
 				alreadyChecked = true;
 				break;
 			}
@@ -1311,7 +1312,7 @@ buildStreamingBinarySaveSummary(StreamingBinarySaveSummary *summary)
 
 		bool alreadyChecked = false;
 		for(int i = 0; i < numCheckedScenes; i++)
-			if(strcmp(checkedScenes[i], inst->m_file->name) == 0){
+			if(LogicalPathEquals(checkedScenes[i], inst->m_file->name)){
 				alreadyChecked = true;
 				break;
 			}
@@ -1515,7 +1516,7 @@ saveAllIpls(void)
 		// Check if we already saved this file
 		bool found = false;
 		for(int i = 0; i < numChecked; i++)
-			if(strcmp(checked[i], inst->m_file->name) == 0){
+			if(LogicalPathEquals(checked[i], inst->m_file->name)){
 				found = true;
 				break;
 			}
@@ -1595,7 +1596,7 @@ saveAllIpls(void)
 		if(inst->m_imageIndex < 0){
 			bool textWasSaved = false;
 			for(int i = 0; i < numSaved; i++)
-				if(strcmp(saved[i], inst->m_file->name) == 0){
+				if(LogicalPathEquals(saved[i], inst->m_file->name)){
 					textWasSaved = true;
 					break;
 				}
@@ -1781,7 +1782,7 @@ hotReloadIpls(void)
 
 		bool found = false;
 		for(int i = 0; i < numNames; i++){
-			if(strcmp(iplNames[i], inst->m_file->name) == 0){
+			if(LogicalPathEquals(iplNames[i], inst->m_file->name)){
 				found = true;
 				break;
 			}
@@ -1992,6 +1993,32 @@ EndEditorDialog(void)
 	ImGui::End();
 }
 
+static void
+SetEditorClipboardText(const char *text)
+{
+	if(text == nil)
+		text = "";
+	ImGui::SetClipboardText(text);
+#ifdef __APPLE__
+	FILE *pipe = popen("/usr/bin/pbcopy", "w");
+	if(pipe){
+		fwrite(text, 1, strlen(text), pipe);
+		pclose(pipe);
+	}
+#endif
+}
+
+static bool
+IsCopyShortcutPressed(void)
+{
+	bool imguiCopy = ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_C) ||
+		ImGui::IsKeyChordPressed(ImGuiMod_Super | ImGuiKey_C);
+	bool padCommand = CPad::IsCtrlDown() ||
+		CPad::IsKeyDown(KEY_LSUPER) ||
+		CPad::IsKeyDown(KEY_RSUPER);
+	return imguiCopy || (padCommand && CPad::IsKeyJustDown('C'));
+}
+
 template <size_t N>
 static void
 InputTextReadonly(const char *label, const char *value)
@@ -2001,9 +2028,34 @@ InputTextReadonly(const char *label, const char *value)
 		value = "";
 	strncpy(buf, value, N - 1);
 	buf[N - 1] = '\0';
-	ImGui::InputText(label, buf, N,
+
+	const char *labelEnd = strstr(label, "##");
+	if(labelEnd == nil)
+		labelEnd = label + strlen(label);
+
+	ImGui::PushID(label);
+	if(labelEnd > label){
+		ImGui::TextUnformatted(label, labelEnd);
+		ImGui::SameLine(120.0f);
+	}
+	float copyButtonWidth = ImGui::GetFrameHeight();
+	float fieldWidth = ImGui::GetContentRegionAvail().x - copyButtonWidth - ImGui::GetStyle().ItemSpacing.x;
+	if(fieldWidth < 80.0f)
+		fieldWidth = 80.0f;
+	ImGui::SetNextItemWidth(fieldWidth);
+	ImGui::InputText("##value", buf, N,
 		ImGuiInputTextFlags_ReadOnly |
 		ImGuiInputTextFlags_AutoSelectAll);
+	if((ImGui::IsItemActive() || ImGui::IsItemFocused()) &&
+	   IsCopyShortcutPressed()){
+		SetEditorClipboardText(value);
+		gCopyableTextCopiedThisFrame = true;
+	}
+	ImGui::SameLine();
+	if(ImGui::SmallButton(ICON_FA_COPY))
+		SetEditorClipboardText(value);
+	ImGui::PopID();
+	ImGui::SetItemTooltip("Copy");
 }
 
 static const char *CUSTOM_IMPORT_MANIFEST_LOGICAL_PATH = "ariane_custom.txt";
@@ -2884,7 +2936,9 @@ spawnCustomImportedObject(int objectId)
 	int maxIplIndex = -1;
 	for(CPtrNode *p = instances.first; p; p = p->next){
 		ObjectInst *other = (ObjectInst*)p->item;
-		if(other->m_file == file && other->m_imageIndex < 0 && other->m_iplIndex > maxIplIndex)
+		if(other->m_file && file &&
+		   LogicalPathEquals(other->m_file->name, file->name) &&
+		   other->m_imageIndex < 0 && other->m_iplIndex > maxIplIndex)
 			maxIplIndex = other->m_iplIndex;
 	}
 
@@ -5957,9 +6011,11 @@ uiBrowserWindow(void)
 			}
 
 			// Info line
-			ImGui::TextColored(ImVec4(0,1,0,1), "%s (ID: %d)", sel->m_name, sel->m_id);
-			ImGui::SameLine();
-			ImGui::TextDisabled("%.0f", sel->GetLargestDrawDist());
+			ImGui::TextColored(ImVec4(0,1,0,1), "ID: %d", sel->m_id);
+			InputTextReadonly<MODELNAMELEN>("Model##BrowserSelected", sel->m_name);
+			TxdDef *txd = GetTxdDef(sel->m_txdSlot);
+			InputTextReadonly<MODELNAMELEN>("TXD##BrowserSelected", txd ? txd->name : "");
+			ImGui::TextDisabled("Draw distance: %.0f", sel->GetLargestDrawDist());
 			int lodId = GetLodForObject(selId);
 			if(lodId >= 0){
 				ObjectDef *lod = GetObjectDef(lodId);
@@ -6311,6 +6367,7 @@ gui(void)
 		loadSaveSettings();
 		camloaded = true;
 	}
+	gCopyableTextCopiedThisFrame = false;
 
 	Path::guiHoveredNode = nil;
 	uiMainmenu();
@@ -6318,8 +6375,13 @@ gui(void)
 	UpdaterDrawGui();
 	automaticBackupTick();
 
+	bool imguiKeyboardActive = ImGui::GetIO().WantCaptureKeyboard ||
+		ImGui::GetIO().WantTextInput ||
+		ImGui::GetActiveID() != 0;
+	bool allowEditorShortcuts = !imguiKeyboardActive && !gCopyableTextCopiedThisFrame;
+
 	// Ctrl+D duplicate in water mode
-	if(WaterLevel::gWaterEditMode && CPad::IsCtrlDown() && CPad::IsKeyJustDown('D')){
+	if(allowEditorShortcuts && WaterLevel::gWaterEditMode && CPad::IsCtrlDown() && CPad::IsKeyJustDown('D')){
 		int count = WaterLevel::GetNumSelectedPolys();
 		if(count > 0){
 			WaterLevel::DuplicateSelectedWaterPolys();
@@ -6328,7 +6390,7 @@ gui(void)
 	}
 
 	// Copy/Paste (not in water edit mode)
-	if(!WaterLevel::gWaterEditMode){
+	if(allowEditorShortcuts && !WaterLevel::gWaterEditMode){
 		if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('C')){
 			int before = 0;
 			for(CPtrNode *p = selection.first; p; p = p->next) before++;
@@ -6348,7 +6410,7 @@ gui(void)
 		}
 	}
 
-	if(!CPad::IsCtrlDown() && CPad::IsKeyJustDown('C')) gUseViewerCam = !gUseViewerCam;
+	if(allowEditorShortcuts && !CPad::IsCtrlDown() && CPad::IsKeyJustDown('C')) gUseViewerCam = !gUseViewerCam;
 
 	// Prefabs
 	if(CPad::IsCtrlDown() && CPad::IsShiftDown() && CPad::IsKeyJustDown('E')){

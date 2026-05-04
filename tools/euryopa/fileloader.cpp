@@ -27,6 +27,24 @@ NewGameFile(char *path)
 	return f;
 }
 
+bool
+LogicalPathEquals(const char *a, const char *b)
+{
+	if(a == nil || b == nil)
+		return false;
+	while(*a || *b){
+		char ca = *a++;
+		char cb = *b++;
+		if(ca == '\\') ca = '/';
+		if(cb == '\\') cb = '/';
+		if(ca >= 'A' && ca <= 'Z') ca = ca - 'A' + 'a';
+		if(cb >= 'A' && cb <= 'Z') cb = cb - 'A' + 'a';
+		if(ca != cb)
+			return false;
+	}
+	return true;
+}
+
 namespace FileLoader {
 
 GameFile *currentFile;
@@ -984,7 +1002,7 @@ ResolveSceneReadPath(const char *filename, char *realpath, size_t realpathSize)
 		ObjectInst *inst = (ObjectInst*)p->item;
 		if(inst->m_file == nil)
 			continue;
-		if(strcmp(inst->m_file->name, filename) == 0){
+		if(LogicalPathEquals(inst->m_file->name, filename)){
 			srcPath = inst->m_file->sourcePath;
 			break;
 		}
@@ -1312,7 +1330,7 @@ SaveScene(const char *filename)
 	ObjectInst *fileInsts[8096];
 	for(p = instances.first; p; p = p->next){
 		inst = (ObjectInst*)p->item;
-		if(strcmp(inst->m_file->name, filename) == 0)
+		if(LogicalPathEquals(inst->m_file->name, filename))
 			fileInsts[numInsts++] = inst;
 	}
 
@@ -2136,7 +2154,7 @@ InstanceBelongsToStreamingFamilyForBackup(ObjectInst *inst, const char *scenePat
 	if(inst == nil || inst->m_file == nil || scenePath == nil)
 		return false;
 	if(inst->m_imageIndex < 0)
-		return strcmp(inst->m_file->name, scenePath) == 0;
+		return LogicalPathEquals(inst->m_file->name, scenePath);
 	if(!BuildStreamingFamilyPrefixForBackup(scenePath, prefix, sizeof(prefix)))
 		return false;
 	return rw::strncmp_ci(inst->m_file->name, prefix, strlen(prefix)) == 0;
@@ -2162,7 +2180,7 @@ sceneNeedsBackup(const char *scenePath)
 		ObjectInst *inst = (ObjectInst*)p->item;
 		if(inst == nil || inst->m_file == nil || inst->m_imageIndex >= 0)
 			continue;
-		if(strcmp(inst->m_file->name, scenePath) != 0)
+		if(!LogicalPathEquals(inst->m_file->name, scenePath))
 			continue;
 		if(textInstNeedsBackup(inst))
 			return true;
@@ -2365,7 +2383,7 @@ QueueSceneBackupSnapshot(const char *filename, const char *snapshotDir,
 
 	for(p = instances.first; p; p = p->next){
 		inst = (ObjectInst*)p->item;
-		if(inst->m_file && strcmp(inst->m_file->name, filename) == 0)
+		if(inst->m_file && LogicalPathEquals(inst->m_file->name, filename))
 			fileInsts[numInsts++] = inst;
 	}
 

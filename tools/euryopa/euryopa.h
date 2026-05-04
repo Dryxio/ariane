@@ -472,6 +472,7 @@ int GetInstanceDiffFlags(ObjectInst *inst);
 void StampChangeSeq(ObjectInst *inst);
 uint32 BumpChangeSeq(void);
 uint32 GetLatestChangeSeq(void);
+bool LogicalPathEquals(const char *a, const char *b);
 
 // Object Spawner
 extern bool gPlaceMode;

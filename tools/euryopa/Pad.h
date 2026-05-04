@@ -42,6 +42,8 @@ enum Key
 	KEY_RCTRL  = 175,
 	KEY_LALT   = 176,
 	KEY_RALT   = 177,
+	KEY_LSUPER = 178,
+	KEY_RSUPER = 179,
 
 	KEY_NULL,	// unused
 	KEY_NUMKEYS,
