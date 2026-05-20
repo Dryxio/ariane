@@ -127,32 +127,46 @@ static int firstID, lastID;
 void
 LoadObject(char *line)
 {
-	int id;
+	int id = -1;
 	char model[MODELNAMELEN];
 	char txd[MODELNAMELEN];
-	int numAtomics;
-	float dist[3];
-	int flags;
+	int numAtomics = 1;
+	float dist[3] = { 0.0f, 0.0f, 0.0f };
+	int flags = 0;
 	int n;
 
 	// SA format
-	numAtomics = 1;
 	n = sscanf(line, "%d %s %s %f %d", &id, model, txd, dist, &flags);
-	if(gameversion != GAME_SA || n != 5 || dist[0] < 4){
+	if(gameversion == GAME_SA){
+		if(n == 4){
+			// Some mods leave editor notes where the flags field should be.
+			flags = 0;
+		}else if(n != 5){
+			log("warning: invalid SA object definition ignored: %s\n", line);
+			return;
+		}
+	}else{
 		// III and VC format
-		sscanf(line, "%d %s %s %d", &id, model, txd, &numAtomics);
+		n = sscanf(line, "%d %s %s %d", &id, model, txd, &numAtomics);
+		if(n != 4 || numAtomics < 1 || numAtomics > 3){
+			log("warning: invalid object definition ignored: %s\n", line);
+			return;
+		}
 		switch(numAtomics){
 		case 1:
-			sscanf(line, "%d %s %s %d %f %d",
-			       &id, model, txd, &numAtomics, dist, &flags);
+			n = sscanf(line, "%d %s %s %d %f %d",
+			           &id, model, txd, &numAtomics, dist, &flags);
+			if(n != 6) return;
 			break;
 		case 2:
-			sscanf(line, "%d %s %s %d %f %f %d",
-			       &id, model, txd, &numAtomics, dist, dist+1, &flags);
+			n = sscanf(line, "%d %s %s %d %f %f %d",
+			           &id, model, txd, &numAtomics, dist, dist+1, &flags);
+			if(n != 7) return;
 			break;
 		case 3:
-			sscanf(line, "%d %s %s %d %f %f %f %d",
-			       &id, model, txd, &numAtomics, dist, dist+1, dist+2, &flags);
+			n = sscanf(line, "%d %s %s %d %f %f %f %d",
+			           &id, model, txd, &numAtomics, dist, dist+1, dist+2, &flags);
+			if(n != 8) return;
 			break;
 		}
 	}
@@ -400,6 +414,42 @@ LoadTXDParent(char *line)
 static std::vector<ObjectInst*> tmpInsts;
 static int iplInstCounter;  // tracks instance index within current IPL file
 
+static char*
+SkipCommentPrefix(char *line)
+{
+	while(*line == '#')
+		line++;
+	return skipWhite(line);
+}
+
+static bool
+LooksLikeObjectInstanceLine(char *line)
+{
+	using namespace rw;
+
+	FileObjectInstance fi;
+	char model[MODELNAMELEN];
+	float area, sx, sy, sz;
+	if(isSA()){
+		return sscanf(line, "%d %s %d  %f %f %f  %f %f %f %f  %d",
+		              &fi.objectId, model, &fi.area,
+		              &fi.position.x, &fi.position.y, &fi.position.z,
+		              &fi.rotation.x, &fi.rotation.y, &fi.rotation.z, &fi.rotation.w,
+		              &fi.lod) == 11;
+	}
+	if(sscanf(line, "%d %s %f  %f %f %f  %f %f %f  %f %f %f %f",
+	          &fi.objectId, model, &area,
+	          &fi.position.x, &fi.position.y, &fi.position.z,
+	          &sx, &sy, &sz,
+	          &fi.rotation.x, &fi.rotation.y, &fi.rotation.z, &fi.rotation.w) == 13)
+		return true;
+	return sscanf(line, "%d %s  %f %f %f  %f %f %f  %f %f %f %f",
+	              &fi.objectId, model,
+	              &fi.position.x, &fi.position.y, &fi.position.z,
+	              &sx, &sy, &sz,
+	              &fi.rotation.x, &fi.rotation.y, &fi.rotation.z, &fi.rotation.w) == 12;
+}
+
 void
 LoadObjectInstance(char *line)
 {
@@ -407,12 +457,15 @@ LoadObjectInstance(char *line)
 
 	// Deleted instance (commented out) - keep index slot for streaming IPL compatibility
 	if(line[0] == '#'){
-		tmpInsts.push_back(nil);
-		iplInstCounter++;
+		if(LooksLikeObjectInstanceLine(SkipCommentPrefix(line))){
+			tmpInsts.push_back(nil);
+			iplInstCounter++;
+		}
 		return;
 	}
 
-	FileObjectInstance fi;
+	FileObjectInstance fi = {};
+	fi.lod = -1;
 
 	char model[MODELNAMELEN];
 	float areaf;
@@ -420,11 +473,17 @@ LoadObjectInstance(char *line)
 	int n;
 
 	if(isSA()){
-		sscanf(line, "%d %s %d  %f %f %f  %f %f %f %f  %d",
-		       &fi.objectId, model, &fi.area,
-		       &fi.position.x, &fi.position.y, &fi.position.z,
-		       &fi.rotation.x, &fi.rotation.y, &fi.rotation.z, &fi.rotation.w,
-		       &fi.lod);
+		n = sscanf(line, "%d %s %d  %f %f %f  %f %f %f %f  %d",
+		           &fi.objectId, model, &fi.area,
+		           &fi.position.x, &fi.position.y, &fi.position.z,
+		           &fi.rotation.x, &fi.rotation.y, &fi.rotation.z, &fi.rotation.w,
+		           &fi.lod);
+		if(n != 11){
+			log("warning: invalid object instance ignored: %s\n", line);
+			tmpInsts.push_back(nil);
+			iplInstCounter++;
+			return;
+		}
 	}else{
 		n = sscanf(line, "%d %s %f  %f %f %f  %f %f %f  %f %f %f %f",
 		       &fi.objectId, model, &areaf,
@@ -432,11 +491,15 @@ LoadObjectInstance(char *line)
 		       &sx, &sy, &sz,
 		       &fi.rotation.x, &fi.rotation.y, &fi.rotation.z, &fi.rotation.w);
 		if(n != 13){
-			sscanf(line, "%d %s  %f %f %f  %f %f %f  %f %f %f %f",
-			       &fi.objectId, model,
-			       &fi.position.x, &fi.position.y, &fi.position.z,
-			       &sx, &sy, &sz,
-			       &fi.rotation.x, &fi.rotation.y, &fi.rotation.z, &fi.rotation.w);
+			n = sscanf(line, "%d %s  %f %f %f  %f %f %f  %f %f %f %f",
+			           &fi.objectId, model,
+			           &fi.position.x, &fi.position.y, &fi.position.z,
+			           &sx, &sy, &sz,
+			           &fi.rotation.x, &fi.rotation.y, &fi.rotation.z, &fi.rotation.w);
+			if(n != 12){
+				log("warning: invalid object instance ignored: %s\n", line);
+				return;
+			}
 			areaf = 0.0f;
 		}
 		fi.area = areaf;
@@ -680,6 +743,10 @@ SetupBigBuildings(void)
 			lodinst = tmpInsts[inst->m_lodId];
 			if(lodinst == nil){
 				inst->m_lod = nil;	// LOD was deleted
+			}else if(lodinst == inst){
+				log("warning: object instance %d uses itself as LOD in %s\n",
+				    inst->m_iplIndex, currentFile ? currentFile->name : "(unknown)");
+				inst->m_lod = nil;
 			}else{
 				inst->m_lod = lodinst;
 				lodinst->m_numChildren++;

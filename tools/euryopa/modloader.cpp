@@ -209,11 +209,33 @@ FindBestExactLogicalPathCandidate(const char *logicalPath, std::vector<ModFile> 
 	return bestIdx;
 }
 
+static int
+FindBestMainDatCandidate(const char *logicalPath, std::vector<ModFile> &allModFiles)
+{
+	int bestIdx = FindBestExactLogicalPathCandidate(logicalPath, allModFiles);
+	if(bestIdx >= 0)
+		return bestIdx;
+
+	// SA Mod Loader map packs commonly keep their replacement gta.dat under
+	// a top-level Map/ folder instead of mirroring data/gta.dat.
+	if(strcmp(logicalPath, "data/gta.dat") != 0)
+		return -1;
+
+	for(size_t i = 0; i < allModFiles.size(); i++){
+		ModFile &mf = allModFiles[i];
+		if(strcmp(mf.logicalPath, "map/gta.dat") != 0)
+			continue;
+		if(bestIdx < 0 || IsBetterModFileCandidate(mf, allModFiles[bestIdx]))
+			bestIdx = (int)i;
+	}
+	return bestIdx;
+}
+
 static void
 PreScanDatWithOverride(const char *logicalPath, std::vector<ModFile> &allModFiles,
                        std::vector<std::string> &basePaths)
 {
-	int bestIdx = FindBestExactLogicalPathCandidate(logicalPath, allModFiles);
+	int bestIdx = FindBestMainDatCandidate(logicalPath, allModFiles);
 	if(bestIdx >= 0){
 		PreScanDatFile(allModFiles[bestIdx].physicalPath, basePaths);
 		return;
@@ -239,7 +261,7 @@ AddMainDatRedirects(std::vector<ModFile> &allModFiles)
 		if(HasRedirectForLogicalPath(logicalPath))
 			continue;
 
-		int bestIdx = FindBestExactLogicalPathCandidate(logicalPath, allModFiles);
+		int bestIdx = FindBestMainDatCandidate(logicalPath, allModFiles);
 		if(bestIdx < 0)
 			continue;
 
@@ -262,6 +284,21 @@ HasWrappedLogicalSuffix(const char *wrappedPath, const char *stockLogicalPath)
 	return wrappedPath[wrappedLen - stockLen - 1] == '/';
 }
 
+static bool
+HasMapFolderAlias(const char *modLogicalPath, const char *stockLogicalPath)
+{
+	static const char *stockPrefix = "data/maps/";
+	static const char *modPrefix = "map/";
+	size_t stockPrefixLen = strlen(stockPrefix);
+	size_t modPrefixLen = strlen(modPrefix);
+
+	if(strncmp(stockLogicalPath, stockPrefix, stockPrefixLen) != 0)
+		return false;
+	if(strncmp(modLogicalPath, modPrefix, modPrefixLen) != 0)
+		return false;
+	return strcmp(modLogicalPath + modPrefixLen, stockLogicalPath + stockPrefixLen) == 0;
+}
+
 static void
 AddWrappedStockPathRedirects(const std::vector<std::string> &basePaths,
                              std::vector<ModFile> &allModFiles)
@@ -276,7 +313,8 @@ AddWrappedStockPathRedirects(const std::vector<std::string> &basePaths,
 			ModFile &mf = allModFiles[fi];
 			if(!IsRedirectExt(mf.ext))
 				continue;
-			if(!HasWrappedLogicalSuffix(mf.logicalPath, stockLogicalPath))
+			if(!HasWrappedLogicalSuffix(mf.logicalPath, stockLogicalPath) &&
+			   !HasMapFolderAlias(mf.logicalPath, stockLogicalPath))
 				continue;
 			if(bestIdx < 0 || IsBetterModFileCandidate(mf, allModFiles[bestIdx]))
 				bestIdx = (int)fi;
