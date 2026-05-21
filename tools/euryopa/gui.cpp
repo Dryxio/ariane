@@ -59,6 +59,7 @@ static char gBrowserSelectedIde[256];
 static bool gBrowserTabRestorePending;
 static int gDiffFilter;
 static int gRenderMode;
+static const int MAX_INTERIOR_AREA_CODE = 255;
 
 enum BrowserTabId
 {
@@ -515,7 +516,7 @@ normalizePersistentSettings(void)
 	currentHour = ((currentHour % 24) + 24) % 24;
 	currentMinute = ((currentMinute % 60) + 60) % 60;
 	if(params.numAreas > 0)
-		currentArea = clamp(currentArea, 0, params.numAreas-1);
+		currentArea = clamp(currentArea, 0, MAX_INTERIOR_AREA_CODE);
 	else
 		currentArea = 0;
 	if(params.numWeathers > 0){
@@ -3075,6 +3076,7 @@ uiMainmenu(void)
 		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(pad, ImGui::GetStyle().FramePadding.y));
 		ImGui::InputInt("##interior", &currentArea, 0, 0);
 		if(currentArea < 0) currentArea = 0;
+		if(currentArea > MAX_INTERIOR_AREA_CODE) currentArea = MAX_INTERIOR_AREA_CODE;
 		ImGui::PopStyleVar(2);
 		ImGui::PopItemWidth();
 		ImGui::SameLine(0, 2);
@@ -4559,6 +4561,7 @@ uiInstInfo(ObjectInst *inst)
 
 	ImGui::InputInt("Interior", &inst->m_area);
 	if(inst->m_area < 0) inst->m_area = 0;
+	if(inst->m_area > MAX_INTERIOR_AREA_CODE) inst->m_area = MAX_INTERIOR_AREA_CODE;
 
 	if(params.objFlagset == GAME_SA){
 		ImGui::Checkbox("Unimportant", &inst->m_isUnimportant);
