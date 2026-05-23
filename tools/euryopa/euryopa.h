@@ -438,7 +438,8 @@ void Redo(void);
 
 // Copy/Paste
 void CopySelected(void);
-void PasteClipboard(void);
+void CutSelected(void);
+int PasteClipboard(void);
 
 // Prefabs
 int ExportPrefab(const char *path);
