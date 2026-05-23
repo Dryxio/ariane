@@ -23,6 +23,7 @@ static bool showEditorWindow;
 static bool showInstanceWindow;
 static bool showLogWindow;
 static bool showHelpWindow;
+static bool showShortcutsWindow;
 
 static bool showTimeWeatherWindow;
 static bool showViewWindow;
@@ -1383,7 +1384,172 @@ buildStreamingBinarySaveBlockedDetails(const StreamingBinarySaveSummary *summary
 static const char*
 getSaveDestinationLabel(void)
 {
-	return gSaveDestination == SAVE_DESTINATION_MODLOADER ? "modloader/Ariane" : "original files";
+	return gSaveDestination == SAVE_DESTINATION_MODLOADER ? "modloader/Ariane export" : "loaded source files";
+}
+
+static bool
+physicalPathsEqualCiNormalized(const char *a, const char *b)
+{
+	if(a == nil || b == nil)
+		return false;
+	while(*a || *b){
+		char ca = *a++;
+		char cb = *b++;
+		if(ca == '\\') ca = '/';
+		if(cb == '\\') cb = '/';
+		if(ca >= 'A' && ca <= 'Z') ca = ca - 'A' + 'a';
+		if(cb >= 'A' && cb <= 'Z') cb = cb - 'A' + 'a';
+		if(ca != cb)
+			return false;
+	}
+	return true;
+}
+
+struct ModloaderExportShadowSummary
+{
+	int numText;
+	int numBinary;
+	char sampleLogical[256];
+	char sampleCurrent[1024];
+	char sampleExport[1024];
+};
+
+static bool
+imageIndexInList(int32 imageIndex, const int32 *images, int numImages)
+{
+	for(int i = 0; i < numImages; i++)
+		if(images[i] == imageIndex)
+			return true;
+	return false;
+}
+
+static void
+recordModloaderExportShadow(ModloaderExportShadowSummary *summary, const char *logicalPath,
+                            const char *currentPath, const char *exportPath, bool binary)
+{
+	if(summary == nil)
+		return;
+	if(binary)
+		summary->numBinary++;
+	else
+		summary->numText++;
+	if(summary->sampleLogical[0] == '\0'){
+		if(logicalPath){
+			strncpy(summary->sampleLogical, logicalPath, sizeof(summary->sampleLogical)-1);
+			summary->sampleLogical[sizeof(summary->sampleLogical)-1] = '\0';
+		}
+		if(currentPath){
+			strncpy(summary->sampleCurrent, currentPath, sizeof(summary->sampleCurrent)-1);
+			summary->sampleCurrent[sizeof(summary->sampleCurrent)-1] = '\0';
+		}
+		if(exportPath){
+			strncpy(summary->sampleExport, exportPath, sizeof(summary->sampleExport)-1);
+			summary->sampleExport[sizeof(summary->sampleExport)-1] = '\0';
+		}
+	}
+}
+
+static bool
+buildModloaderExportShadowSummary(ModloaderExportShadowSummary *summary)
+{
+	if(summary == nil)
+		return false;
+	memset(summary, 0, sizeof(*summary));
+
+	if(gSaveDestination != SAVE_DESTINATION_MODLOADER || !ModloaderIsActive())
+		return false;
+
+	const char *checkedScenes[512];
+	int numCheckedScenes = 0;
+	int32 checkedImages[512];
+	int numCheckedImages = 0;
+
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst == nil || inst->m_file == nil)
+			continue;
+
+		if(inst->m_imageIndex >= 0){
+			if(!binaryInstNeedsDiskSave(inst))
+				continue;
+			if(imageIndexInList(inst->m_imageIndex, checkedImages, numCheckedImages))
+				continue;
+			if(numCheckedImages < 512)
+				checkedImages[numCheckedImages++] = inst->m_imageIndex;
+
+			char exportPath[1024];
+			char entryFilename[64];
+			if(!BuildModloaderImageEntryExportPath(inst->m_imageIndex, exportPath, sizeof(exportPath)))
+				continue;
+			GameFile *file = GetGameFileFromImage(inst->m_imageIndex);
+			if(file == nil || file->name == nil)
+				continue;
+			if(snprintf(entryFilename, sizeof(entryFilename), "%s.ipl", file->name) >= (int)sizeof(entryFilename))
+				continue;
+			const char *archiveName = GetCdImageLogicalName(inst->m_imageIndex);
+			const char *winningPath = ModloaderFindImageEntryOverride(archiveName, entryFilename);
+			if(winningPath && !physicalPathsEqualCiNormalized(winningPath, exportPath))
+				recordModloaderExportShadow(summary, entryFilename, winningPath, exportPath, true);
+			continue;
+		}
+
+		bool alreadyChecked = false;
+		for(int i = 0; i < numCheckedScenes; i++)
+			if(LogicalPathEquals(checkedScenes[i], inst->m_file->name)){
+				alreadyChecked = true;
+				break;
+			}
+		if(alreadyChecked)
+			continue;
+		if(numCheckedScenes < 512)
+			checkedScenes[numCheckedScenes++] = inst->m_file->name;
+		if(!sceneNeedsSave(inst->m_file->name))
+			continue;
+
+		char exportPath[1024];
+		if(!BuildModloaderLogicalExportPath(inst->m_file->name, exportPath, sizeof(exportPath)))
+			continue;
+		const char *winningPath = ModloaderGetSourcePath(inst->m_file->name);
+		if(winningPath && !physicalPathsEqualCiNormalized(winningPath, exportPath))
+			recordModloaderExportShadow(summary, inst->m_file->name, winningPath, exportPath, false);
+	}
+
+	return summary->numText > 0 || summary->numBinary > 0;
+}
+
+static bool
+warnModloaderExportShadowedBeforeSave(const char *actionName)
+{
+	ModloaderExportShadowSummary summary;
+	if(!buildModloaderExportShadowSummary(&summary))
+		return false;
+
+#ifdef _WIN32
+	char message[2600];
+	snprintf(message, sizeof(message),
+		"%s is set to export copies into modloader/Ariane.\n\n"
+		"The edited map data is currently loaded from another modloader source, so this can create a second IPL with the same logical path.\n\n"
+		"Affected files: %d text + %d streamed IPL override(s).\n\n"
+		"Example logical file:\n%s\n\n"
+		"Game currently uses:\n%s\n\n"
+		"Ariane will export to:\n%s\n\n"
+		"If you want to edit the active mod, switch Save Target to \"Loaded source files\" instead.\n\n"
+		"Continue exporting to modloader/Ariane?",
+		actionName,
+		summary.numText, summary.numBinary,
+		summary.sampleLogical[0] ? summary.sampleLogical : "(unknown)",
+		summary.sampleCurrent[0] ? summary.sampleCurrent : "(unknown)",
+		summary.sampleExport[0] ? summary.sampleExport : "(unknown)");
+	if(MessageBoxA(nil, message, "Ariane", MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2) != IDYES){
+		Toast(TOAST_SAVE, "%s cancelled: switch Save Target to Loaded source files to edit the active mod", actionName);
+		return true;
+	}
+#else
+	Toast(TOAST_SAVE,
+	      "%s warning: modloader/Ariane export can be shadowed by the active mod (%d text + %d streamed)",
+	      actionName, summary.numText, summary.numBinary);
+#endif
+	return false;
 }
 
 static bool
@@ -1494,6 +1660,8 @@ saveAllIpls(void)
 {
 	if(warnStreamingBinarySaveBlockedByRunningGame("Save"))
 		return false;
+	if(warnModloaderExportShadowedBeforeSave("Save"))
+		return false;
 
 	// Collect unique IPL filenames from all instances
 	CPtrNode *p;
@@ -1587,7 +1755,7 @@ saveAllIpls(void)
 		}
 		if(shadowedText || shadowedBinary)
 			Toast(TOAST_SAVE,
-			      "Saved to modloader/Ariane, but %d text + %d streamed override(s) are still shadowed at runtime",
+			      "Exported to modloader/Ariane, but %d text + %d streamed override(s) are still shadowed at runtime",
 			      shadowedText, shadowedBinary);
 	}
 
@@ -2127,8 +2295,10 @@ uiDestroyMapPopup(void)
 
 	ImGui::Separator();
 	ImGui::Text("Current save target: %s", getSaveDestinationLabel());
-	if(gSaveDestination != SAVE_DESTINATION_MODLOADER)
-		ImGui::TextWrapped("Original game files stay untouched until you save. Enable Save to Modloader before saving if you want the empty map as a modloader override.");
+	if(gSaveDestination == SAVE_DESTINATION_MODLOADER)
+		ImGui::TextWrapped("This writes an override copy under modloader/Ariane. If another modloader mod wins the same IPL path, the game can still use that other mod.");
+	else
+		ImGui::TextWrapped("This writes back to the file Ariane loaded. For modloader maps, that can be the active mod's IPL instead of a vanilla file.");
 
 	if(ImGui::Button("Destroy", ImVec2(140, 0))){
 		destroyEntireMap(gDestroyMapIncludeWater && params.water == GAME_SA);
@@ -3010,18 +3180,29 @@ uiMainmenu(void)
 				if(saveAllIpls())
 					Toast(TOAST_SAVE, "Saved all IPL files to %s", getSaveDestinationLabel());
 			}
-			ImGui::SetItemTooltip("Saves all modified objects in their respective placement files (.ipl).");
+			ImGui::SetItemTooltip("Saves all modified objects in their respective placement files (.ipl).\nCurrent target: %s.", getSaveDestinationLabel());
 			if(ImGui::MenuItem(ICON_FA_GAMEPAD " Test in Game", "Ctrl+G")){
 				testInGame();
 			}
 			ImGui::SetItemTooltip("Launches your game and spawns you to the current camera position.\nRequires ariane.asi installed in your game folder.");
-			if(ImGui::MenuItem("Save to Modloader", nil,
-			                   gSaveDestination == SAVE_DESTINATION_MODLOADER)){
-				gSaveDestination = gSaveDestination == SAVE_DESTINATION_MODLOADER ?
-					SAVE_DESTINATION_ORIGINAL_FILES : SAVE_DESTINATION_MODLOADER;
-				saveSaveSettings();
+			char saveTargetMenuLabel[128];
+			snprintf(saveTargetMenuLabel, sizeof(saveTargetMenuLabel), "Save Target: %s", getSaveDestinationLabel());
+			if(ImGui::BeginMenu(saveTargetMenuLabel)){
+				if(ImGui::MenuItem("Loaded source files", nil,
+				                   gSaveDestination == SAVE_DESTINATION_ORIGINAL_FILES)){
+					gSaveDestination = SAVE_DESTINATION_ORIGINAL_FILES;
+					saveSaveSettings();
+				}
+				ImGui::SetItemTooltip("Write back to the files Ariane loaded.\nFor modloader maps, this usually edits the active mod's IPL.");
+				if(ImGui::MenuItem("Export copy to modloader/Ariane", nil,
+				                   gSaveDestination == SAVE_DESTINATION_MODLOADER)){
+					gSaveDestination = SAVE_DESTINATION_MODLOADER;
+					saveSaveSettings();
+				}
+				ImGui::SetItemTooltip("Write copies to modloader/Ariane/.\nThis does not necessarily edit the modloader mod currently used by the game.");
+				ImGui::EndMenu();
 			}
-			ImGui::SetItemTooltip("When enabled, saves go to modloader/Ariane/ instead of\noverwriting original game files.");
+			ImGui::SetItemTooltip("Choose whether Save writes back to loaded files or exports an override copy to modloader/Ariane.");
 			if(ImGui::MenuItem(ICON_FA_BOLT " Hot Reload", "Ctrl+R")){
 				hotReloadIpls();
 			}
@@ -3043,19 +3224,20 @@ uiMainmenu(void)
 			if(ImGui::MenuItem(ICON_FA_RIGHT_FROM_BRACKET " Exit", "Alt+F4")) sk::globals.quit = 1;
 			ImGui::EndMenu();
 		}
-		if(ImGui::BeginMenu(ICON_FA_WINDOW_MAXIMIZE " Window")){
-			if(ImGui::MenuItem(ICON_FA_CLOUD_SUN " Time & Weather", "T", showTimeWeatherWindow)) { showTimeWeatherWindow ^= 1; }
-			if(ImGui::MenuItem(ICON_FA_EYE " View", "V", showViewWindow)) { showViewWindow ^= 1; }
-			if(ImGui::MenuItem(ICON_FA_PAINTBRUSH " Rendering", "R", showRenderingWindow)) { showRenderingWindow ^= 1; }
+			if(ImGui::BeginMenu(ICON_FA_WINDOW_MAXIMIZE " Window")){
+				if(ImGui::MenuItem(ICON_FA_CLOUD_SUN " Time & Weather", "T", showTimeWeatherWindow)) { showTimeWeatherWindow ^= 1; }
+				if(ImGui::MenuItem(ICON_FA_EYE " View", "V", showViewWindow)) { showViewWindow ^= 1; }
+				if(ImGui::MenuItem(ICON_FA_PAINTBRUSH " Rendering", "R", showRenderingWindow)) { showRenderingWindow ^= 1; }
 			if(ImGui::MenuItem(ICON_FA_WRENCH " Tools", "X", showToolsWindow)) { showToolsWindow ^= 1; }
 			if(ImGui::MenuItem(ICON_FA_CIRCLE_INFO " Object Info", "I", showInstanceWindow)) { showInstanceWindow ^= 1; }
 			if(ImGui::MenuItem(ICON_FA_PEN " Editor", "E", showEditorWindow)) { showEditorWindow ^= 1; }
 			if(ImGui::MenuItem(ICON_FA_MAGNIFYING_GLASS " Object Browser", "B", showBrowserWindow)) { showBrowserWindow ^= 1; }
-			if(ImGui::MenuItem(ICON_FA_CODE_COMPARE " Changes", "F", showDiffWindow)) { showDiffWindow ^= 1; }
-			if(ImGui::MenuItem(ICON_FA_LIST " Log ", nil, showLogWindow)) { showLogWindow ^= 1; }
-			if(ImGui::MenuItem("Demo ", nil, showDemoWindow)) { showDemoWindow ^= 1; }
-			if(ImGui::MenuItem(ICON_FA_CIRCLE_QUESTION " Help", nil, showHelpWindow)) { showHelpWindow ^= 1; }
-			ImGui::Separator();
+				if(ImGui::MenuItem(ICON_FA_CODE_COMPARE " Changes", "F", showDiffWindow)) { showDiffWindow ^= 1; }
+				if(ImGui::MenuItem(ICON_FA_LIST " Log ", nil, showLogWindow)) { showLogWindow ^= 1; }
+				if(ImGui::MenuItem("Demo ", nil, showDemoWindow)) { showDemoWindow ^= 1; }
+				if(ImGui::MenuItem(ICON_FA_LIST " Keyboard Shortcuts", nil, showShortcutsWindow)) { showShortcutsWindow ^= 1; }
+				if(ImGui::MenuItem(ICON_FA_CIRCLE_QUESTION " Help", nil, showHelpWindow)) { showHelpWindow ^= 1; }
+				ImGui::Separator();
 			if(ImGui::BeginMenu(ICON_FA_BELL " Notifications")){
 				uiNotificationSettings();
 				ImGui::EndMenu();
@@ -3711,6 +3893,148 @@ uiCustomImportPopup(void)
 }
 
 static void
+uiKeyboardShortcutsWindow(void)
+{
+	struct ShortcutEntry {
+		const char *section;
+		const char *shortcut;
+		const char *action;
+		const char *context;
+	};
+
+	static const ShortcutEntry shortcuts[] = {
+		{ "File", "Ctrl+S", "Save all modified IPL files", "Global" },
+		{ "File", "Ctrl+G", "Test in game at current camera position", "Global" },
+		{ "File", "Ctrl+R", "Hot reload streaming IPLs in running game", "Global" },
+		{ "File", "Ctrl+Shift+E", "Export selected objects as prefab", "Global" },
+		{ "File", "Ctrl+Shift+I", "Import prefab", "Global" },
+		{ "File", "Alt+F4", "Exit Ariane", "Menu" },
+
+		{ "Windows", "T", "Toggle Time & Weather window", "Global" },
+		{ "Windows", "V", "Toggle View window", "Global" },
+		{ "Windows", "R", "Toggle Rendering window", "Global" },
+		{ "Windows", "X", "Toggle Tools window", "Global" },
+		{ "Windows", "I", "Toggle Object Info window", "Global" },
+		{ "Windows", "E", "Toggle Editor window", "Global" },
+		{ "Windows", "B", "Toggle Object Browser window", "Global" },
+		{ "Windows", "F", "Toggle Changes window", "Global" },
+
+		{ "Camera", "LMB drag", "First-person look around", "Viewport" },
+		{ "Camera", "Ctrl+Alt+LMB drag", "Dolly camera along view direction", "Viewport" },
+		{ "Camera", "MMB drag", "Pan camera", "Viewport" },
+		{ "Camera", "Alt+MMB drag", "Arc rotate around camera target", "Viewport" },
+		{ "Camera", "Ctrl+Alt+MMB drag", "Zoom camera toward target", "Viewport" },
+		{ "Camera", "Mouse wheel", "Adjust FOV zoom", "Viewport" },
+		{ "Camera", "W / S", "Move forward / backward", "Viewport" },
+		{ "Camera", "A / D", "Move left / right", "Viewport" },
+		{ "Camera", "Shift+WASD", "Fast camera movement", "Viewport" },
+		{ "Camera", "Alt+WASD", "Slow camera movement", "Viewport" },
+		{ "Camera", "C", "Toggle viewer camera with longer far clip", "Global" },
+
+		{ "Selection", "Click object", "Select object", "Viewport" },
+		{ "Selection", "Shift+click object", "Add object to selection", "Viewport" },
+		{ "Selection", "Alt+click object", "Remove object from selection", "Viewport" },
+		{ "Selection", "Ctrl+click object", "Toggle object selection", "Viewport" },
+		{ "Selection", "Shift+LMB drag", "Rectangle select", "Viewport" },
+		{ "Selection", "Ctrl+Shift+LMB drag", "Rectangle add to selection", "Viewport" },
+		{ "Selection", "Alt+Shift+LMB drag", "Rectangle remove from selection", "Viewport" },
+		{ "Selection", "RMB on selection", "Deselect selected object", "Editor list" },
+		{ "Selection", "RMB on deleted object", "Undelete object", "Editor list" },
+		{ "Selection", "Delete / Backspace", "Delete selected buildings or water selection", "Global" },
+		{ "Selection", "G", "Snap selected buildings to ground", "Global" },
+		{ "Selection", "Shift+G", "Align selected buildings to ground normal", "Global" },
+
+		{ "Gizmo", "W", "Translate gizmo mode", "Object/path selection" },
+		{ "Gizmo", "Q", "Rotate gizmo mode", "Object selection" },
+		{ "Gizmo", "Shift while dragging", "Use selected snap increment", "Gizmo" },
+
+		{ "Clipboard", "Ctrl+C", "Copy selected buildings", "Global" },
+		{ "Clipboard", "Ctrl+X", "Cut selected buildings", "Global" },
+		{ "Clipboard", "Ctrl+V", "Paste copy at camera target, restore cut at original position", "Global" },
+		{ "Clipboard", "Ctrl+Z", "Undo", "Global" },
+		{ "Clipboard", "Ctrl+Y", "Redo", "Global" },
+
+		{ "Object Browser", "B", "Open or close Object Browser", "Global" },
+		{ "Object Browser", "Up / Down", "Move selected object through current filtered list", "Object Browser list" },
+		{ "Object Browser", "Right-click object row", "Add or remove favourite", "Object Browser list" },
+		{ "Object Browser", "Click in 3D view", "Place selected object", "Place mode" },
+		{ "Object Browser", "Shift+click in 3D view", "Place object and stay in place mode", "Place mode" },
+		{ "Object Browser", "RMB / Esc", "Exit place mode", "Place mode" },
+
+		{ "Brush", "LMB", "Paint selected object on surface", "Brush mode" },
+		{ "Brush", "LMB drag", "Paint continuously using spacing/delay settings", "Brush mode" },
+		{ "Brush", "RMB drag", "Look around while brushing", "Brush mode" },
+		{ "Brush", "MMB drag", "Pan or orbit camera while brushing", "Brush mode" },
+		{ "Brush", "MMB click / Esc", "Exit brush mode", "Brush mode" },
+
+		{ "Water", "H", "Enter or exit water edit mode", "SA water" },
+		{ "Water", "Tab", "Switch polygon / vertex water sub-mode", "Water edit mode" },
+		{ "Water", "N", "Start creating a new water polygon", "Water edit mode" },
+		{ "Water", "Click water", "Select polygon or vertex", "Water edit mode" },
+		{ "Water", "Shift+click water", "Add polygon or vertex to selection", "Water edit mode" },
+		{ "Water", "Alt+click water", "Remove polygon or vertex from selection", "Water edit mode" },
+		{ "Water", "Ctrl+click water", "Toggle polygon or vertex selection", "Water edit mode" },
+		{ "Water", "Shift+click while creating", "Keep creating after placing water polygon", "Water create mode" },
+		{ "Water", "Ctrl+D", "Duplicate selected water polygons", "Water edit mode" },
+		{ "Water", "RMB / Esc", "Cancel water creation or exit water edit mode", "Water edit mode" },
+	};
+
+	ImGui::SetNextWindowSize(ImVec2(780, 620), ImGuiCond_FirstUseEver);
+	ImGui::Begin(ICON_FA_LIST " Keyboard Shortcuts", &showShortcutsWindow);
+
+	static ImGuiTextFilter filter;
+	filter.Draw("Filter", 280.0f);
+	ImGui::SameLine();
+	if(ImGui::Button("Clear"))
+		filter.Clear();
+	ImGui::Separator();
+
+	int shown = 0;
+	const char *lastSection = nil;
+	ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+		ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY;
+	if(ImGui::BeginTable("##Shortcuts", 4, flags, ImVec2(0, 0))){
+		ImGui::TableSetupColumn("Section", ImGuiTableColumnFlags_WidthFixed, 120.0f);
+		ImGui::TableSetupColumn("Shortcut", ImGuiTableColumnFlags_WidthFixed, 180.0f);
+		ImGui::TableSetupColumn("Action");
+		ImGui::TableSetupColumn("Context", ImGuiTableColumnFlags_WidthFixed, 160.0f);
+		ImGui::TableHeadersRow();
+
+		for(int i = 0; i < (int)(sizeof(shortcuts) / sizeof(shortcuts[0])); i++){
+			const ShortcutEntry &s = shortcuts[i];
+			char searchable[512];
+			snprintf(searchable, sizeof(searchable), "%s %s %s %s",
+				s.section, s.shortcut, s.action, s.context);
+			if(filter.IsActive() && !filter.PassFilter(searchable))
+				continue;
+
+			if(lastSection == nil || strcmp(lastSection, s.section) != 0){
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextColored(ImVec4(0.85f, 0.90f, 1.0f, 1.0f), "%s", s.section);
+				lastSection = s.section;
+			}
+
+			ImGui::TableNextRow();
+			ImGui::TableSetColumnIndex(1);
+			ImGui::TextUnformatted(s.shortcut);
+			ImGui::TableSetColumnIndex(2);
+			ImGui::TextUnformatted(s.action);
+			ImGui::TableSetColumnIndex(3);
+			ImGui::TextDisabled("%s", s.context);
+			shown++;
+		}
+
+		ImGui::EndTable();
+	}
+
+	if(shown == 0)
+		ImGui::TextDisabled("No shortcuts match the current filter.");
+
+	ImGui::End();
+}
+
+static void
 uiHelpWindow(void)
 {
 	ImGui::Begin(ICON_FA_CIRCLE_QUESTION " Help", &showHelpWindow);
@@ -3744,13 +4068,15 @@ uiHelpWindow(void)
 	ImGui::BulletText("Delete/Backspace: delete selected building(s)\n"
 		"Deleting also removes linked LOD instances.");
 	ImGui::BulletText("Ctrl+C: Copy selected building(s)\n"
-		"Ctrl+V: Paste (offset +10 on X), with LOD linking");
+		"Ctrl+X: Cut selected building(s)\n"
+		"Ctrl+V: Paste copy at camera target, restore cut at original position");
 	ImGui::BulletText("G: snap selection to ground\n"
 		"Shift+G: align selection to ground normal and preserve facing.");
 	ImGui::BulletText("Ctrl+S: Save all modified IPL files\n"
 		"Deleted instances are commented out with #.");
 	ImGui::BulletText("B: Toggle Object Browser\n"
 		"Click in 3D view to place selected object.\n"
+		"Up/Down in the browser list changes selected object.\n"
 		"RMB or Escape to exit place mode.");
 	ImGui::Separator();
 	if(ImGui::CollapsingHeader("Privacy & Telemetry")){
@@ -4718,10 +5044,12 @@ loadSaveSettings(void)
 			if(parseBoolSetting(value, &boolValue)) showInstanceWindow = boolValue;
 		}else if(strcmp(key, "show_log_window") == 0){
 			if(parseBoolSetting(value, &boolValue)) showLogWindow = boolValue;
-		}else if(strcmp(key, "show_help_window") == 0){
-			if(parseBoolSetting(value, &boolValue)) showHelpWindow = boolValue;
-		}else if(strcmp(key, "show_time_weather_window") == 0){
-			if(parseBoolSetting(value, &boolValue)) showTimeWeatherWindow = boolValue;
+			}else if(strcmp(key, "show_help_window") == 0){
+				if(parseBoolSetting(value, &boolValue)) showHelpWindow = boolValue;
+			}else if(strcmp(key, "show_shortcuts_window") == 0){
+				if(parseBoolSetting(value, &boolValue)) showShortcutsWindow = boolValue;
+			}else if(strcmp(key, "show_time_weather_window") == 0){
+				if(parseBoolSetting(value, &boolValue)) showTimeWeatherWindow = boolValue;
 		}else if(strcmp(key, "show_view_window") == 0){
 			if(parseBoolSetting(value, &boolValue)) showViewWindow = boolValue;
 		}else if(strcmp(key, "show_rendering_window") == 0){
@@ -5031,6 +5359,7 @@ saveSaveSettings(void)
 	fprintf(f, "show_instance_window %d\n", showInstanceWindow ? 1 : 0);
 	fprintf(f, "show_log_window %d\n", showLogWindow ? 1 : 0);
 	fprintf(f, "show_help_window %d\n", showHelpWindow ? 1 : 0);
+	fprintf(f, "show_shortcuts_window %d\n", showShortcutsWindow ? 1 : 0);
 	fprintf(f, "show_time_weather_window %d\n", showTimeWeatherWindow ? 1 : 0);
 	fprintf(f, "show_view_window %d\n", showViewWindow ? 1 : 0);
 	fprintf(f, "show_rendering_window %d\n", showRenderingWindow ? 1 : 0);
@@ -5954,11 +6283,51 @@ selectBrowserObject(int i)
 	if(lodId >= 0) RequestObject(lodId);
 }
 
+static int
+findObjectInFilteredList(int *filtered, int numFiltered, int objectId)
+{
+	for(int row = 0; row < numFiltered; row++)
+		if(filtered[row] == objectId)
+			return row;
+	return -1;
+}
+
 // Shared object list renderer with clipper
 static void
 uiObjectList(int *filtered, int numFiltered, int selId)
 {
 	ImGui::BeginChild("##ObjList", ImVec2(0, 0), true);
+
+	int scrollToRow = -1;
+	bool listFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+	bool textInputActive = ImGui::GetIO().WantTextInput;
+	if(listFocused && !textInputActive && numFiltered > 0){
+		int selectedRow = findObjectInFilteredList(filtered, numFiltered, selId);
+		if(ImGui::IsKeyPressed(ImGuiKey_DownArrow, true)){
+			int nextRow = selectedRow < 0 ? 0 : min(selectedRow + 1, numFiltered - 1);
+			selectBrowserObject(filtered[nextRow]);
+			selId = filtered[nextRow];
+			scrollToRow = nextRow;
+		}else if(ImGui::IsKeyPressed(ImGuiKey_UpArrow, true)){
+			int nextRow = selectedRow < 0 ? numFiltered - 1 : max(selectedRow - 1, 0);
+			selectBrowserObject(filtered[nextRow]);
+			selId = filtered[nextRow];
+			scrollToRow = nextRow;
+		}
+	}
+
+	if(scrollToRow >= 0){
+		float itemHeight = ImGui::GetTextLineHeightWithSpacing();
+		float targetMin = scrollToRow * itemHeight;
+		float targetMax = targetMin + itemHeight;
+		float scrollY = ImGui::GetScrollY();
+		float visibleMax = scrollY + ImGui::GetWindowHeight();
+		if(targetMin < scrollY)
+			ImGui::SetScrollY(targetMin);
+		else if(targetMax > visibleMax)
+			ImGui::SetScrollY(targetMax - ImGui::GetWindowHeight());
+	}
+
 	ImGuiListClipper clipper;
 	clipper.Begin(numFiltered);
 	static char buf[256];
@@ -6401,13 +6770,15 @@ gui(void)
 			if(before > 0)
 				Toast(TOAST_COPY_PASTE, "Copied %d instance(s)", before);
 		}
-		if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('V')){
+		if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('X')){
 			int before = 0;
-			for(CPtrNode *p = instances.first; p; p = p->next) before++;
-			PasteClipboard();
-			int after = 0;
-			for(CPtrNode *p = instances.first; p; p = p->next) after++;
-			int pasted = after - before;
+			for(CPtrNode *p = selection.first; p; p = p->next) before++;
+			CutSelected();
+			if(before > 0)
+				Toast(TOAST_COPY_PASTE, "Cut %d instance(s)", before);
+		}
+		if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('V')){
+			int pasted = PasteClipboard();
 			if(pasted > 0)
 				Toast(TOAST_COPY_PASTE, "Pasted %d instance(s)", pasted);
 		}
@@ -6520,7 +6891,7 @@ gui(void)
 		ImGui::End();
 	}
 
-	if(CPad::IsKeyJustDown('X')) showToolsWindow ^= 1;
+	if(!CPad::IsCtrlDown() && CPad::IsKeyJustDown('X')) showToolsWindow ^= 1;
 	if(showToolsWindow) uiToolsWindow();
 
 	{
@@ -6604,8 +6975,9 @@ gui(void)
 	if(WaterLevel::gWaterEditMode)
 		uiWaterWindow();
 
-	if(showHelpWindow) uiHelpWindow();
-	if(showDemoWindow){
+		if(showHelpWindow) uiHelpWindow();
+		if(showShortcutsWindow) uiKeyboardShortcutsWindow();
+		if(showDemoWindow){
 		ImGui::SetNextWindowPos(ImVec2(650, 20), ImGuiCond_FirstUseEver);
 		ImGui::ShowDemoWindow(&showDemoWindow);
 	}

@@ -1641,6 +1641,7 @@ RenderPreviewObject(int objectId)
 #define MAX_CLIPBOARD MAX_BATCH_OBJECTS
 static ObjectInst *clipboard[MAX_CLIPBOARD];
 static int clipboardCount;
+static bool clipboardIsCut;
 
 // Undo/Redo system
 #define MAX_UNDO 128
@@ -1877,6 +1878,7 @@ void
 CopySelected(void)
 {
 	clipboardCount = 0;
+	clipboardIsCut = false;
 	CPtrNode *p;
 	for(p = selection.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
@@ -1887,11 +1889,31 @@ CopySelected(void)
 		log("Copied %d instance(s)\n", clipboardCount);
 }
 
+void
+CutSelected(void)
+{
+	clipboardCount = 0;
+	clipboardIsCut = false;
+	CPtrNode *p;
+	for(p = selection.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(!inst->m_isDeleted && clipboardCount < MAX_CLIPBOARD)
+			clipboard[clipboardCount++] = inst;
+	}
+	if(clipboardCount == 0)
+		return;
+
+	clipboardIsCut = true;
+	DeleteSelected();
+	log("Cut %d instance(s)\n", clipboardCount);
+}
+
 static ObjectInst*
-cloneInstance(ObjectInst *src, GameFile *dstFile, int iplIndex, rw::V3d offset)
+cloneInstanceWithObjectId(ObjectInst *src, GameFile *dstFile, int iplIndex, rw::V3d offset,
+	int objectId, bool preserveBigBuildingState)
 {
 	ObjectInst *inst = AddInstance();
-	inst->m_objectId = src->m_objectId;
+	inst->m_objectId = objectId;
 	inst->m_area = src->m_area;
 	inst->m_rotation = src->m_rotation;
 	inst->m_translation.x = src->m_translation.x + offset.x;
@@ -1901,7 +1923,7 @@ cloneInstance(ObjectInst *src, GameFile *dstFile, int iplIndex, rw::V3d offset)
 	inst->m_isUnderWater = src->m_isUnderWater;
 	inst->m_isTunnel = src->m_isTunnel;
 	inst->m_isTunnelTransition = src->m_isTunnelTransition;
-	inst->m_isBigBuilding = src->m_isBigBuilding;
+	inst->m_isBigBuilding = preserveBigBuildingState ? src->m_isBigBuilding : false;
 	inst->m_lodId = -1;
 	inst->m_lod = nil;
 	inst->m_numChildren = 0;
@@ -1916,10 +1938,23 @@ cloneInstance(ObjectInst *src, GameFile *dstFile, int iplIndex, rw::V3d offset)
 	inst->m_wasSavedDeleted = false;
 	inst->m_gameEntityExists = false;
 	StampChangeSeq(inst);
+	ObjectDef *obj = GetObjectDef(objectId);
+	if(!preserveBigBuildingState && obj && obj->m_isBigBuilding)
+		inst->SetupBigBuilding();
 	inst->UpdateMatrix();
+	if(obj && !obj->IsLoaded()){
+		RequestObject(objectId);
+		LoadAllRequestedObjects();
+	}
 	inst->CreateRwObject();
 	InsertInstIntoSectors(inst);
 	return inst;
+}
+
+static ObjectInst*
+cloneInstance(ObjectInst *src, GameFile *dstFile, int iplIndex, rw::V3d offset)
+{
+	return cloneInstanceWithObjectId(src, dstFile, iplIndex, offset, src->m_objectId, true);
 }
 
 static GameFile*
@@ -1928,38 +1963,169 @@ findPasteDestinationFile(ObjectInst *src)
 	if(src == nil)
 		return nil;
 
-	if(src->m_imageIndex < 0)
-		return src->m_file;
-
-	// Prefer the linked text LOD file when it exists.
-	if(src->m_lod && src->m_lod->m_imageIndex < 0 && src->m_lod->m_file)
-		return src->m_lod->m_file;
-
-	// Streaming instances loaded alongside a text IPL share the same
-	// visibility/filter key. Reuse that scene so pasted copies land in a
-	// writable text IPL instead of an IMG entry name like foo_stream0.
-	if(src->m_iplFilterKey[0] != '\0'){
-		for(CPtrNode *p = instances.first; p; p = p->next){
-			ObjectInst *other = (ObjectInst*)p->item;
-			if(other == nil || other->m_imageIndex >= 0 || other->m_file == nil)
-				continue;
-			if(strcmp(other->m_iplFilterKey, src->m_iplFilterKey) == 0)
-				return other->m_file;
-		}
-	}
-
-	// Some streamed models have no loaded text anchor at all.
-	// Put pasted copies into the custom placement IPL instead of writing a
-	// bogus text file with the binary scene name.
+	// A paste creates a new placement. Keep it out of the source map IPL so
+	// copying one original-map object does not force a full replacement export
+	// of that area's IPL.
 	return GetOrCreateCustomIplFile();
 }
 
-void
+static bool
+sameIplFamily(ObjectInst *a, ObjectInst *b)
+{
+	if(a == nil || b == nil)
+		return false;
+	if(a->m_iplFilterKey[0] != '\0' && b->m_iplFilterKey[0] != '\0' &&
+	   strcmp(a->m_iplFilterKey, b->m_iplFilterKey) == 0)
+		return true;
+	if(a->m_file && b->m_file && LogicalPathEquals(a->m_file->name, b->m_file->name))
+		return true;
+	return false;
+}
+
+static float
+instanceDistanceSq(ObjectInst *a, ObjectInst *b)
+{
+	rw::V3d d = sub(a->m_translation, b->m_translation);
+	return dot(d, d);
+}
+
+static int
+getAssociatedLodObjectId(ObjectInst *src)
+{
+	if(src == nil || !isSA())
+		return -1;
+	int lodObjId = GetLodForObject(src->m_objectId);
+	if(lodObjId < 0 || lodObjId == src->m_objectId || GetObjectDef(lodObjId) == nil)
+		return -1;
+	return lodObjId;
+}
+
+static ObjectInst*
+findNearbyAssociatedLod(ObjectInst *src, int lodObjId)
+{
+	if(src == nil || lodObjId < 0)
+		return nil;
+
+	ObjectInst *bestSameFamily = nil;
+	ObjectInst *bestAnyFamily = nil;
+	float bestSameFamilyDistSq = 1.0e30f;
+	float bestAnyFamilyDistSq = 1.0e30f;
+
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *other = (ObjectInst*)p->item;
+		if(other == nil || other == src || other->m_isDeleted)
+			continue;
+		if(other->m_objectId != lodObjId)
+			continue;
+
+		float distSq = instanceDistanceSq(src, other);
+		if(sameIplFamily(src, other) && distSq < bestSameFamilyDistSq){
+			bestSameFamily = other;
+			bestSameFamilyDistSq = distSq;
+		}
+		if(distSq < bestAnyFamilyDistSq){
+			bestAnyFamily = other;
+			bestAnyFamilyDistSq = distSq;
+		}
+	}
+
+	// LOD pairs normally sit at the same placement. Keep the fallback close
+	// enough to avoid borrowing a repeated LOD model from another zone.
+	if(bestSameFamily && bestSameFamilyDistSq <= sq(250.0f))
+		return bestSameFamily;
+	if(bestAnyFamily && bestAnyFamilyDistSq <= sq(25.0f))
+		return bestAnyFamily;
+	return nil;
+}
+
+static ObjectInst*
+findPasteSourceLod(ObjectInst *src, int *lodObjIdOut, bool *usedAssociationOut)
+{
+	if(lodObjIdOut)
+		*lodObjIdOut = -1;
+	if(usedAssociationOut)
+		*usedAssociationOut = false;
+	if(src == nil || !isSA())
+		return nil;
+	if(src->m_lod && !src->m_lod->m_isDeleted)
+		return src->m_lod;
+
+	int lodObjId = getAssociatedLodObjectId(src);
+	if(lodObjIdOut)
+		*lodObjIdOut = lodObjId;
+	if(lodObjId < 0)
+		return nil;
+
+	ObjectInst *lod = findNearbyAssociatedLod(src, lodObjId);
+	if(lod && usedAssociationOut)
+		*usedAssociationOut = true;
+	return lod;
+}
+
+static rw::V3d
+getClipboardPasteOffset(ObjectInst **toPaste, int numToPaste)
+{
+	rw::V3d anchor = { 0.0f, 0.0f, 0.0f };
+	int numAnchors = 0;
+
+	for(int i = 0; i < numToPaste; i++){
+		ObjectInst *inst = toPaste[i];
+		if(inst == nil || inst->m_isDeleted)
+			continue;
+		anchor.x += inst->m_translation.x;
+		anchor.y += inst->m_translation.y;
+		anchor.z += inst->m_translation.z;
+		numAnchors++;
+	}
+
+	if(numAnchors == 0)
+		return { 10.0f, 0.0f, 0.0f };
+
+	float invCount = 1.0f / (float)numAnchors;
+	anchor.x *= invCount;
+	anchor.y *= invCount;
+	anchor.z *= invCount;
+
+	rw::V3d pastePos = TheCamera.m_target;
+	rw::V3d groundHit;
+	if(gPlaceSnapToGround && GetGroundPlacementSurface(pastePos, &groundHit, nil, true))
+		pastePos = groundHit;
+
+	return sub(pastePos, anchor);
+}
+
+static int
+PasteCutClipboard(void)
+{
+	ObjectInst *restored[MAX_CLIPBOARD];
+	int numRestored = 0;
+
+	ClearSelection();
+	for(int i = 0; i < clipboardCount; i++){
+		ObjectInst *inst = clipboard[i];
+		if(inst == nil)
+			continue;
+		if(inst->m_isDeleted)
+			inst->Undelete();
+		inst->Select();
+		if(numRestored < MAX_CLIPBOARD)
+			restored[numRestored++] = inst;
+	}
+
+	if(numRestored > 0){
+		UndoRecordPaste(restored, numRestored);
+		log("Restored %d cut instance(s)\n", numRestored);
+	}
+	clipboardIsCut = false;
+	return numRestored;
+}
+
+int
 PasteClipboard(void)
 {
-	if(clipboardCount == 0) return;
-
-	rw::V3d offset = { 10.0f, 0.0f, 0.0f };
+	if(clipboardCount == 0) return 0;
+	if(clipboardIsCut)
+		return PasteCutClipboard();
 
 	ObjectInst *pasted[MAX_CLIPBOARD * 2];
 	int numPasted = 0;
@@ -1972,7 +2138,10 @@ PasteClipboard(void)
 	for(int i = 0; i < clipboardCount; i++){
 		bool isLodOfAnother = false;
 		for(int j = 0; j < clipboardCount; j++){
-			if(i != j && clipboard[j]->m_lod == clipboard[i]){
+			if(i == j)
+				continue;
+			ObjectInst *lod = findPasteSourceLod(clipboard[j], nil, nil);
+			if(lod == clipboard[i]){
 				isLodOfAnother = true;
 				break;
 			}
@@ -1981,11 +2150,18 @@ PasteClipboard(void)
 			toPaste[numToPaste++] = clipboard[i];
 	}
 
+	rw::V3d offset = getClipboardPasteOffset(toPaste, numToPaste);
+
 	ClearSelection();
+
+	int recoveredLods = 0;
+	int generatedLods = 0;
 
 	for(int i = 0; i < numToPaste; i++){
 		ObjectInst *src = toPaste[i];
-		ObjectInst *srcLod = src->m_lod;
+		int associatedLodObjId = -1;
+		bool usedAssociatedSource = false;
+		ObjectInst *srcLod = findPasteSourceLod(src, &associatedLodObjId, &usedAssociatedSource);
 
 		GameFile *dstFile = findPasteDestinationFile(src);
 
@@ -2005,6 +2181,13 @@ PasteClipboard(void)
 		if(isSA() && srcLod && !srcLod->m_isDeleted){
 			newLod = cloneInstance(srcLod, dstFile, ++maxIplIndex, offset);
 			pasted[numPasted++] = newLod;
+			if(usedAssociatedSource)
+				recoveredLods++;
+		}else if(isSA() && associatedLodObjId >= 0){
+			newLod = cloneInstanceWithObjectId(src, dstFile, ++maxIplIndex, offset,
+				associatedLodObjId, false);
+			pasted[numPasted++] = newLod;
+			generatedLods++;
 		}
 
 		// Paste HD
@@ -2021,7 +2204,12 @@ PasteClipboard(void)
 	if(numPasted > 0){
 		UndoRecordPaste(pasted, numPasted);
 		log("Pasted %d instance(s)\n", numPasted);
+		if(recoveredLods > 0)
+			log("Recovered %d LOD link(s) from nearby associated instances\n", recoveredLods);
+			if(generatedLods > 0)
+				log("Generated %d associated LOD instance(s) during paste\n", generatedLods);
 	}
+	return numPasted;
 }
 
 int
