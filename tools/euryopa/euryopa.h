@@ -503,6 +503,10 @@ void ToggleFavourite(int id);
 void InitPreviewRenderer(void);
 void ShutdownPreviewRenderer(void);
 void RenderPreviewObject(int objectId);
+void RenderRequestedObjectThumbnails(void);
+rw::Texture *GetObjectThumbnailTexture(int objectId);
+void RenderRequestedPrefabThumbnails(void);
+rw::Texture *GetPrefabThumbnailTexture(const char *path);
 extern rw::Texture *gPreviewTexture;
 void HandleCustomImportDrop(const char *path);
 
