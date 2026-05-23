@@ -2294,6 +2294,8 @@ Draw(void)
 	// Render 3D preview to texture (before main camera update)
 	if(GetSpawnObjectId() >= 0)
 		RenderPreviewObject(GetSpawnObjectId());
+	RenderRequestedObjectThumbnails();
+	RenderRequestedPrefabThumbnails();
 
 	Scene.camera->beginUpdate();
 

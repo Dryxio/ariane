@@ -55,9 +55,17 @@ static ImGuiTextFilter gBrowserCategoryFilter;
 static ImGuiTextFilter gBrowserIdeFilter;
 static ImGuiTextFilter gBrowserSearchFilter;
 static ImGuiTextFilter gBrowserFavFilter;
+static ImGuiTextFilter gBrowserPrefabFilter;
 static int gBrowserSelectedCategory = -1;
 static char gBrowserSelectedIde[256];
+static bool gBrowserThumbnailView = true;
 static bool gBrowserTabRestorePending;
+static bool gBrowserPrefabListDirty = true;
+static const int MAX_BROWSER_PREFABS = 128;
+static char gBrowserPrefabFiles[MAX_BROWSER_PREFABS][256];
+static char gBrowserPrefabPaths[MAX_BROWSER_PREFABS][512];
+static int gBrowserNumPrefabs;
+static int gBrowserSelectedPrefab = -1;
 static int gDiffFilter;
 static int gRenderMode;
 static const int MAX_INTERIOR_AREA_CODE = 255;
@@ -67,7 +75,8 @@ enum BrowserTabId
 	BROWSER_TAB_CATEGORIES,
 	BROWSER_TAB_IDE,
 	BROWSER_TAB_SEARCH,
-	BROWSER_TAB_FAVOURITES
+	BROWSER_TAB_FAVOURITES,
+	BROWSER_TAB_PREFABS
 };
 static int gBrowserActiveTab = BROWSER_TAB_CATEGORIES;
 static bool gCopyableTextCopiedThisFrame;
@@ -3312,9 +3321,10 @@ uiExportPrefabPopup(void)
 				return;
 			}
 			int exported = ExportPrefab(path);
-			if(exported > 0)
+			if(exported > 0){
 				Toast(TOAST_SAVE, "Exported %d instance(s) to %s", exported, path);
-			else
+				gBrowserPrefabListDirty = true;
+			}else
 				Toast(TOAST_SAVE, "Failed to export prefab");
 			gShowExportPrefab = false;
 		}
@@ -3956,7 +3966,9 @@ uiKeyboardShortcutsWindow(void)
 
 		{ "Object Browser", "B", "Open or close Object Browser", "Global" },
 		{ "Object Browser", "Up / Down", "Move selected object through current filtered list", "Object Browser list" },
+		{ "Object Browser", "List / Tiles", "Switch between text rows and thumbnail tiles", "Object Browser" },
 		{ "Object Browser", "Right-click object row", "Add or remove favourite", "Object Browser list" },
+		{ "Object Browser", "Prefabs tab", "Browse prefab files and import the selected prefab", "Object Browser" },
 		{ "Object Browser", "Click in 3D view", "Place selected object", "Place mode" },
 		{ "Object Browser", "Shift+click in 3D view", "Place object and stay in place mode", "Place mode" },
 		{ "Object Browser", "RMB / Esc", "Exit place mode", "Place mode" },
@@ -5250,6 +5262,8 @@ loadSaveSettings(void)
 			parseIntSetting(value, &gBrowserSelectedCategory);
 		}else if(strcmp(key, "browser_selected_ide") == 0){
 			parseQuotedStringValue(value, gBrowserSelectedIde, sizeof(gBrowserSelectedIde));
+		}else if(strcmp(key, "browser_thumbnail_view") == 0){
+			if(parseBoolSetting(value, &boolValue)) gBrowserThumbnailView = boolValue;
 		}else if(strcmp(key, "browser_active_tab") == 0){
 			parseIntSetting(value, &gBrowserActiveTab);
 		}else if(strcmp(key, "browser_category_filter") == 0){
@@ -5268,6 +5282,12 @@ loadSaveSettings(void)
 			char buf[256];
 			if(parseQuotedStringValue(value, buf, sizeof(buf)))
 				setTextFilterValue(gBrowserFavFilter, buf);
+		}else if(strcmp(key, "browser_prefab_filter") == 0){
+			char buf[256];
+			if(parseQuotedStringValue(value, buf, sizeof(buf)))
+				setTextFilterValue(gBrowserPrefabFilter, buf);
+		}else if(strcmp(key, "browser_selected_prefab") == 0){
+			parseIntSetting(value, &gBrowserSelectedPrefab);
 		}else if(strcmp(key, "browser_selected_object") == 0){
 			parseIntSetting(value, &savedSpawnObjectId);
 		}else if(strcmp(key, "diff_filter") == 0){
@@ -5456,11 +5476,14 @@ saveSaveSettings(void)
 	fprintf(f, "editor_highlight_matches %d\n", gEditorHighlightMatches ? 1 : 0);
 	fprintf(f, "browser_selected_category %d\n", gBrowserSelectedCategory);
 	writeQuotedSetting(f, "browser_selected_ide", gBrowserSelectedIde);
+	fprintf(f, "browser_thumbnail_view %d\n", gBrowserThumbnailView ? 1 : 0);
 	fprintf(f, "browser_active_tab %d\n", gBrowserActiveTab);
 	writeQuotedSetting(f, "browser_category_filter", gBrowserCategoryFilter.InputBuf);
 	writeQuotedSetting(f, "browser_ide_filter", gBrowserIdeFilter.InputBuf);
 	writeQuotedSetting(f, "browser_search_filter", gBrowserSearchFilter.InputBuf);
 	writeQuotedSetting(f, "browser_favourites_filter", gBrowserFavFilter.InputBuf);
+	writeQuotedSetting(f, "browser_prefab_filter", gBrowserPrefabFilter.InputBuf);
+	fprintf(f, "browser_selected_prefab %d\n", gBrowserSelectedPrefab);
 	fprintf(f, "browser_selected_object %d\n", GetSpawnObjectId());
 	fprintf(f, "diff_filter %d\n", gDiffFilter);
 	fprintf(f, "water_snap_enabled %d\n", WaterLevel::gWaterSnapEnabled ? 1 : 0);
@@ -6287,6 +6310,21 @@ findObjectInFilteredList(int *filtered, int numFiltered, int objectId)
 	return -1;
 }
 
+static void
+uiObjectFavouritePopup(int objectId)
+{
+	if(ImGui::BeginPopupContextItem()){
+		if(IsFavourite(objectId)){
+			if(ImGui::MenuItem("Remove from Favourites"))
+				ToggleFavourite(objectId);
+		}else{
+			if(ImGui::MenuItem("Add to Favourites"))
+				ToggleFavourite(objectId);
+		}
+		ImGui::EndPopup();
+	}
+}
+
 // Shared object list renderer with clipper
 static void
 uiObjectList(int *filtered, int numFiltered, int selId)
@@ -6336,17 +6374,7 @@ uiObjectList(int *filtered, int numFiltered, int selId)
 			ImGui::PushID(i);
 			if(ImGui::Selectable(buf, isSelected))
 				selectBrowserObject(i);
-			// Right-click for favourites
-			if(ImGui::BeginPopupContextItem()){
-				if(IsFavourite(i)){
-					if(ImGui::MenuItem("Remove from Favourites"))
-						ToggleFavourite(i);
-				}else{
-					if(ImGui::MenuItem("Add to Favourites"))
-						ToggleFavourite(i);
-				}
-				ImGui::EndPopup();
-			}
+			uiObjectFavouritePopup(i);
 			ImGui::PopID();
 		}
 	}
@@ -6354,9 +6382,237 @@ uiObjectList(int *filtered, int numFiltered, int selId)
 }
 
 static void
+drawClippedText(ImDrawList *drawList, ImVec2 min, ImVec2 max, ImU32 color, const char *text)
+{
+	ImVec4 clipRect(min.x, min.y, max.x, max.y);
+	drawList->AddText(nil, 0.0f, min, color, text, nil, 0.0f, &clipRect);
+}
+
+static void
+drawWrappedClippedText(ImDrawList *drawList, ImVec2 min, ImVec2 max, ImU32 color, const char *text)
+{
+	ImVec4 clipRect(min.x, min.y, max.x, max.y);
+	drawList->AddText(nil, 0.0f, min, color, text, nil, max.x - min.x, &clipRect);
+}
+
+static void
+uiObjectGrid(int *filtered, int numFiltered, int selId)
+{
+	ImGui::BeginChild("##ObjGrid", ImVec2(0, 0), true);
+
+	float availW = ImGui::GetContentRegionAvail().x;
+	float tileW = 116.0f;
+	float tileH = 164.0f;
+	float spacing = ImGui::GetStyle().ItemSpacing.x;
+	int columns = max(1, (int)((availW + spacing) / (tileW + spacing)));
+	float rowH = tileH + ImGui::GetStyle().ItemSpacing.y;
+	int rows = (numFiltered + columns - 1) / columns;
+
+	ImGuiListClipper clipper;
+	clipper.Begin(rows, rowH);
+	while(clipper.Step()){
+		for(int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++){
+			for(int col = 0; col < columns; col++){
+				int filteredRow = row * columns + col;
+				if(filteredRow >= numFiltered)
+					break;
+				int i = filtered[filteredRow];
+				ObjectDef *obj = GetObjectDef(i);
+				if(obj == nil)
+					continue;
+
+				if(col > 0)
+					ImGui::SameLine();
+				ImGui::PushID(i);
+				bool selected = i == selId;
+				if(ImGui::InvisibleButton("##tile", ImVec2(tileW, tileH)))
+					selectBrowserObject(i);
+				uiObjectFavouritePopup(i);
+
+				ImDrawList *drawList = ImGui::GetWindowDrawList();
+				ImVec2 min = ImGui::GetItemRectMin();
+				ImVec2 max = ImGui::GetItemRectMax();
+				ImU32 bg = ImGui::GetColorU32(selected ? ImGuiCol_Header : ImGuiCol_FrameBg);
+				ImU32 border = ImGui::GetColorU32(selected ? ImGuiCol_HeaderActive : ImGuiCol_Border);
+				drawList->AddRectFilled(min, max, bg, 4.0f);
+				drawList->AddRect(min, max, border, 4.0f, 0, selected ? 2.0f : 1.0f);
+
+				ImVec2 imageMin = ImVec2(min.x + 10.0f, min.y + 8.0f);
+				ImVec2 imageMax = ImVec2(min.x + tileW - 10.0f, min.y + 104.0f);
+				rw::Texture *thumb = GetObjectThumbnailTexture(i);
+				if(thumb && thumb->raster){
+					drawList->AddImage((void*)(intptr_t)thumb, imageMin, imageMax, ImVec2(0, 1), ImVec2(1, 0));
+				}else{
+					ImU32 placeholder = ImGui::GetColorU32(ImGuiCol_WindowBg);
+					drawList->AddRectFilled(imageMin, imageMax, placeholder, 3.0f);
+					drawList->AddText(ImVec2(imageMin.x + 8.0f, imageMin.y + 36.0f),
+						ImGui::GetColorU32(ImGuiCol_TextDisabled), "Loading");
+				}
+				drawList->AddRect(imageMin, imageMax, ImGui::GetColorU32(ImGuiCol_Border), 3.0f);
+
+				char idBuf[32];
+				snprintf(idBuf, sizeof(idBuf), "%d", obj->m_id);
+				drawClippedText(drawList, ImVec2(min.x + 8.0f, min.y + 110.0f),
+					ImVec2(max.x - 8.0f, min.y + 126.0f), ImGui::GetColorU32(ImGuiCol_Text), idBuf);
+				drawWrappedClippedText(drawList, ImVec2(min.x + 8.0f, min.y + 128.0f),
+					ImVec2(max.x - 8.0f, max.y - 8.0f), ImGui::GetColorU32(ImGuiCol_TextDisabled), obj->m_name);
+
+				if(ImGui::IsItemHovered())
+					ImGui::SetTooltip("%d  %s", obj->m_id, obj->m_name);
+				ImGui::PopID();
+			}
+		}
+	}
+	ImGui::EndChild();
+}
+
+static void
+uiObjectResults(int *filtered, int numFiltered, int selId)
+{
+	if(gBrowserThumbnailView)
+		uiObjectGrid(filtered, numFiltered, selId);
+	else
+		uiObjectList(filtered, numFiltered, selId);
+}
+
+static void
+refreshBrowserPrefabList(void)
+{
+	char prefabDir[512];
+
+	gBrowserNumPrefabs = 0;
+	if(GetArianeDataPath(prefabDir, sizeof(prefabDir), "prefabs"))
+		scanPrefabDir(prefabDir, gBrowserPrefabFiles, gBrowserPrefabPaths, &gBrowserNumPrefabs, MAX_BROWSER_PREFABS);
+	scanPrefabDir("prefabs", gBrowserPrefabFiles, gBrowserPrefabPaths, &gBrowserNumPrefabs, MAX_BROWSER_PREFABS);
+	if(gBrowserSelectedPrefab >= gBrowserNumPrefabs)
+		gBrowserSelectedPrefab = -1;
+	gBrowserPrefabListDirty = false;
+}
+
+static void
+getPrefabDisplayName(const char *file, char *buf, size_t bufSize)
+{
+	snprintf(buf, bufSize, "%s", file ? file : "");
+	size_t len = strlen(buf);
+	if(len > 7 && strcmp(buf + len - 7, ".ariane") == 0)
+		buf[len - 7] = '\0';
+}
+
+static void
+importBrowserPrefab(int prefabIndex)
+{
+	if(prefabIndex < 0 || prefabIndex >= gBrowserNumPrefabs)
+		return;
+	int imported = ImportPrefab(gBrowserPrefabPaths[prefabIndex]);
+	if(imported > 0)
+		Toast(TOAST_SPAWN, "Imported %d instance(s) from prefab", imported);
+	else
+		Toast(TOAST_SPAWN, "Failed to import prefab");
+}
+
+static void
+uiPrefabList(int *filtered, int numFiltered)
+{
+	ImGui::BeginChild("##PrefabList", ImVec2(0, 0), true);
+
+	ImGuiListClipper clipper;
+	clipper.Begin(numFiltered);
+	char label[256];
+	while(clipper.Step()){
+		for(int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++){
+			int i = filtered[row];
+			getPrefabDisplayName(gBrowserPrefabFiles[i], label, sizeof(label));
+			ImGui::PushID(i);
+			if(ImGui::Selectable(label, gBrowserSelectedPrefab == i))
+				gBrowserSelectedPrefab = i;
+			if(ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+				importBrowserPrefab(i);
+			ImGui::SetItemTooltip("%s", gBrowserPrefabPaths[i]);
+			ImGui::PopID();
+		}
+	}
+	ImGui::EndChild();
+}
+
+static void
+uiPrefabGrid(int *filtered, int numFiltered)
+{
+	ImGui::BeginChild("##PrefabGrid", ImVec2(0, 0), true);
+
+	float availW = ImGui::GetContentRegionAvail().x;
+	float tileW = 150.0f;
+	float tileH = 184.0f;
+	float spacing = ImGui::GetStyle().ItemSpacing.x;
+	int columns = max(1, (int)((availW + spacing) / (tileW + spacing)));
+	float rowH = tileH + ImGui::GetStyle().ItemSpacing.y;
+	int rows = (numFiltered + columns - 1) / columns;
+
+	ImGuiListClipper clipper;
+	clipper.Begin(rows, rowH);
+	while(clipper.Step()){
+		for(int row = clipper.DisplayStart; row < clipper.DisplayEnd; row++){
+			for(int col = 0; col < columns; col++){
+				int filteredRow = row * columns + col;
+				if(filteredRow >= numFiltered)
+					break;
+				int i = filtered[filteredRow];
+				if(col > 0)
+					ImGui::SameLine();
+
+				ImGui::PushID(i);
+				bool selected = i == gBrowserSelectedPrefab;
+				if(ImGui::InvisibleButton("##prefabtile", ImVec2(tileW, tileH)))
+					gBrowserSelectedPrefab = i;
+				if(ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+					importBrowserPrefab(i);
+
+				ImDrawList *drawList = ImGui::GetWindowDrawList();
+				ImVec2 min = ImGui::GetItemRectMin();
+				ImVec2 max = ImGui::GetItemRectMax();
+				ImU32 bg = ImGui::GetColorU32(selected ? ImGuiCol_Header : ImGuiCol_FrameBg);
+				ImU32 border = ImGui::GetColorU32(selected ? ImGuiCol_HeaderActive : ImGuiCol_Border);
+				drawList->AddRectFilled(min, max, bg, 4.0f);
+				drawList->AddRect(min, max, border, 4.0f, 0, selected ? 2.0f : 1.0f);
+
+				ImVec2 imageMin = ImVec2(min.x + 10.0f, min.y + 8.0f);
+				ImVec2 imageMax = ImVec2(max.x - 10.0f, min.y + 136.0f);
+				rw::Texture *thumb = GetPrefabThumbnailTexture(gBrowserPrefabPaths[i]);
+				if(thumb && thumb->raster)
+					drawList->AddImage((void*)(intptr_t)thumb, imageMin, imageMax, ImVec2(0, 1), ImVec2(1, 0));
+				else{
+					drawList->AddRectFilled(imageMin, imageMax, ImGui::GetColorU32(ImGuiCol_WindowBg), 3.0f);
+					drawList->AddText(ImVec2(imageMin.x + 10.0f, imageMin.y + 54.0f),
+						ImGui::GetColorU32(ImGuiCol_TextDisabled), "Loading");
+				}
+				drawList->AddRect(imageMin, imageMax, ImGui::GetColorU32(ImGuiCol_Border), 3.0f);
+
+				char name[256];
+				getPrefabDisplayName(gBrowserPrefabFiles[i], name, sizeof(name));
+				drawWrappedClippedText(drawList, ImVec2(min.x + 8.0f, min.y + 142.0f),
+					ImVec2(max.x - 8.0f, max.y - 8.0f), ImGui::GetColorU32(ImGuiCol_Text), name);
+
+				if(ImGui::IsItemHovered())
+					ImGui::SetTooltip("%s\nDouble-click to import", gBrowserPrefabPaths[i]);
+				ImGui::PopID();
+			}
+		}
+	}
+	ImGui::EndChild();
+}
+
+static void
+uiPrefabResults(int *filtered, int numFiltered)
+{
+	if(gBrowserThumbnailView)
+		uiPrefabGrid(filtered, numFiltered);
+	else
+		uiPrefabList(filtered, numFiltered);
+}
+
+static void
 uiBrowserWindow(void)
 {
-	ImGui::SetNextWindowSize(ImVec2(420, 700), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSize(ImVec2(560, 700), ImGuiCond_FirstUseEver);
 	ImGui::Begin(ICON_FA_MAGNIFYING_GLASS " Object Browser", &showBrowserWindow);
 
 	int selId = GetSpawnObjectId();
@@ -6364,7 +6620,7 @@ uiBrowserWindow(void)
 	int numFiltered = 0;
 
 	// 3D Preview + selected info panel
-	if(selId >= 0){
+	if(selId >= 0 && gBrowserActiveTab != BROWSER_TAB_PREFABS){
 		ObjectDef *sel = GetObjectDef(selId);
 		if(sel){
 			// Preview (rendered in Draw() before main camera)
@@ -6425,6 +6681,13 @@ uiBrowserWindow(void)
 		}
 	}
 
+	if(ImGui::RadioButton("List", !gBrowserThumbnailView))
+		gBrowserThumbnailView = false;
+	ImGui::SameLine();
+	if(ImGui::RadioButton("Tiles", gBrowserThumbnailView))
+		gBrowserThumbnailView = true;
+	ImGui::Separator();
+
 	// Tab bar
 	if(ImGui::BeginTabBar("##BrowserTabs")){
 
@@ -6470,7 +6733,7 @@ uiBrowserWindow(void)
 				filtered[numFiltered++] = i;
 			}
 			ImGui::Text("%d objects", numFiltered);
-			uiObjectList(filtered, numFiltered, selId);
+			uiObjectResults(filtered, numFiltered, selId);
 
 			ImGui::EndTabItem();
 		}
@@ -6525,7 +6788,7 @@ uiBrowserWindow(void)
 				filtered[numFiltered++] = i;
 			}
 			ImGui::Text("%d objects", numFiltered);
-			uiObjectList(filtered, numFiltered, selId);
+			uiObjectResults(filtered, numFiltered, selId);
 
 			ImGui::EndTabItem();
 		}
@@ -6550,7 +6813,7 @@ uiBrowserWindow(void)
 				}
 			}
 			ImGui::Text("%d results", numFiltered);
-			uiObjectList(filtered, numFiltered, selId);
+			uiObjectResults(filtered, numFiltered, selId);
 
 			ImGui::EndTabItem();
 		}
@@ -6571,7 +6834,58 @@ uiBrowserWindow(void)
 				filtered[numFiltered++] = i;
 			}
 			ImGui::Text("%d favourites", numFiltered);
-			uiObjectList(filtered, numFiltered, selId);
+			uiObjectResults(filtered, numFiltered, selId);
+
+			ImGui::EndTabItem();
+		}
+
+		// === Prefabs tab ===
+		if(ImGui::BeginTabItem("Prefabs", nil,
+		   gBrowserTabRestorePending && gBrowserActiveTab == BROWSER_TAB_PREFABS ?
+		   ImGuiTabItemFlags_SetSelected : 0)){
+			gBrowserActiveTab = BROWSER_TAB_PREFABS;
+			if(gBrowserPrefabListDirty)
+				refreshBrowserPrefabList();
+
+			gBrowserPrefabFilter.Draw("Filter##Prefabs");
+			ImGui::SameLine();
+			if(ImGui::Button("Refresh##Prefabs")){
+				gBrowserPrefabListDirty = true;
+				refreshBrowserPrefabList();
+			}
+
+			if(gBrowserSelectedPrefab >= 0 && gBrowserSelectedPrefab < gBrowserNumPrefabs){
+				rw::Texture *thumb = GetPrefabThumbnailTexture(gBrowserPrefabPaths[gBrowserSelectedPrefab]);
+				if(thumb && thumb->raster){
+					float previewW = ImGui::GetContentRegionAvail().x;
+					float previewH = previewW * 0.45f;
+					if(previewH > 180.0f) previewH = 180.0f;
+					ImGui::Image((void*)(intptr_t)thumb, ImVec2(previewW, previewH),
+						ImVec2(0, 1), ImVec2(1, 0));
+				}
+				char name[256];
+				getPrefabDisplayName(gBrowserPrefabFiles[gBrowserSelectedPrefab], name, sizeof(name));
+				ImGui::Text("%s", name);
+				ImGui::SameLine();
+				if(ImGui::Button("Import Selected"))
+					importBrowserPrefab(gBrowserSelectedPrefab);
+				ImGui::Separator();
+			}
+
+			numFiltered = 0;
+			for(int i = 0; i < gBrowserNumPrefabs; i++){
+				char name[256];
+				getPrefabDisplayName(gBrowserPrefabFiles[i], name, sizeof(name));
+				if(!gBrowserPrefabFilter.PassFilter(name) &&
+				   !gBrowserPrefabFilter.PassFilter(gBrowserPrefabFiles[i]))
+					continue;
+				filtered[numFiltered++] = i;
+			}
+			ImGui::Text("%d prefabs", numFiltered);
+			if(gBrowserNumPrefabs == 0)
+				ImGui::TextDisabled("No .ariane files found in ariane/prefabs/ or prefabs/");
+			else
+				uiPrefabResults(filtered, numFiltered);
 
 			ImGui::EndTabItem();
 		}
