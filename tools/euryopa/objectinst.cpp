@@ -4,6 +4,9 @@
 #include "object_categories.h"
 #include <cmath>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
 #include <vector>
 
 bool ReadCdImageEntryByLogicalPath(const char *logicalPath, std::vector<uint8> &data,
@@ -987,24 +990,30 @@ DeleteSelected(void)
 {
 	// Collect all instances that will be deleted (including LOD cascades)
 	// First, gather the selected ones
-	ObjectInst *toDelete[MAX_BATCH_OBJECTS];
-	int numToDelete = 0;
+	std::vector<ObjectInst*> toDelete;
+	bool capped = false;
 	CPtrNode *p, *next;
 	for(p = selection.first; p; p = next){
 		next = p->next;
 		ObjectInst *inst = (ObjectInst*)p->item;
-		if(!inst->m_isDeleted && numToDelete < MAX_BATCH_OBJECTS)
-			toDelete[numToDelete++] = inst;
+		if(!inst->m_isDeleted){
+			if((int)toDelete.size() >= MAX_BATCH_OBJECTS){
+				capped = true;
+				break;
+			}
+			toDelete.push_back(inst);
+		}
 	}
-	if(numToDelete == 0) return;
+	if(toDelete.empty()) return;
+	if(capped)
+		Toast(TOAST_DELETE, "Delete limited to first %d selected instance(s)", MAX_BATCH_OBJECTS);
 
 	// Now delete them and collect ALL that got deleted (including LOD cascade)
-	ObjectInst *allDeleted[MAX_BATCH_OBJECTS];
 	int numAllDeleted = 0;
 
 	// Snapshot which are already deleted
 	// Then delete, and find newly deleted ones
-	for(int i = 0; i < numToDelete; i++)
+	for(int i = 0; i < (int)toDelete.size(); i++)
 		toDelete[i]->Delete();
 
 	// Scan for all instances that are now deleted to record in undo
@@ -1019,7 +1028,7 @@ DeleteSelected(void)
 
 	// Simpler: just record what we explicitly asked to delete,
 	// the cascade is handled by Undelete() automatically
-	UndoRecordDelete(toDelete, numToDelete);
+	UndoRecordDelete(toDelete.data(), (int)toDelete.size());
 }
 
 int
@@ -1205,7 +1214,7 @@ GetOrCreateCustomIplFile(void)
 		free(customIplFile->sourcePath);
 		customIplFile->sourcePath = strdup(currentCustomIplSourcePath);
 	}
-	if(currentCustomIplAppendToDat)
+	if(currentCustomIplAppendToDat && gSaveDestination != SAVE_DESTINATION_MODLOADER)
 		AppendIplToDat(currentCustomIplPath);
 	return customIplFile;
 }
@@ -1585,6 +1594,7 @@ struct ObjectThumbnailSlot
 	int objectId;
 	bool ready;
 	uint32 lastUsed;
+	int lastRequestedFrame;
 	rw::Raster *colorRaster;
 	rw::Raster *depthRaster;
 	rw::Texture *texture;
@@ -1600,6 +1610,7 @@ struct PrefabThumbnailSlot
 	char path[512];
 	bool ready;
 	uint32 lastUsed;
+	int lastRequestedFrame;
 	rw::Raster *colorRaster;
 	rw::Raster *depthRaster;
 	rw::Texture *texture;
@@ -1632,6 +1643,7 @@ destroyObjectThumbnailSlot(ObjectThumbnailSlot *slot)
 	slot->objectId = -1;
 	slot->ready = false;
 	slot->lastUsed = 0;
+	slot->lastRequestedFrame = 0;
 }
 
 static void
@@ -1647,6 +1659,7 @@ destroyPrefabThumbnailSlot(PrefabThumbnailSlot *slot)
 	slot->path[0] = '\0';
 	slot->ready = false;
 	slot->lastUsed = 0;
+	slot->lastRequestedFrame = 0;
 }
 
 static bool
@@ -1677,6 +1690,7 @@ initObjectThumbnailSlot(ObjectThumbnailSlot *slot)
 	slot->objectId = -1;
 	slot->ready = false;
 	slot->lastUsed = 0;
+	slot->lastRequestedFrame = 0;
 	return true;
 }
 
@@ -1713,6 +1727,7 @@ initPrefabThumbnailSlot(PrefabThumbnailSlot *slot)
 	slot->texture->setFilter(rw::Texture::LINEAR);
 	slot->ready = false;
 	slot->lastUsed = 0;
+	slot->lastRequestedFrame = 0;
 	return true;
 }
 
@@ -2027,10 +2042,12 @@ GetObjectThumbnailTexture(int objectId)
 	if(objectId < 0 || GetObjectDef(objectId) == nil)
 		return nil;
 
+	int requestFrame = ImGui::GetFrameCount();
 	for(int i = 0; i < OBJECT_THUMBNAIL_SLOTS; i++){
 		ObjectThumbnailSlot *slot = &objectThumbnailSlots[i];
 		if(slot->objectId == objectId){
 			slot->lastUsed = ++objectThumbnailUseSeq;
+			slot->lastRequestedFrame = requestFrame;
 			return slot->ready ? slot->texture : nil;
 		}
 	}
@@ -2042,15 +2059,20 @@ GetObjectThumbnailTexture(int objectId)
 			break;
 		}
 	if(slot == nil){
-		slot = &objectThumbnailSlots[0];
-		for(int i = 1; i < OBJECT_THUMBNAIL_SLOTS; i++)
-			if(objectThumbnailSlots[i].lastUsed < slot->lastUsed)
+		for(int i = 0; i < OBJECT_THUMBNAIL_SLOTS; i++){
+			if(objectThumbnailSlots[i].lastRequestedFrame == requestFrame)
+				continue;
+			if(slot == nil || objectThumbnailSlots[i].lastUsed < slot->lastUsed)
 				slot = &objectThumbnailSlots[i];
+		}
+		if(slot == nil)
+			return nil;
 	}
 
 	slot->objectId = objectId;
 	slot->ready = false;
 	slot->lastUsed = ++objectThumbnailUseSeq;
+	slot->lastRequestedFrame = requestFrame;
 	return nil;
 }
 
@@ -2088,10 +2110,12 @@ GetPrefabThumbnailTexture(const char *path)
 	if(path == nil || path[0] == '\0')
 		return nil;
 
+	int requestFrame = ImGui::GetFrameCount();
 	for(int i = 0; i < PREFAB_THUMBNAIL_SLOTS; i++){
 		PrefabThumbnailSlot *slot = &prefabThumbnailSlots[i];
 		if(slot->path[0] != '\0' && strcmp(slot->path, path) == 0){
 			slot->lastUsed = ++prefabThumbnailUseSeq;
+			slot->lastRequestedFrame = requestFrame;
 			return slot->ready ? slot->texture : nil;
 		}
 	}
@@ -2103,16 +2127,21 @@ GetPrefabThumbnailTexture(const char *path)
 			break;
 		}
 	if(slot == nil){
-		slot = &prefabThumbnailSlots[0];
-		for(int i = 1; i < PREFAB_THUMBNAIL_SLOTS; i++)
-			if(prefabThumbnailSlots[i].lastUsed < slot->lastUsed)
+		for(int i = 0; i < PREFAB_THUMBNAIL_SLOTS; i++){
+			if(prefabThumbnailSlots[i].lastRequestedFrame == requestFrame)
+				continue;
+			if(slot == nil || prefabThumbnailSlots[i].lastUsed < slot->lastUsed)
 				slot = &prefabThumbnailSlots[i];
+		}
+		if(slot == nil)
+			return nil;
 	}
 
 	strncpy(slot->path, path, sizeof(slot->path));
 	slot->path[sizeof(slot->path)-1] = '\0';
 	slot->ready = false;
 	slot->lastUsed = ++prefabThumbnailUseSeq;
+	slot->lastRequestedFrame = requestFrame;
 	return nil;
 }
 
@@ -2254,9 +2283,7 @@ RenderPreviewObject(int objectId)
 }
 
 // Clipboard
-#define MAX_CLIPBOARD MAX_BATCH_OBJECTS
-static ObjectInst *clipboard[MAX_CLIPBOARD];
-static int clipboardCount;
+static std::vector<ObjectInst*> clipboard;
 static bool clipboardIsCut;
 
 // Undo/Redo system
@@ -2307,14 +2334,18 @@ static void
 pushUndo(UndoAction *a)
 {
 	// If we're not at the top, discard redo history
+	for(int i = undoPos; i < undoCount; i++)
+		undoStack[i] = UndoAction();
 	undoCount = undoPos;
 	if(undoCount >= MAX_UNDO){
 		// Shift everything down
-		memmove(&undoStack[0], &undoStack[1], (MAX_UNDO-1)*sizeof(UndoAction));
+		for(int i = 1; i < MAX_UNDO; i++)
+			undoStack[i-1] = std::move(undoStack[i]);
+		undoStack[MAX_UNDO-1] = UndoAction();
 		undoCount--;
 		undoPos--;
 	}
-	undoStack[undoCount] = *a;
+	undoStack[undoCount] = std::move(*a);
 	undoCount++;
 	undoPos = undoCount;
 }
@@ -2322,8 +2353,7 @@ pushUndo(UndoAction *a)
 void
 UndoRecordMove(ObjectInst *inst, rw::V3d oldPos, ObjectInst *lodInst, rw::V3d lodOldPos)
 {
-	UndoAction a;
-	memset(&a, 0, sizeof(a));
+	UndoAction a = {};
 	a.type = UNDO_MOVE;
 	a.inst = inst;
 	a.oldPos = oldPos;
@@ -2338,8 +2368,7 @@ UndoRecordMove(ObjectInst *inst, rw::V3d oldPos, ObjectInst *lodInst, rw::V3d lo
 void
 UndoRecordRotate(ObjectInst *inst, rw::Quat oldRot)
 {
-	UndoAction a;
-	memset(&a, 0, sizeof(a));
+	UndoAction a = {};
 	a.type = UNDO_ROTATE;
 	a.inst = inst;
 	a.oldRot = oldRot;
@@ -2350,24 +2379,20 @@ UndoRecordRotate(ObjectInst *inst, rw::Quat oldRot)
 void
 UndoRecordDelete(ObjectInst **insts, int num)
 {
-	UndoAction a;
-	memset(&a, 0, sizeof(a));
+	UndoAction a = {};
 	a.type = UNDO_DELETE;
-	a.numDeleted = num > MAX_BATCH_OBJECTS ? MAX_BATCH_OBJECTS : num;
-	for(int i = 0; i < a.numDeleted; i++)
-		a.deletedInsts[i] = insts[i];
+	a.numDeleted = num;
+	a.deletedInsts.assign(insts, insts + num);
 	pushUndo(&a);
 }
 
 void
 UndoRecordPaste(ObjectInst **insts, int num)
 {
-	UndoAction a;
-	memset(&a, 0, sizeof(a));
+	UndoAction a = {};
 	a.type = UNDO_PASTE;
-	a.numPasted = num > MAX_BATCH_OBJECTS ? MAX_BATCH_OBJECTS : num;
-	for(int i = 0; i < a.numPasted; i++)
-		a.pastedInsts[i] = insts[i];
+	a.numPasted = num;
+	a.pastedInsts.assign(insts, insts + num);
 	pushUndo(&a);
 }
 
@@ -2377,12 +2402,10 @@ UndoRecordTransformBatch(UndoTransform *transforms, int num)
 	if(num <= 0)
 		return;
 
-	UndoAction a;
-	memset(&a, 0, sizeof(a));
+	UndoAction a = {};
 	a.type = UNDO_TRANSFORM_BATCH;
-	a.numTransforms = num > MAX_BATCH_OBJECTS ? MAX_BATCH_OBJECTS : num;
-	for(int i = 0; i < a.numTransforms; i++)
-		a.transforms[i] = transforms[i];
+	a.numTransforms = num;
+	a.transforms.assign(transforms, transforms + num);
 	pushUndo(&a);
 }
 
@@ -2493,35 +2516,51 @@ AddInstance(void)
 void
 CopySelected(void)
 {
-	clipboardCount = 0;
+	clipboard.clear();
 	clipboardIsCut = false;
 	CPtrNode *p;
+	bool capped = false;
 	for(p = selection.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
-		if(!inst->m_isDeleted && clipboardCount < MAX_CLIPBOARD)
-			clipboard[clipboardCount++] = inst;
+		if(!inst->m_isDeleted){
+			if((int)clipboard.size() >= MAX_BATCH_OBJECTS){
+				capped = true;
+				break;
+			}
+			clipboard.push_back(inst);
+		}
 	}
-	if(clipboardCount > 0)
-		log("Copied %d instance(s)\n", clipboardCount);
+	if(capped)
+		Toast(TOAST_COPY_PASTE, "Copy limited to first %d selected instance(s)", MAX_BATCH_OBJECTS);
+	if(!clipboard.empty())
+		log("Copied %d instance(s)\n", (int)clipboard.size());
 }
 
 void
 CutSelected(void)
 {
-	clipboardCount = 0;
+	clipboard.clear();
 	clipboardIsCut = false;
 	CPtrNode *p;
+	bool capped = false;
 	for(p = selection.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
-		if(!inst->m_isDeleted && clipboardCount < MAX_CLIPBOARD)
-			clipboard[clipboardCount++] = inst;
+		if(!inst->m_isDeleted){
+			if((int)clipboard.size() >= MAX_BATCH_OBJECTS){
+				capped = true;
+				break;
+			}
+			clipboard.push_back(inst);
+		}
 	}
-	if(clipboardCount == 0)
+	if(capped)
+		Toast(TOAST_COPY_PASTE, "Cut limited to first %d selected instance(s)", MAX_BATCH_OBJECTS);
+	if(clipboard.empty())
 		return;
 
 	clipboardIsCut = true;
 	DeleteSelected();
-	log("Cut %d instance(s)\n", clipboardCount);
+	log("Cut %d instance(s)\n", (int)clipboard.size());
 }
 
 static ObjectInst*
@@ -2713,67 +2752,60 @@ getClipboardPasteOffset(ObjectInst **toPaste, int numToPaste)
 static int
 PasteCutClipboard(void)
 {
-	ObjectInst *restored[MAX_CLIPBOARD];
-	int numRestored = 0;
+	std::vector<ObjectInst*> restored;
 
 	ClearSelection();
-	for(int i = 0; i < clipboardCount; i++){
+	for(int i = 0; i < (int)clipboard.size(); i++){
 		ObjectInst *inst = clipboard[i];
 		if(inst == nil)
 			continue;
 		if(inst->m_isDeleted)
 			inst->Undelete();
 		inst->Select();
-		if(numRestored < MAX_CLIPBOARD)
-			restored[numRestored++] = inst;
+		restored.push_back(inst);
 	}
 
-	if(numRestored > 0){
-		UndoRecordPaste(restored, numRestored);
-		log("Restored %d cut instance(s)\n", numRestored);
+	if(!restored.empty()){
+		UndoRecordPaste(restored.data(), (int)restored.size());
+		log("Restored %d cut instance(s)\n", (int)restored.size());
 	}
 	clipboardIsCut = false;
-	return numRestored;
+	return (int)restored.size();
 }
 
 int
 PasteClipboard(void)
 {
-	if(clipboardCount == 0) return 0;
+	if(clipboard.empty()) return 0;
 	if(clipboardIsCut)
 		return PasteCutClipboard();
 
-	ObjectInst *pasted[MAX_CLIPBOARD * 2];
-	int numPasted = 0;
+	std::vector<ObjectInst*> pasted;
 
 	// Deduplicate: skip LODs that are already the m_lod of another
 	// clipboard entry (they'll be auto-copied with their HD parent)
-	ObjectInst *toPaste[MAX_CLIPBOARD];
-	int numToPaste = 0;
+	std::vector<ObjectInst*> toPaste;
+	std::unordered_set<ObjectInst*> lodsCopiedWithParent;
+	lodsCopiedWithParent.reserve(clipboard.size());
 
-	for(int i = 0; i < clipboardCount; i++){
-		bool isLodOfAnother = false;
-		for(int j = 0; j < clipboardCount; j++){
-			if(i == j)
-				continue;
-			ObjectInst *lod = findPasteSourceLod(clipboard[j], nil, nil);
-			if(lod == clipboard[i]){
-				isLodOfAnother = true;
-				break;
-			}
-		}
-		if(!isLodOfAnother)
-			toPaste[numToPaste++] = clipboard[i];
+	for(int i = 0; i < (int)clipboard.size(); i++){
+		ObjectInst *lod = findPasteSourceLod(clipboard[i], nil, nil);
+		if(lod)
+			lodsCopiedWithParent.insert(lod);
 	}
+	for(int i = 0; i < (int)clipboard.size(); i++)
+		if(lodsCopiedWithParent.find(clipboard[i]) == lodsCopiedWithParent.end())
+			toPaste.push_back(clipboard[i]);
 
-	rw::V3d offset = getClipboardPasteOffset(toPaste, numToPaste);
+	rw::V3d offset = getClipboardPasteOffset(toPaste.data(), (int)toPaste.size());
 
 	ClearSelection();
 
 	int recoveredLods = 0;
 	int generatedLods = 0;
+	std::unordered_map<GameFile*, int> maxIplIndexByFile;
 
-	for(int i = 0; i < numToPaste; i++){
+	for(int i = 0; i < (int)toPaste.size(); i++){
 		ObjectInst *src = toPaste[i];
 		int associatedLodObjId = -1;
 		bool usedAssociatedSource = false;
@@ -2781,51 +2813,54 @@ PasteClipboard(void)
 
 		GameFile *dstFile = findPasteDestinationFile(src);
 
-		// Find the max m_iplIndex for this file (text IPL instances only)
-		int maxIplIndex = -1;
-		CPtrNode *p;
-		for(p = instances.first; p; p = p->next){
-			ObjectInst *other = (ObjectInst*)p->item;
-			if(other->m_file == dstFile && other->m_imageIndex < 0){
-				if(other->m_iplIndex > maxIplIndex)
-					maxIplIndex = other->m_iplIndex;
+		std::unordered_map<GameFile*, int>::iterator maxIt = maxIplIndexByFile.find(dstFile);
+		if(maxIt == maxIplIndexByFile.end()){
+			int maxIplIndex = -1;
+			CPtrNode *p;
+			for(p = instances.first; p; p = p->next){
+				ObjectInst *other = (ObjectInst*)p->item;
+				if(other->m_file == dstFile && other->m_imageIndex < 0){
+					if(other->m_iplIndex > maxIplIndex)
+						maxIplIndex = other->m_iplIndex;
+				}
 			}
+			maxIt = maxIplIndexByFile.insert(std::make_pair(dstFile, maxIplIndex)).first;
 		}
 
 		// Paste LOD first (if any) so we have its iplIndex for the HD's lodId
 		ObjectInst *newLod = nil;
 		if(isSA() && srcLod && !srcLod->m_isDeleted){
-			newLod = cloneInstance(srcLod, dstFile, ++maxIplIndex, offset);
-			pasted[numPasted++] = newLod;
+			newLod = cloneInstance(srcLod, dstFile, ++maxIt->second, offset);
+			pasted.push_back(newLod);
 			if(usedAssociatedSource)
 				recoveredLods++;
 		}else if(isSA() && associatedLodObjId >= 0){
-			newLod = cloneInstanceWithObjectId(src, dstFile, ++maxIplIndex, offset,
+			newLod = cloneInstanceWithObjectId(src, dstFile, ++maxIt->second, offset,
 				associatedLodObjId, false);
-			pasted[numPasted++] = newLod;
+			pasted.push_back(newLod);
 			generatedLods++;
 		}
 
 		// Paste HD
-		ObjectInst *newHd = cloneInstance(src, dstFile, ++maxIplIndex, offset);
+		ObjectInst *newHd = cloneInstance(src, dstFile, ++maxIt->second, offset);
 
 		// Link LOD
 		if(newLod)
 			finalizeLinkedLod(newHd, newLod);
 
 		newHd->Select();
-		pasted[numPasted++] = newHd;
+		pasted.push_back(newHd);
 	}
 
-	if(numPasted > 0){
-		UndoRecordPaste(pasted, numPasted);
-		log("Pasted %d instance(s)\n", numPasted);
+	if(!pasted.empty()){
+		UndoRecordPaste(pasted.data(), (int)pasted.size());
+		log("Pasted %d instance(s)\n", (int)pasted.size());
 		if(recoveredLods > 0)
 			log("Recovered %d LOD link(s) from nearby associated instances\n", recoveredLods);
 			if(generatedLods > 0)
 				log("Generated %d associated LOD instance(s) during paste\n", generatedLods);
 	}
-	return numPasted;
+	return (int)pasted.size();
 }
 
 int

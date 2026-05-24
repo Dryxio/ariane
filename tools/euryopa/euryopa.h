@@ -5,6 +5,7 @@
 #include <rw.h>
 #include <skeleton.h>
 #include "imgui/ImGuizmo.h"
+#include <vector>
 #include <string.h>
 #include <ctype.h>
 #include <assert.h>
@@ -381,8 +382,9 @@ extern float gGizmoSnapTranslate;
 // Rect-select (marquee selection)
 extern bool gRectSelectActive;	// true when LMB is consumed by rect-select (blocks camera)
 
-// Batch operation limit (undo, delete, snap, gizmo drag, clipboard, etc.)
-#define MAX_BATCH_OBJECTS 512
+// Practical cap for expensive selection operations. The selection list itself
+// is uncapped, but operations that allocate temporary buffers stop here.
+#define MAX_BATCH_OBJECTS 20000
 
 // Undo/Redo
 enum UndoType {
@@ -420,13 +422,13 @@ struct UndoAction {
 	rw::V3d lodOldPos;
 	rw::V3d lodNewPos;
 	// For DELETE: list of deleted instances (inst + LOD cascade)
-	ObjectInst *deletedInsts[MAX_BATCH_OBJECTS];
+	std::vector<ObjectInst*> deletedInsts;
 	int numDeleted;
 	// For PASTE: list of pasted instances (to delete on undo)
-	ObjectInst *pastedInsts[MAX_BATCH_OBJECTS];
+	std::vector<ObjectInst*> pastedInsts;
 	int numPasted;
 	// For batch transform actions (snap to ground, etc.)
-	UndoTransform transforms[MAX_BATCH_OBJECTS];
+	std::vector<UndoTransform> transforms;
 	int numTransforms;
 };
 

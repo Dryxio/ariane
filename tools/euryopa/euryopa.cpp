@@ -1094,22 +1094,22 @@ BuildGroundAlignedRotation(ObjectInst *inst, rw::V3d groundNormal)
 	return BuildGroundAlignedRotationFromRotation(inst->m_rotation, groundNormal);
 }
 
-static UndoTransform*
-FindOrAddTransform(UndoTransform *transforms, int *numTransforms, ObjectInst *inst)
+static int
+FindOrAddTransform(std::vector<UndoTransform> &transforms, ObjectInst *inst)
 {
-	for(int i = 0; i < *numTransforms; i++)
+	for(int i = 0; i < (int)transforms.size(); i++)
 		if(transforms[i].inst == inst)
-			return &transforms[i];
-	if(*numTransforms >= MAX_BATCH_OBJECTS)
-		return nil;
-	UndoTransform *t = &transforms[(*numTransforms)++];
-	memset(t, 0, sizeof(*t));
-	t->inst = inst;
-	t->oldPos = inst->m_translation;
-	t->newPos = inst->m_translation;
-	t->oldRot = inst->m_rotation;
-	t->newRot = inst->m_rotation;
-	return t;
+			return i;
+	if((int)transforms.size() >= MAX_BATCH_OBJECTS)
+		return -1;
+	UndoTransform t = {};
+	t.inst = inst;
+	t.oldPos = inst->m_translation;
+	t.newPos = inst->m_translation;
+	t.oldRot = inst->m_rotation;
+	t.newRot = inst->m_rotation;
+	transforms.push_back(t);
+	return (int)transforms.size() - 1;
 }
 
 static bool
@@ -1158,12 +1158,39 @@ ApplyTransform(UndoTransform &t)
 		InsertInstIntoSectors(inst);
 }
 
+static bool
+FindOrAddLinkedTransformGroup(std::vector<UndoTransform> &transforms, ObjectInst *inst)
+{
+	size_t before = transforms.size();
+	if(FindOrAddTransform(transforms, inst) < 0)
+		return false;
+
+	if(inst->m_lod && !inst->m_lod->m_isDeleted){
+		if(FindOrAddTransform(transforms, inst->m_lod) < 0){
+			transforms.resize(before);
+			return false;
+		}
+	}else{
+		for(CPtrNode *q = instances.first; q; q = q->next){
+			ObjectInst *child = (ObjectInst*)q->item;
+			if(child != inst && child->m_lod == inst && !child->m_isDeleted){
+				if(FindOrAddTransform(transforms, child) < 0){
+					transforms.resize(before);
+					return false;
+				}
+			}
+		}
+	}
+	return true;
+}
+
 int
 SnapSelectedToGround(bool alignRotation)
 {
-	ObjectInst *targets[MAX_BATCH_OBJECTS];
-	int numTargets = 0;
+	std::vector<ObjectInst*> targets;
 	int skipped = 0;
+	bool capped = false;
+	targets.reserve(1024);
 
 	for(CPtrNode *p = selection.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
@@ -1177,21 +1204,27 @@ SnapSelectedToGround(bool alignRotation)
 			skipped++;
 			continue;
 		}
-		if(numTargets < MAX_BATCH_OBJECTS)
-			targets[numTargets++] = inst;
+		if((int)targets.size() < MAX_BATCH_OBJECTS)
+			targets.push_back(inst);
+		else{
+			capped = true;
+			break;
+		}
 	}
+	if(capped)
+		Toast(TOAST_SELECTION, "Ground snap limited to first %d selected instance(s)", MAX_BATCH_OBJECTS);
 
-	if(numTargets == 0){
+	if(targets.empty()){
 		if(skipped > 0)
 			Toast(TOAST_SELECTION, "Ground snap skipped linked multi-selection");
 		return 0;
 	}
 
-	UndoTransform transforms[MAX_BATCH_OBJECTS];
-	int numTransforms = 0;
+	std::vector<UndoTransform> transforms;
+	transforms.reserve(min((int)targets.size() * 2, MAX_BATCH_OBJECTS));
 	int snapped = 0;
 
-	for(int i = 0; i < numTargets; i++){
+	for(int i = 0; i < (int)targets.size(); i++){
 		ObjectInst *inst = targets[i];
 		rw::V3d hitPos, hitNormal;
 		if(!GetGroundPlacementSurface(inst->m_translation, &hitPos, &hitNormal, true)){
@@ -1210,9 +1243,13 @@ SnapSelectedToGround(bool alignRotation)
 		if(length(delta) < 0.0001f && (!alignRotation || memcmp(&newRot, &inst->m_rotation, sizeof(newRot)) == 0))
 			continue;
 
-		UndoTransform *self = FindOrAddTransform(transforms, &numTransforms, inst);
-		if(self == nil)
+		size_t before = transforms.size();
+		int selfIndex = FindOrAddTransform(transforms, inst);
+		if(selfIndex < 0){
+			capped = true;
 			break;
+		}
+		UndoTransform *self = &transforms[selfIndex];
 		self->flags |= UNDO_TRANSFORM_POS;
 		self->newPos = newPos;
 		if(alignRotation){
@@ -1221,35 +1258,48 @@ SnapSelectedToGround(bool alignRotation)
 		}
 
 		if(inst->m_lod && !inst->m_lod->m_isDeleted){
-			UndoTransform *lod = FindOrAddTransform(transforms, &numTransforms, inst->m_lod);
-			if(lod){
-				lod->flags |= UNDO_TRANSFORM_POS;
-				lod->newPos = add(inst->m_lod->m_translation, delta);
+			int lodIndex = FindOrAddTransform(transforms, inst->m_lod);
+			if(lodIndex < 0){
+				transforms.resize(before);
+				capped = true;
+				continue;
 			}
+			UndoTransform *lod = &transforms[lodIndex];
+			lod->flags |= UNDO_TRANSFORM_POS;
+			lod->newPos = add(inst->m_lod->m_translation, delta);
 		}else{
+			bool groupFits = true;
 			for(CPtrNode *p = instances.first; p; p = p->next){
 				ObjectInst *child = (ObjectInst*)p->item;
 				if(child != inst && child->m_lod == inst && !child->m_isDeleted){
-					UndoTransform *childTransform = FindOrAddTransform(transforms, &numTransforms, child);
-					if(childTransform){
-						childTransform->flags |= UNDO_TRANSFORM_POS;
-						childTransform->newPos = add(child->m_translation, delta);
+					int childIndex = FindOrAddTransform(transforms, child);
+					if(childIndex < 0){
+						groupFits = false;
+						break;
 					}
+					UndoTransform *childTransform = &transforms[childIndex];
+					childTransform->flags |= UNDO_TRANSFORM_POS;
+					childTransform->newPos = add(child->m_translation, delta);
 				}
+			}
+			if(!groupFits){
+				transforms.resize(before);
+				capped = true;
+				continue;
 			}
 		}
 		snapped++;
 	}
 
-	if(numTransforms == 0){
+	if(transforms.empty()){
 		if(skipped > 0)
 			Toast(TOAST_SELECTION, "Ground snap skipped %d instance(s)", skipped);
 		return 0;
 	}
 
-	for(int i = 0; i < numTransforms; i++)
+	for(int i = 0; i < (int)transforms.size(); i++)
 		ApplyTransform(transforms[i]);
-	UndoRecordTransformBatch(transforms, numTransforms);
+	UndoRecordTransformBatch(transforms.data(), (int)transforms.size());
 
 	if(snapped > 0){
 		if(alignRotation)
@@ -1259,6 +1309,8 @@ SnapSelectedToGround(bool alignRotation)
 	}
 	if(skipped > 0)
 		Toast(TOAST_SELECTION, "Skipped %d linked/conflicting instance(s)", skipped);
+	if(capped)
+		Toast(TOAST_SELECTION, "Snap skipped some linked instances at the %d object cap", MAX_BATCH_OBJECTS);
 	return snapped;
 }
 
@@ -1679,6 +1731,8 @@ handleRectSelect(void)
 		int rh = (int)(ctx.y2 - ctx.y1 + 0.5f);
 		int32 codes[MAX_BATCH_OBJECTS];
 		int numCodes = gta::GetColourCodesInRect(rx, ry, rw, rh, codes, MAX_BATCH_OBJECTS);
+		if(numCodes >= MAX_BATCH_OBJECTS)
+			Toast(TOAST_SELECTION, "Rectangle select limited to %d object(s)", MAX_BATCH_OBJECTS);
 
 		int count = 0;
 		for(int i = 0; i < numCodes; i++){
@@ -2037,8 +2091,7 @@ dogizmo(void)
 	static float dragGroundOffset;
 	static rw::Quat dragGroundBaseRot;
 	// Snapshot of all affected objects for multi-select translate
-	static UndoTransform dragTransforms[MAX_BATCH_OBJECTS];
-	static int dragNumTransforms;
+	static std::vector<UndoTransform> dragTransforms;
 
 	rw::Camera *cam;
 	rw::RawMatrix gizobj;
@@ -2092,24 +2145,21 @@ dogizmo(void)
 		}
 
 		// Build deduplicated snapshot of all affected objects
-		dragNumTransforms = 0;
+		dragTransforms.clear();
+		dragTransforms.reserve(1024);
 		bool dragOverflow = false;
+		if(!FindOrAddLinkedTransformGroup(dragTransforms, inst))
+			dragOverflow = true;
 		for(CPtrNode *p = selection.first; p; p = p->next){
 			ObjectInst *sel = (ObjectInst*)p->item;
 			if(sel->m_isDeleted)
 				continue;
-			if(FindOrAddTransform(dragTransforms, &dragNumTransforms, sel) == nil)
+			if(sel == inst)
+				continue;
+			if(!FindOrAddLinkedTransformGroup(dragTransforms, sel)){
 				dragOverflow = true;
-			// Include LOD if this object has one
-			if(sel->m_lod && !sel->m_lod->m_isDeleted)
-				if(FindOrAddTransform(dragTransforms, &dragNumTransforms, sel->m_lod) == nil)
-					dragOverflow = true;
-			// If this IS a LOD, include its HD children
-			for(CPtrNode *q = instances.first; q; q = q->next){
-				ObjectInst *child = (ObjectInst*)q->item;
-				if(child != sel && child->m_lod == sel && !child->m_isDeleted)
-					if(FindOrAddTransform(dragTransforms, &dragNumTransforms, child) == nil)
-						dragOverflow = true;
+				if((int)dragTransforms.size() >= MAX_BATCH_OBJECTS)
+					break;
 			}
 		}
 		if(dragOverflow)
@@ -2117,9 +2167,9 @@ dogizmo(void)
 	}
 	// Record undo when drag ends
 	if(!isUsing && wasDragging){
-		UndoTransform finalTransforms[MAX_BATCH_OBJECTS];
-		int numFinal = 0;
-		for(int i = 0; i < dragNumTransforms; i++){
+		std::vector<UndoTransform> finalTransforms;
+		finalTransforms.reserve(dragTransforms.size());
+		for(int i = 0; i < (int)dragTransforms.size(); i++){
 			ObjectInst *obj = dragTransforms[i].inst;
 			uint8 flags = 0;
 			if(length(sub(obj->m_translation, dragTransforms[i].oldPos)) >= 0.0001f)
@@ -2132,17 +2182,18 @@ dogizmo(void)
 					InsertInstIntoSectors(obj);
 				}
 				StampChangeSeq(obj);
-				UndoTransform &t = finalTransforms[numFinal++];
+				UndoTransform t = {};
 				t.inst = obj;
 				t.oldPos = dragTransforms[i].oldPos;
 				t.newPos = obj->m_translation;
 				t.oldRot = dragTransforms[i].oldRot;
 				t.newRot = obj->m_rotation;
 				t.flags = flags;
+				finalTransforms.push_back(t);
 			}
 		}
-		if(numFinal > 0)
-			UndoRecordTransformBatch(finalTransforms, numFinal);
+		if(!finalTransforms.empty())
+			UndoRecordTransformBatch(finalTransforms.data(), (int)finalTransforms.size());
 	}
 	wasDragging = isUsing;
 
@@ -2169,7 +2220,7 @@ dogizmo(void)
 
 			// Pass 1: compute new positions and rotations from snapshot
 			// (don't update matrices yet, so raycasts see old collision state)
-			for(int i = 0; i < dragNumTransforms; i++){
+			for(int i = 0; i < (int)dragTransforms.size(); i++){
 				ObjectInst *obj = dragTransforms[i].inst;
 				rw::V3d newPos = add(dragTransforms[i].oldPos, totalDelta);
 				obj->m_rotation = dragTransforms[i].oldRot;
@@ -2195,7 +2246,7 @@ dogizmo(void)
 				inst->m_rotation = newLeaderRot;
 
 			// Pass 2: update all matrices and frames at once
-			for(int i = 0; i < dragNumTransforms; i++){
+			for(int i = 0; i < (int)dragTransforms.size(); i++){
 				dragTransforms[i].inst->UpdateMatrix();
 				updateRwFrame(dragTransforms[i].inst);
 			}
@@ -2221,7 +2272,7 @@ dogizmo(void)
 			// conj(deltaQ) is the world-space delta; right-multiplying oldRot by deltaQ
 			// applies that world delta under this codebase's conj(m_rotation) convention.
 			rw::Quat worldQ = rw::conj(deltaQ);
-			for(int i = 0; i < dragNumTransforms; i++){
+			for(int i = 0; i < (int)dragTransforms.size(); i++){
 				ObjectInst *obj = dragTransforms[i].inst;
 				rw::V3d offset = sub(dragTransforms[i].oldPos, dragStartLeaderPos);
 				obj->m_translation = add(dragStartLeaderPos, rw::rotate(offset, worldQ));
