@@ -1151,6 +1151,79 @@ struct PendingSaveFile
 };
 
 static bool
+IsDefaultCustomIplLogicalPath(const char *path)
+{
+	return LogicalPathEquals(path, "data/maps/custom.ipl");
+}
+
+static bool
+LineExistsTrimmed(const std::string &text, const char *line)
+{
+	const char *start = text.c_str();
+	const char *end = start + text.size();
+	size_t lineLen = strlen(line);
+
+	while(start < end){
+		const char *lineStart = start;
+		const char *lineEnd = start;
+		while(lineEnd < end && *lineEnd != '\n' && *lineEnd != '\r')
+			lineEnd++;
+		const char *nextLine = lineEnd;
+		while(lineStart < lineEnd && isspace((unsigned char)*lineStart))
+			lineStart++;
+		while(lineEnd > lineStart && isspace((unsigned char)*(lineEnd-1)))
+			lineEnd--;
+		if((size_t)(lineEnd - lineStart) == lineLen &&
+		   strncmp(lineStart, line, lineLen) == 0)
+			return true;
+		while(nextLine < end && (*nextLine == '\n' || *nextLine == '\r'))
+			nextLine++;
+		start = nextLine;
+	}
+	return false;
+}
+
+static bool
+QueueModloaderCustomIplManifestSave(std::vector<PendingSaveFile> &pendingFiles)
+{
+	const char *manifestLogicalPath = "ariane_custom.txt";
+	const char *manifestLine = "IPL data/maps/custom.ipl";
+	char manifestPath[1024];
+
+	if(!BuildModloaderLogicalExportPath(manifestLogicalPath, manifestPath, sizeof(manifestPath)))
+		return false;
+
+	std::string out;
+	FILE *f = fopen(manifestPath, "rb");
+	if(f){
+		char buf[1024];
+		size_t n;
+		while((n = fread(buf, 1, sizeof(buf), f)) > 0)
+			out.append(buf, n);
+		fclose(f);
+	}
+	if(!LineExistsTrimmed(out, manifestLine)){
+		if(!out.empty() && out[out.size()-1] != '\n' && out[out.size()-1] != '\r')
+			out += "\n";
+		out += manifestLine;
+		out += "\n";
+	}
+
+	for(size_t i = 0; i < pendingFiles.size(); i++){
+		if(pendingFiles[i].finalPath == manifestPath){
+			pendingFiles[i].data.assign(out.begin(), out.end());
+			return true;
+		}
+	}
+
+	PendingSaveFile pending;
+	pending.finalPath = manifestPath;
+	pending.data.assign(out.begin(), out.end());
+	pendingFiles.push_back(pending);
+	return true;
+}
+
+static bool
 CommitPendingSaveFiles(std::vector<PendingSaveFile> &files)
 {
 	for(size_t i = 0; i < files.size(); i++){
@@ -1270,6 +1343,116 @@ AppendInstLine(std::string &out, ObjectInst *inst, int lodIdx, bool deleted)
 		out.append(linebuf, (size_t)written);
 }
 
+struct TextLodIndexState
+{
+	std::vector<std::pair<ObjectInst*, int>> instOutputIndices;
+	std::vector<int> oldOutputIndices;
+};
+
+static int
+FindTextOutputIndexForInst(const TextLodIndexState &state, ObjectInst *inst)
+{
+	for(size_t i = 0; i < state.instOutputIndices.size(); i++)
+		if(state.instOutputIndices[i].first == inst)
+			return state.instOutputIndices[i].second;
+	return -1;
+}
+
+static int
+FindAssociatedTextLodOutputIndex(ObjectInst *inst, const TextLodIndexState &state)
+{
+	if(inst == nil || !isSA())
+		return -1;
+
+	int lodObjId = GetLodForObject(inst->m_objectId);
+	if(lodObjId < 0 || lodObjId == inst->m_objectId)
+		return -1;
+
+	int bestIndex = -1;
+	float bestDistSq = 1.0e30f;
+	for(size_t i = 0; i < state.instOutputIndices.size(); i++){
+		ObjectInst *other = state.instOutputIndices[i].first;
+		if(other == nil || other == inst || other->m_isDeleted)
+			continue;
+		if(other->m_objectId != lodObjId)
+			continue;
+
+		float dx = inst->m_translation.x - other->m_translation.x;
+		float dy = inst->m_translation.y - other->m_translation.y;
+		float dz = inst->m_translation.z - other->m_translation.z;
+		float distSq = dx*dx + dy*dy + dz*dz;
+		if(distSq < bestDistSq){
+			bestDistSq = distSq;
+			bestIndex = state.instOutputIndices[i].second;
+		}
+	}
+
+	if(bestIndex >= 0 && bestDistSq <= sq(250.0f))
+		return bestIndex;
+	return -1;
+}
+
+static void
+BuildTextLodIndexState(ObjectInst **insts, int numInsts, bool compactDeletes,
+                       TextLodIndexState &state)
+{
+	int maxOldIndex = -1;
+	int outputIndex = 0;
+
+	state.instOutputIndices.clear();
+	state.oldOutputIndices.clear();
+
+	for(int i = 0; i < numInsts; i++)
+		if(insts[i] && insts[i]->m_iplIndex > maxOldIndex)
+			maxOldIndex = insts[i]->m_iplIndex;
+	if(maxOldIndex >= 0)
+		state.oldOutputIndices.assign(maxOldIndex + 1, -1);
+
+	for(int i = 0; i < numInsts; i++){
+		ObjectInst *inst = insts[i];
+		if(inst == nil)
+			continue;
+		if(compactDeletes && inst->m_isDeleted)
+			continue;
+		if(inst->m_isDeleted)
+			continue;
+
+		state.instOutputIndices.push_back(std::make_pair(inst, outputIndex));
+		if(inst->m_iplIndex >= 0 && inst->m_iplIndex < (int)state.oldOutputIndices.size())
+			state.oldOutputIndices[inst->m_iplIndex] = outputIndex;
+		outputIndex++;
+	}
+}
+
+static int
+ResolveTextOutputLodIndex(ObjectInst *inst, const TextLodIndexState &state)
+{
+	if(inst == nil || inst->m_isDeleted)
+		return inst ? inst->m_lodId : -1;
+
+	int selfIndex = FindTextOutputIndexForInst(state, inst);
+
+	if(inst->m_lod && !inst->m_lod->m_isDeleted){
+		int idx = FindTextOutputIndexForInst(state, inst->m_lod);
+		if(idx >= 0)
+			return idx;
+	}
+
+	if(inst->m_lodId >= 0 && inst->m_lodId < (int)state.oldOutputIndices.size()){
+		int idx = state.oldOutputIndices[inst->m_lodId];
+		if(idx >= 0 && idx != selfIndex)
+			return idx;
+	}
+
+	if(inst->m_lodId >= 0){
+		int associatedIdx = FindAssociatedTextLodOutputIndex(inst, state);
+		if(associatedIdx >= 0 && associatedIdx != selfIndex)
+			return associatedIdx;
+	}
+
+	return -1;
+}
+
 static bool
 BuildSceneFileContents(const char *filename, ObjectInst **insts, int numInsts, bool compactDeletes,
                        std::string &out)
@@ -1277,8 +1460,10 @@ BuildSceneFileContents(const char *filename, ObjectInst **insts, int numInsts, b
 	FILE *fin;
 	ObjectInst *inst;
 	char realpath[1024];
+	TextLodIndexState lodIndexState;
 
 	out.clear();
+	BuildTextLodIndexState(insts, numInsts, compactDeletes, lodIndexState);
 	ResolveSceneReadPath(filename, realpath, sizeof(realpath));
 	fin = fopen(realpath, "rb");
 	if(fin){
@@ -1298,7 +1483,8 @@ BuildSceneFileContents(const char *filename, ObjectInst **insts, int numInsts, b
 						inst = insts[i];
 						if(compactDeletes && inst->m_isDeleted)
 							continue;
-						AppendInstLine(out, inst, inst->m_lodId, !compactDeletes && inst->m_isDeleted);
+						AppendInstLine(out, inst, ResolveTextOutputLodIndex(inst, lodIndexState),
+						               !compactDeletes && inst->m_isDeleted);
 					}
 					instWritten = true;
 				}else
@@ -1318,7 +1504,8 @@ BuildSceneFileContents(const char *filename, ObjectInst **insts, int numInsts, b
 				inst = insts[i];
 				if(compactDeletes && inst->m_isDeleted)
 					continue;
-				AppendInstLine(out, inst, inst->m_lodId, !compactDeletes && inst->m_isDeleted);
+				AppendInstLine(out, inst, ResolveTextOutputLodIndex(inst, lodIndexState),
+				               !compactDeletes && inst->m_isDeleted);
 			}
 			out += "end\n";
 		}
@@ -1328,7 +1515,8 @@ BuildSceneFileContents(const char *filename, ObjectInst **insts, int numInsts, b
 			inst = insts[i];
 			if(compactDeletes && inst->m_isDeleted)
 				continue;
-			AppendInstLine(out, inst, inst->m_lodId, !compactDeletes && inst->m_isDeleted);
+			AppendInstLine(out, inst, ResolveTextOutputLodIndex(inst, lodIndexState),
+			               !compactDeletes && inst->m_isDeleted);
 		}
 		out += "end\n";
 	}
@@ -1378,6 +1566,10 @@ QueueSceneFileSave(const char *filename, ObjectInst **insts, int numInsts, bool 
 	pending.finalPath = exportPath;
 	pending.data.assign(out.begin(), out.end());
 	pendingFiles.push_back(pending);
+	if(gSaveDestination == SAVE_DESTINATION_MODLOADER &&
+	   IsDefaultCustomIplLogicalPath(filename) &&
+	   !QueueModloaderCustomIplManifestSave(pendingFiles))
+		return false;
 	return true;
 }
 

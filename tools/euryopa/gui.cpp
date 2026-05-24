@@ -3992,6 +3992,7 @@ uiKeyboardShortcutsWindow(void)
 	};
 
 	ImGui::SetNextWindowSize(ImVec2(780, 620), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSizeConstraints(ImVec2(420, 260), ImVec2(10000, 10000));
 	ImGui::Begin(ICON_FA_LIST " Keyboard Shortcuts", &showShortcutsWindow);
 
 	static ImGuiTextFilter filter;
@@ -4003,9 +4004,13 @@ uiKeyboardShortcutsWindow(void)
 
 	int shown = 0;
 	const char *lastSection = nil;
+	ImVec2 scrollSize = ImGui::GetContentRegionAvail();
+	if(scrollSize.y < 140.0f)
+		scrollSize.y = 140.0f;
+	ImGui::BeginChild("##ShortcutsScroll", scrollSize, false, ImGuiWindowFlags_HorizontalScrollbar);
 	ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-		ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY;
-	if(ImGui::BeginTable("##Shortcuts", 4, flags, ImVec2(0, 0))){
+		ImGuiTableFlags_Resizable;
+	if(ImGui::BeginTable("##Shortcuts", 4, flags)){
 		ImGui::TableSetupColumn("Section", ImGuiTableColumnFlags_WidthFixed, 120.0f);
 		ImGui::TableSetupColumn("Shortcut", ImGuiTableColumnFlags_WidthFixed, 180.0f);
 		ImGui::TableSetupColumn("Action");
@@ -4039,9 +4044,9 @@ uiKeyboardShortcutsWindow(void)
 
 		ImGui::EndTable();
 	}
-
 	if(shown == 0)
 		ImGui::TextDisabled("No shortcuts match the current filter.");
+	ImGui::EndChild();
 
 	ImGui::End();
 }
@@ -4102,10 +4107,6 @@ uiHelpWindow(void)
 				Toast(TOAST_SAVE, "Anonymous telemetry disabled");
 		}
 		ImGui::TextDisabled("Enabled by default. Disable if you do not want usage pings.");
-	}
-
-	if(ImGui::CollapsingHeader("Dear ImGUI help")){
-		ImGui::ShowUserGuide();
 	}
 
 	ImGui::End();
@@ -6613,6 +6614,7 @@ static void
 uiBrowserWindow(void)
 {
 	ImGui::SetNextWindowSize(ImVec2(560, 700), ImGuiCond_FirstUseEver);
+	ImGui::SetNextWindowSizeConstraints(ImVec2(360, 360), ImVec2(10000, 10000));
 	ImGui::Begin(ICON_FA_MAGNIFYING_GLASS " Object Browser", &showBrowserWindow);
 
 	int selId = GetSpawnObjectId();
@@ -7077,14 +7079,14 @@ gui(void)
 			for(CPtrNode *p = selection.first; p; p = p->next) before++;
 			CopySelected();
 			if(before > 0)
-				Toast(TOAST_COPY_PASTE, "Copied %d instance(s)", before);
+				Toast(TOAST_COPY_PASTE, "Copied %d instance(s)", min(before, MAX_BATCH_OBJECTS));
 		}
 		if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('X')){
 			int before = 0;
 			for(CPtrNode *p = selection.first; p; p = p->next) before++;
 			CutSelected();
 			if(before > 0)
-				Toast(TOAST_COPY_PASTE, "Cut %d instance(s)", before);
+				Toast(TOAST_COPY_PASTE, "Cut %d instance(s)", min(before, MAX_BATCH_OBJECTS));
 		}
 		if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('V')){
 			int pasted = PasteClipboard();
@@ -7123,7 +7125,7 @@ gui(void)
 			for(CPtrNode *p = selection.first; p; p = p->next) count++;
 			if(count > 0){
 				DeleteSelected();
-				Toast(TOAST_DELETE, "Deleted %d instance(s)", count);
+				Toast(TOAST_DELETE, "Deleted %d instance(s)", min(count, MAX_BATCH_OBJECTS));
 			}
 		}
 	}
