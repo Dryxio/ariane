@@ -804,6 +804,73 @@ LoadScene(const char *filename)
 
 void LoadMapZones(const char *filename) { LoadDataFile(filename, zoneDesc); }
 
+static void
+ExtractFilenameParts(const char *path, char *basename, size_t basenameSize, char *ext, size_t extSize)
+{
+	const char *slash, *dot;
+	size_t basenameLen, extLen;
+
+	if(basenameSize > 0)
+		basename[0] = '\0';
+	if(extSize > 0)
+		ext[0] = '\0';
+	if(path == nil)
+		return;
+
+	slash = strrchr(path, '/');
+	const char *backslash = strrchr(path, '\\');
+	if(slash == nil || (backslash && backslash > slash))
+		slash = backslash;
+	slash = slash ? slash + 1 : path;
+
+	dot = strrchr(slash, '.');
+	if(dot == nil || dot == slash)
+		dot = slash + strlen(slash);
+
+	basenameLen = dot - slash;
+	if(basenameSize > 0){
+		if(basenameLen >= basenameSize)
+			basenameLen = basenameSize-1;
+		for(size_t i = 0; i < basenameLen; i++){
+			char c = slash[i];
+			if(c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+			basename[i] = c;
+		}
+		basename[basenameLen] = '\0';
+	}
+
+	if(*dot == '.')
+		dot++;
+	else
+		dot = "";
+	extLen = strlen(dot);
+	if(extSize > 0){
+		if(extLen >= extSize)
+			extLen = extSize-1;
+		for(size_t i = 0; i < extLen; i++){
+			char c = dot[i];
+			if(c >= 'A' && c <= 'Z') c = c - 'A' + 'a';
+			ext[i] = c;
+		}
+		ext[extLen] = '\0';
+	}
+}
+
+static const char*
+ResolveTexDictionaryPath(const char *path)
+{
+	char basename[64], ext[8];
+	const char *resolved = ModloaderGetSourcePath(path);
+	if(resolved)
+		return resolved;
+
+	ExtractFilenameParts(path, basename, sizeof(basename), ext, sizeof(ext));
+	resolved = ModloaderFindOverride(basename, ext);
+	if(resolved)
+		return resolved;
+
+	return getPath(path);
+}
 
 rw::TexDictionary*
 LoadTexDictionary(const char *path)
@@ -812,7 +879,7 @@ LoadTexDictionary(const char *path)
 
 	StreamFile stream;
 	TexDictionary *txd = nil;
-	if(stream.open(getPath(path), "rb")){
+	if(stream.open(ResolveTexDictionaryPath(path), "rb")){
 		if(findChunk(&stream, rw::ID_TEXDICTIONARY, nil, nil)){
 			txd = TexDictionary::streamRead(&stream);
 			ConvertTxd(txd);

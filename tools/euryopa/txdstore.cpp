@@ -143,8 +143,11 @@ AddTexDictionaryTextures(rw::TexDictionary *dst, rw::TexDictionary *src)
 {
 	if(dst == nil || src == nil)
 		return;
-	FORLIST(lnk, src->textures)
-		dst->addFront(rw::Texture::fromDict(lnk));
+	while(!src->textures.isEmpty()){
+		rw::Texture *tex = rw::Texture::fromDict(src->textures.link.next);
+		src->remove(tex);
+		dst->addFront(tex);
+	}
 }
 
 void

@@ -1054,7 +1054,9 @@ DeleteAllInstances(void)
 
 // Object Spawner state
 bool gPlaceMode;
+bool gPrefabPlaceMode;
 static int spawnObjectId = -1;
+static char prefabPlacePath[1024];
 static GameFile *customIplFile = nil;
 static const char *DEFAULT_CUSTOM_IPL_PATH = "data\\maps\\custom.ipl";
 static const char *CUSTOM_IMPORT_IDE_PATH = "data/maps/ariane/custom.ide";
@@ -1379,6 +1381,30 @@ SpawnExitPlaceMode(void)
 {
 	gPlaceMode = false;
 	spawnObjectId = -1;
+}
+
+void
+EnterPrefabPlaceMode(const char *path)
+{
+	if(path == nil || path[0] == '\0')
+		return;
+	strncpy(prefabPlacePath, path, sizeof(prefabPlacePath));
+	prefabPlacePath[sizeof(prefabPlacePath)-1] = '\0';
+	gPrefabPlaceMode = true;
+	gPlaceMode = false;
+}
+
+void
+ExitPrefabPlaceMode(void)
+{
+	gPrefabPlaceMode = false;
+	prefabPlacePath[0] = '\0';
+}
+
+const char*
+GetPrefabPlacePath(void)
+{
+	return prefabPlacePath;
 }
 
 // Object Browser categories
@@ -1843,7 +1869,7 @@ renderObjectToRaster(int objectId, rw::Raster *colorRaster, rw::Raster *depthRas
 	camFrame->updateObjects();
 
 	if(atm){ atm->getFrame()->destroy(); atm->destroy(); }
-	if(clump){ clump->getFrame()->destroy(); clump->destroy(); }
+	if(clump){ clump->destroy(); }
 	Timecycle::SetLights();
 	return true;
 }
@@ -1980,7 +2006,7 @@ renderPrefabToRaster(const char *path, rw::Raster *colorRaster, rw::Raster *dept
 		}
 
 		if(atm){ atm->getFrame()->destroy(); atm->destroy(); }
-		if(clump){ clump->getFrame()->destroy(); clump->destroy(); }
+		if(clump){ clump->destroy(); }
 	}
 
 	cam->endUpdate();
@@ -2193,7 +2219,7 @@ RenderPreviewObject(int objectId)
 
 	if(previewCloneId != objectId){
 		if(previewAtm){ previewAtm->getFrame()->destroy(); previewAtm->destroy(); previewAtm = nil; }
-		if(previewClump){ previewClump->getFrame()->destroy(); previewClump->destroy(); previewClump = nil; }
+		if(previewClump){ previewClump->destroy(); previewClump = nil; }
 		previewCloneId = objectId;
 
 		if(obj->m_type == ObjectDef::ATOMIC && obj->m_atomics[0]){
@@ -3044,15 +3070,12 @@ ExportSelectedTxds(const char *dir, int *numFailed)
 }
 
 int
-ImportPrefab(const char *path)
+ImportPrefabAt(const char *path, rw::V3d spawnPos)
 {
 	PrefabEntry entries[256];
 	int numEntries = 0;
 	if(!ReadPrefabEntries(path, entries, 256, &numEntries, true))
 		return 0;
-
-	// Spawn position: in front of camera
-	rw::V3d spawnPos = add(TheCamera.m_position, scale(TheCamera.m_at, 50.0f));
 
 	GameFile *file = GetOrCreateCustomIplFile();
 	int maxIdx = GetMaxIplIndexForFile(file);
@@ -3154,6 +3177,35 @@ ImportPrefab(const char *path)
 
 	log("ImportPrefab: placed %d instance(s) from %s\n", numPasted, path);
 	return numPasted;
+}
+
+int
+ImportPrefab(const char *path)
+{
+	rw::V3d spawnPos = add(TheCamera.m_position, scale(TheCamera.m_at, 50.0f));
+	return ImportPrefabAt(path, spawnPos);
+}
+
+void
+RenderPrefabPlacementGhost(const char *path, rw::V3d spawnPos)
+{
+	PrefabEntry entries[256];
+	int numEntries = 0;
+	if(path == nil || path[0] == '\0')
+		return;
+	if(!ReadPrefabEntries(path, entries, 256, &numEntries, false))
+		return;
+
+	rw::RGBA col = { 80, 180, 255, 95 };
+	for(int i = 0; i < numEntries; i++){
+		PrefabEntry *e = &entries[i];
+		rw::V3d pos;
+		pos.x = spawnPos.x + e->relX;
+		pos.y = spawnPos.y + e->relY;
+		pos.z = spawnPos.z + e->relZ;
+		rw::Quat rot = { e->rotX, e->rotY, e->rotZ, e->rotW };
+		RenderPlacementGhost(e->objectId, pos, rot, col);
+	}
 }
 
 int numSectorsX, numSectorsY;

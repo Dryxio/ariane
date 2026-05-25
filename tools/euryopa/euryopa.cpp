@@ -1317,19 +1317,30 @@ SnapSelectedToGround(bool alignRotation)
 rw::V3d
 GetPlacementPosition(void)
 {
+	rw::V3d hitPos, hitNormal;
+	GetPlacementSurfaceHit(&hitPos, &hitNormal);
+	hitPos.z += GetPlacementBaseOffset(GetSpawnObjectId());
+	return hitPos;
+}
+
+bool
+GetPlacementSurfaceHit(rw::V3d *hitPos, rw::V3d *hitNormal)
+{
 	rw::V3d origin = TheCamera.m_position;
 	rw::V3d dir = normalize(TheCamera.m_mouseDir);
 	Ray ray;
 	ray.start = origin;
 	ray.dir = dir;
-	float baseOffset = GetPlacementBaseOffset(GetSpawnObjectId());
 
 	if(gPlaceSnapToObjects){
-		ObjectInst *targetInst = GetInstanceByID(pick());
-		rw::V3d hitPos;
-		if(CanSnapToInst(targetInst) && IntersectRayColModel(ray, targetInst, &hitPos)){
-			hitPos.z += baseOffset;
-			return hitPos;
+		float bestT = 1.0e30f;
+		ObjectInst *targetInst = GetVisibleInstUnderRay(ray, nil, &bestT);
+		rw::V3d p, n;
+		if(CanSnapToInst(targetInst) && !targetInst->m_selected && IntersectRayColModelDetailed(ray, targetInst, &p, &n)){
+			if(n.z < 0.0f) n = scale(n, -1.0f);
+			if(hitPos) *hitPos = p;
+			if(hitNormal) *hitNormal = n;
+			return true;
 		}
 	}
 
@@ -1349,13 +1360,18 @@ GetPlacementPosition(void)
 	}
 
 	if(gPlaceSnapToGround){
-		rw::V3d groundHit;
-		if(GetGroundPlacementSurface(surfacePos, &groundHit))
+		rw::V3d groundHit, groundNormal = { 0.0f, 0.0f, 1.0f };
+		if(GetGroundPlacementSurface(surfacePos, &groundHit, &groundNormal)){
 			surfacePos = groundHit;
-	}
+			if(hitNormal) *hitNormal = groundNormal;
+		}else if(hitNormal)
+			*hitNormal = { 0.0f, 0.0f, 1.0f };
+	}else if(hitNormal)
+		*hitNormal = { 0.0f, 0.0f, 1.0f };
 
-	surfacePos.z += baseOffset;
-	return surfacePos;
+	if(hitPos)
+		*hitPos = surfacePos;
+	return true;
 }
 
 // --- Brush tool ---
@@ -1421,6 +1437,8 @@ EnterBrushMode(int objectId)
 	// Mutually exclusive with place mode
 	if(gPlaceMode)
 		SpawnExitPlaceMode();
+	if(gPrefabPlaceMode)
+		ExitPrefabPlaceMode();
 	SetSpawnObjectId(objectId);
 	gBrushMode = true;
 }
@@ -1765,6 +1783,23 @@ handleTool(void)
 	// Water edit mode intercepts all clicks
 	if(WaterLevel::gWaterEditMode){
 		WaterLevel::HandleWaterTool();
+		return;
+	}
+
+	// Prefab placement mode intercepts all clicks
+	if(gPrefabPlaceMode){
+		if(CPad::IsMButtonClicked(1)){
+			rw::V3d hitPos, hitNormal;
+			GetPlacementSurfaceHit(&hitPos, &hitNormal);
+			ImportPrefabAt(GetPrefabPlacePath(), hitPos);
+			if(!CPad::IsKeyDown(KEY_LSHIFT) && !CPad::IsKeyDown(KEY_RSHIFT))
+				ExitPrefabPlaceMode();
+			return;
+		}
+		if(CPad::IsMButtonClicked(2) || CPad::IsKeyJustDown(KEY_ESC)){
+			ExitPrefabPlaceMode();
+			return;
+		}
 		return;
 	}
 
@@ -2409,6 +2444,28 @@ Draw(void)
 	RenderTransparent();
 	if(gRenderLightEffects)
 		Effects::RenderLights();
+
+	if(gPlaceMode && GetSpawnObjectId() >= 0){
+		ImGuiIO &io = ImGui::GetIO();
+		if(!io.WantCaptureMouse){
+			rw::V3d hitPos, hitNormal;
+			if(GetPlacementSurfaceHit(&hitPos, &hitNormal)){
+				rw::V3d pos = hitPos;
+				pos.z += GetPlacementBaseOffset(GetSpawnObjectId());
+				rw::Quat rot = { 0.0f, 0.0f, 0.0f, 1.0f };
+				rw::RGBA col = { 80, 220, 120, 110 };
+				RenderPlacementGhost(GetSpawnObjectId(), pos, rot, col);
+			}
+		}
+	}
+	if(gPrefabPlaceMode){
+		ImGuiIO &io = ImGui::GetIO();
+		if(!io.WantCaptureMouse){
+			rw::V3d hitPos, hitNormal;
+			if(GetPlacementSurfaceHit(&hitPos, &hitNormal))
+				RenderPrefabPlacementGhost(GetPrefabPlacePath(), hitPos);
+		}
+	}
 	// DEBUG render object picking
 	//RenderEverythingColourCoded();
 
