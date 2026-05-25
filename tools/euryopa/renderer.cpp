@@ -394,6 +394,123 @@ ProcessLodList(void)
 
 static rw::RGBA highlightColor;
 
+static void
+BuildGhostMatrix(rw::Matrix *matrix, const rw::Quat &rotation, const rw::V3d &translation)
+{
+	if(isSA() && fabs(rotation.x) <= 0.05f && fabs(rotation.y) <= 0.05f){
+		float w = rotation.w;
+		if(w < -1.0f) w = -1.0f;
+		if(w > 1.0f) w = 1.0f;
+		float heading = acosf(w) * (rotation.z < 0.0f ? 2.0f : -2.0f);
+		float s = sinf(heading);
+		float c = cosf(heading);
+
+		matrix->setIdentity();
+		matrix->right = { c, s, 0.0f };
+		matrix->up = { -s, c, 0.0f };
+		matrix->at = { 0.0f, 0.0f, 1.0f };
+		matrix->flags = rw::Matrix::TYPEORTHONORMAL;
+	}else
+		matrix->rotate(conj(rotation), rw::COMBINEREPLACE);
+	matrix->translate(&translation, rw::COMBINEPOSTCONCAT);
+}
+
+static void
+SetClumpRenderCB(rw::Clump *clump, rw::Atomic::RenderCB cb)
+{
+	if(clump == nil)
+		return;
+	FORLIST(lnk, clump->atomics){
+		rw::Atomic *atomic = rw::Atomic::fromClump(lnk);
+		atomic->setRenderCB(cb);
+	}
+}
+
+void
+RenderPlacementGhost(int objectId, rw::V3d position, rw::Quat rotation, rw::RGBA color)
+{
+	if(colourCodePipe == nil || objectId < 0)
+		return;
+
+	ObjectDef *obj = GetObjectDef(objectId);
+	if(obj == nil)
+		return;
+	if(!obj->IsLoaded()){
+		RequestObject(objectId);
+		return;
+	}
+
+	static int ghostObjectId = -1;
+	static rw::Atomic *ghostAtomic = nil;
+	static rw::Clump *ghostClump = nil;
+
+	if(ghostObjectId != objectId){
+		if(ghostAtomic){
+			ghostAtomic->getFrame()->destroy();
+			ghostAtomic->destroy();
+			ghostAtomic = nil;
+		}
+		if(ghostClump){
+			ghostClump->destroy();
+			ghostClump = nil;
+		}
+		ghostObjectId = objectId;
+
+		if(obj->m_type == ObjectDef::ATOMIC && obj->m_atomics[0]){
+			ghostAtomic = obj->m_atomics[0]->clone();
+			if(ghostAtomic){
+				rw::Frame *f = rw::Frame::create();
+				if(f)
+					ghostAtomic->setFrame(f);
+				else{
+					ghostAtomic->destroy();
+					ghostAtomic = nil;
+				}
+			}
+		}else if(obj->m_type == ObjectDef::CLUMP && obj->m_clump){
+			ghostClump = obj->m_clump->clone();
+			SetClumpRenderCB(ghostClump, myRenderCB);
+		}
+		if(ghostAtomic)
+			ghostAtomic->setRenderCB(myRenderCB);
+	}
+
+	if(ghostAtomic == nil && ghostClump == nil)
+		return;
+
+	rw::Matrix matrix;
+	BuildGhostMatrix(&matrix, rotation, position);
+
+	int32 zwrite = GetRenderState(rw::ZWRITEENABLE);
+	int32 fog = rw::GetRenderState(rw::FOGENABLE);
+	int32 vertexAlpha = GetRenderState(rw::VERTEXALPHA);
+	int32 aref = GetRenderState(rw::ALPHATESTREF);
+	uint32 oldCode = gta::renderColourCoded;
+	rw::RGBA oldColor = gta::colourCode;
+
+	SetRenderState(rw::ZWRITEENABLE, 0);
+	SetRenderState(rw::FOGENABLE, 0);
+	SetRenderState(rw::VERTEXALPHA, 1);
+	SetRenderState(rw::ALPHATESTREF, 0);
+	gta::renderColourCoded = 1;
+	gta::colourCode = color;
+
+	if(ghostAtomic){
+		ghostAtomic->getFrame()->transform(&matrix, rw::COMBINEREPLACE);
+		ghostAtomic->render();
+	}else if(ghostClump){
+		ghostClump->getFrame()->transform(&matrix, rw::COMBINEREPLACE);
+		ghostClump->render();
+	}
+
+	gta::colourCode = oldColor;
+	gta::renderColourCoded = oldCode;
+	SetRenderState(rw::ZWRITEENABLE, zwrite);
+	SetRenderState(rw::FOGENABLE, fog);
+	SetRenderState(rw::VERTEXALPHA, vertexAlpha);
+	SetRenderState(rw::ALPHATESTREF, aref);
+}
+
 void
 myRenderCB(rw::Atomic *atomic)
 {

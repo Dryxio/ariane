@@ -6504,11 +6504,10 @@ importBrowserPrefab(int prefabIndex)
 {
 	if(prefabIndex < 0 || prefabIndex >= gBrowserNumPrefabs)
 		return;
-	int imported = ImportPrefab(gBrowserPrefabPaths[prefabIndex]);
-	if(imported > 0)
-		Toast(TOAST_SPAWN, "Imported %d instance(s) from prefab", imported);
-	else
-		Toast(TOAST_SPAWN, "Failed to import prefab");
+	if(gPlaceMode) SpawnExitPlaceMode();
+	if(gBrushMode) ExitBrushMode();
+	EnterPrefabPlaceMode(gBrowserPrefabPaths[prefabIndex]);
+	Toast(TOAST_SPAWN, "Prefab placement mode");
 }
 
 static void
@@ -6657,6 +6656,7 @@ uiBrowserWindow(void)
 			}else{
 				if(ImGui::Button("Place")){
 					if(gBrushMode) ExitBrushMode();
+					if(gPrefabPlaceMode) ExitPrefabPlaceMode();
 					gPlaceMode = true;
 				}
 			}
@@ -6869,8 +6869,12 @@ uiBrowserWindow(void)
 				getPrefabDisplayName(gBrowserPrefabFiles[gBrowserSelectedPrefab], name, sizeof(name));
 				ImGui::Text("%s", name);
 				ImGui::SameLine();
-				if(ImGui::Button("Import Selected"))
-					importBrowserPrefab(gBrowserSelectedPrefab);
+				if(ImGui::Button(gPrefabPlaceMode ? "Exit Placement" : "Place Selected")){
+					if(gPrefabPlaceMode)
+						ExitPrefabPlaceMode();
+					else
+						importBrowserPrefab(gBrowserSelectedPrefab);
+				}
 				ImGui::Separator();
 			}
 
@@ -7225,6 +7229,7 @@ gui(void)
 		showBrowserWindow ^= 1;
 		if(!showBrowserWindow){
 			if(gPlaceMode) SpawnExitPlaceMode();
+			if(gPrefabPlaceMode) ExitPrefabPlaceMode();
 			if(gBrushMode) ExitBrushMode();
 		}
 	}
@@ -7233,6 +7238,7 @@ gui(void)
 		// ImGui X button can set showBrowserWindow to false
 		if(!showBrowserWindow){
 			if(gPlaceMode) SpawnExitPlaceMode();
+			if(gPrefabPlaceMode) ExitPrefabPlaceMode();
 			if(gBrushMode) ExitBrushMode();
 		}
 	}
@@ -7247,6 +7253,8 @@ gui(void)
 			WaterLevel::gWaterSubMode = 0;
 		}else if(gBrushMode){
 			ExitBrushMode();
+		}else if(gPrefabPlaceMode){
+			ExitPrefabPlaceMode();
 		}else if(gPlaceMode)
 			SpawnExitPlaceMode();
 	}
@@ -7257,6 +7265,7 @@ gui(void)
 		if(WaterLevel::gWaterEditMode){
 			ClearSelection();
 			if(gPlaceMode) SpawnExitPlaceMode();
+			if(gPrefabPlaceMode) ExitPrefabPlaceMode();
 			if(gBrushMode) ExitBrushMode();
 		}else{
 			WaterLevel::CancelCreateMode();
@@ -7308,6 +7317,74 @@ gui(void)
 			ImGui::TextColored(ImVec4(1,1,0,1),
 				"PLACE: %s  [Click=Place | Shift+Click=Multi | RMB/Esc=Cancel]", obj->m_name);
 			ImGui::End();
+
+			ImGuiIO &placeIO = ImGui::GetIO();
+			if(!placeIO.WantCaptureMouse){
+				rw::V3d hitPos, hitNormal;
+				if(GetPlacementSurfaceHit(&hitPos, &hitNormal)){
+					rw::V3d centerPos = hitPos;
+					centerPos.z += GetPlacementBaseOffset(GetSpawnObjectId());
+
+					rw::V3d centerScreen;
+					float csw, csh;
+					if(Sprite::CalcScreenCoors(centerPos, &centerScreen, &csw, &csh, false)){
+						ImDrawList *dl = ImGui::GetForegroundDrawList();
+						ImU32 outer = IM_COL32(80, 230, 130, 240);
+						ImU32 inner = IM_COL32(80, 230, 130, 70);
+						float r = 14.0f * csw;
+						if(r < 7.0f) r = 7.0f;
+						if(r > 52.0f) r = 52.0f;
+						ImVec2 c(centerScreen.x, centerScreen.y);
+						dl->AddCircleFilled(c, r, inner, 32);
+						dl->AddCircle(c, r, outer, 32, 1.6f);
+						dl->AddCircleFilled(c, 4.0f, outer, 12);
+
+						rw::V3d normalEnd = add(hitPos, scale(hitNormal, 2.0f));
+						normalEnd.z += GetPlacementBaseOffset(GetSpawnObjectId());
+						rw::V3d normalScreen;
+						float nsw, nsh;
+						if(Sprite::CalcScreenCoors(normalEnd, &normalScreen, &nsw, &nsh, false))
+							dl->AddLine(c, ImVec2(normalScreen.x, normalScreen.y), outer, 2.0f);
+					}
+				}
+			}
+		}
+	}
+
+	// Prefab placement overlay
+	if(gPrefabPlaceMode){
+		const char *path = GetPrefabPlacePath();
+		const char *name = strrchr(path, '/');
+		name = name ? name + 1 : path;
+		ImGui::SetNextWindowPos(ImVec2(10, ImGui::GetIO().DisplaySize.y - 40));
+		ImGui::SetNextWindowBgAlpha(0.6f);
+		ImGui::Begin("##PrefabPlaceMode", nil,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+			ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove |
+			ImGuiWindowFlags_NoFocusOnAppearing);
+		ImGui::TextColored(ImVec4(0.45f,0.80f,1.0f,1),
+			"PREFAB: %s  [Click=Place | Shift+Click=Multi | RMB/Esc=Cancel]", name);
+		ImGui::End();
+
+		ImGuiIO &prefabIO = ImGui::GetIO();
+		if(!prefabIO.WantCaptureMouse){
+			rw::V3d hitPos, hitNormal;
+			if(GetPlacementSurfaceHit(&hitPos, &hitNormal)){
+				rw::V3d centerScreen;
+				float csw, csh;
+				if(Sprite::CalcScreenCoors(hitPos, &centerScreen, &csw, &csh, false)){
+					ImDrawList *dl = ImGui::GetForegroundDrawList();
+					ImU32 outer = IM_COL32(80, 180, 255, 240);
+					ImU32 inner = IM_COL32(80, 180, 255, 60);
+					float r = 18.0f * csw;
+					if(r < 8.0f) r = 8.0f;
+					if(r > 64.0f) r = 64.0f;
+					ImVec2 c(centerScreen.x, centerScreen.y);
+					dl->AddCircleFilled(c, r, inner, 32);
+					dl->AddCircle(c, r, outer, 32, 1.8f);
+					dl->AddCircleFilled(c, 4.0f, outer, 12);
+				}
+			}
 		}
 	}
 
@@ -7397,7 +7474,7 @@ gui(void)
 	}
 
 	// Water hover hint (when not in water edit mode, mouse over water)
-	if(!WaterLevel::gWaterEditMode && !gPlaceMode && params.water == GAME_SA){
+	if(!WaterLevel::gWaterEditMode && !gPlaceMode && !gPrefabPlaceMode && params.water == GAME_SA){
 		ImGuiIO &hintIO = ImGui::GetIO();
 		if(!hintIO.WantCaptureMouse){
 			Ray ray;

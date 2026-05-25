@@ -446,6 +446,12 @@ int PasteClipboard(void);
 // Prefabs
 int ExportPrefab(const char *path);
 int ImportPrefab(const char *path);
+int ImportPrefabAt(const char *path, rw::V3d spawnPos);
+extern bool gPrefabPlaceMode;
+void EnterPrefabPlaceMode(const char *path);
+void ExitPrefabPlaceMode(void);
+const char *GetPrefabPlacePath(void);
+void RenderPrefabPlacementGhost(const char *path, rw::V3d spawnPos);
 int ExportSelectedDffs(const char *dir, int *numFailed);
 int ExportSelectedTxds(const char *dir, int *numFailed);
 
@@ -488,6 +494,7 @@ void SetCustomPlacementIpl(const char *logicalPath, const char *sourcePath, bool
 int GetLodForObject(int id);
 int SnapSelectedToGround(bool alignRotation);
 bool GetGroundPlacementSurface(rw::V3d pos, rw::V3d *hitPos, rw::V3d *hitNormal = nil, bool ignoreSelection = false);
+bool GetPlacementSurfaceHit(rw::V3d *hitPos, rw::V3d *hitNormal);
 rw::V3d GetPlacementPosition(void);
 float GetPlacementBaseOffset(int objectId);
 
@@ -503,6 +510,7 @@ void ToggleFavourite(int id);
 void InitPreviewRenderer(void);
 void ShutdownPreviewRenderer(void);
 void RenderPreviewObject(int objectId);
+void RenderPlacementGhost(int objectId, rw::V3d position, rw::Quat rotation, rw::RGBA color);
 void RenderRequestedObjectThumbnails(void);
 rw::Texture *GetObjectThumbnailTexture(int objectId);
 void RenderRequestedPrefabThumbnails(void);
