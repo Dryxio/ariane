@@ -100,13 +100,10 @@ LoadIpl(int slot, const char *sceneName)
 	file = nil;
 	buffer = nil;
 
-	if(loosePath){
+	if(ipl->imageIndex < 0 && loosePath){
 		buffer = ReadLooseFile(loosePath, &size);
-		if(buffer){
+		if(buffer)
 			looseFile = true;
-			if(ipl->imageIndex >= 0)
-				file = GetGameFileFromImage(ipl->imageIndex);
-		}
 	}
 	if(looseFile && *(uint32*)buffer != 0x79726E62){
 		free(buffer);

@@ -192,7 +192,37 @@ static bool
 IsLooseBasenameOverrideExt(const char *ext)
 {
 	return strcmp(ext, "dff") == 0 || strcmp(ext, "txd") == 0 ||
-	       strcmp(ext, "col") == 0;
+	       strcmp(ext, "col") == 0 || strcmp(ext, "ipl") == 0;
+}
+
+static bool
+IsBinaryIplFile(const char *path)
+{
+	FILE *f = fopen(path, "rb");
+	if(f == nil)
+		return false;
+
+	char magic[4];
+	bool ok = fread(magic, 1, sizeof(magic), f) == sizeof(magic) &&
+	          memcmp(magic, "bnry", sizeof(magic)) == 0;
+	fclose(f);
+	return ok;
+}
+
+static bool
+IsLooseBasenameOverrideFile(const ModFile &mf)
+{
+	if(strcmp(mf.ext, "dff") == 0 || strcmp(mf.ext, "txd") == 0 ||
+	   strcmp(mf.ext, "col") == 0)
+		return true;
+
+	// Match SA Mod Loader: loose IPLs participate in stream override lookup
+	// only when they are binary IPLs. Text IPLs are handled by path redirects
+	// or gta.dat-style additions instead.
+	if(strcmp(mf.ext, "ipl") == 0)
+		return IsBinaryIplFile(mf.physicalPath);
+
+	return false;
 }
 
 static int
@@ -854,7 +884,7 @@ ModloaderInit(void)
 		std::vector<ModFile> looseCandidates;
 		for(size_t i = 0; i < allModFiles.size(); i++){
 			ModFile &mf = allModFiles[i];
-			if(IsLooseBasenameOverrideExt(mf.ext))
+			if(IsLooseBasenameOverrideFile(mf))
 				looseCandidates.push_back(mf);
 		}
 		for(size_t i = 0; i < looseCandidates.size(); i++){
