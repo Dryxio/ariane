@@ -545,6 +545,19 @@ ReadDirEntryData(CdImage *cdimg, DirEntry *de, int *size, const char **outLooseO
 		}
 	}
 
+	if(de->filetype == FILE_IPL){
+		const char *overridePath = ModloaderFindOverride(de->name, "ipl");
+		if(overridePath){
+			uint8 *overrideBuffer = ReadLooseOverrideBuffer(overridePath, size);
+			if(overrideBuffer){
+				de->overridden = 1;
+				if(outLooseOverridePath)
+					*outLooseOverridePath = overridePath;
+				return overrideBuffer;
+			}
+		}
+	}
+
 	de->overridden = 0;
 	fseek(cdimg->file, de->position*2048, SEEK_SET);
 	fread(streamingBuffer, 1, de->archiveSize*2048, cdimg->file);
