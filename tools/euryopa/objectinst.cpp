@@ -1168,15 +1168,20 @@ IplEntryExistsInDat(const char *datfile, const char *iplpath)
 	if(f == nil) return false;
 	char line[512];
 	while(fgets(line, sizeof(line), f)){
-		// strip newline
-		char *p = line;
-		while(*p && *p != '\r' && *p != '\n') p++;
-		*p = '\0';
-		if(strncmp(line, "IPL ", 4) == 0){
-			if(strcmp(line+4, iplpath) == 0){
-				fclose(f);
-				return true;
-			}
+		char *entry = line;
+		while(*entry && isspace((unsigned char)*entry))
+			entry++;
+		if(rw::strncmp_ci(entry, "IPL", 3) != 0 || !isspace((unsigned char)entry[3]))
+			continue;
+		entry += 3;
+		while(*entry && isspace((unsigned char)*entry))
+			entry++;
+		char *end = entry + strlen(entry);
+		while(end > entry && isspace((unsigned char)*(end-1)))
+			*--end = '\0';
+		if(LogicalPathEquals(entry, iplpath)){
+			fclose(f);
+			return true;
 		}
 	}
 	fclose(f);
