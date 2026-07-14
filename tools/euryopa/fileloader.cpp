@@ -49,6 +49,17 @@ namespace FileLoader {
 
 GameFile *currentFile;
 void LoadObjectInstance(char *line);
+static std::vector<std::string> loadedScenePaths;
+
+static bool
+SceneWasAlreadyLoaded(const char *filename)
+{
+	for(size_t i = 0; i < loadedScenePaths.size(); i++)
+		if(LogicalPathEquals(loadedScenePaths[i].c_str(), filename))
+			return true;
+	loadedScenePaths.push_back(filename ? filename : "");
+	return false;
+}
 
 void*
 DatDesc::get(DatDesc *desc, const char *name)
@@ -780,6 +791,14 @@ SetupBigBuildings(void)
 void
 LoadScene(const char *filename)
 {
+	// A mod can expose the same IPL through gta.dat and a readme-style
+	// Mod Loader addition. Loading it twice duplicates both its text instances
+	// and all related streaming IPL instances, including LOD/collision state.
+	if(SceneWasAlreadyLoaded(filename)){
+		log("LoadScene: skipping duplicate IPL %s\n", filename ? filename : "(null)");
+		return;
+	}
+
 	tmpInsts.clear();
 	iplInstCounter = 0;
 	LoadDataFile(filename, iplDesc);
@@ -1538,12 +1557,24 @@ BuildSceneFileContents(const char *filename, ObjectInst **insts, int numInsts, b
 		bool inInstSection = false;
 		bool instWritten = false;
 
+		auto isSectionLine = [](const char *line, const char *section) {
+			while(*line && isspace((unsigned char)*line))
+				line++;
+			size_t sectionLen = strlen(section);
+			if(strncmp(line, section, sectionLen) != 0)
+				return false;
+			line += sectionLen;
+			while(*line && isspace((unsigned char)*line))
+				line++;
+			return *line == '\0';
+		};
+
 		while(fgets(linebuf, sizeof(linebuf), fin)){
 			char *s = linebuf;
 			while(*s && isspace((unsigned char)*s)) s++;
 
 			if(!inInstSection){
-				if(strncmp(s, "inst", 4) == 0 && (s[4] == '\0' || s[4] == '\n' || s[4] == '\r')){
+				if(isSectionLine(s, "inst")){
 					inInstSection = true;
 					out += "inst\n";
 					for(int i = 0; i < numInsts; i++){
@@ -1557,7 +1588,7 @@ BuildSceneFileContents(const char *filename, ObjectInst **insts, int numInsts, b
 				}else
 					out += linebuf;
 			}else{
-				if(strncmp(s, "end", 3) == 0 && (s[3] == '\0' || s[3] == '\n' || s[3] == '\r')){
+				if(isSectionLine(s, "end")){
 					out += "end\n";
 					inInstSection = false;
 				}
