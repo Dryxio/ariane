@@ -1498,10 +1498,14 @@ BuildTextLodIndexState(ObjectInst **insts, int numInsts, bool compactDeletes,
 		ObjectInst *inst = insts[i];
 		if(inst == nil)
 			continue;
-		if(compactDeletes && inst->m_isDeleted)
+		if(inst->m_isDeleted){
+			// Text-only IPL saves retain deleted instances as commented
+			// placeholders, and the loader counts each placeholder as an
+			// IPL index slot. Keep output indices aligned with that layout.
+			if(!compactDeletes)
+				outputIndex++;
 			continue;
-		if(inst->m_isDeleted)
-			continue;
+		}
 
 		state.instOutputIndices.push_back(std::make_pair(inst, outputIndex));
 		if(inst->m_iplIndex >= 0 && inst->m_iplIndex < (int)state.oldOutputIndices.size())
