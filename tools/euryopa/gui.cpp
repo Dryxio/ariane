@@ -2478,6 +2478,11 @@ buildCustomImportColLogicalPath(char *dst, size_t size, const char *name)
 static bool
 copyFileExact(const char *src, const char *dst)
 {
+	// Avoid truncating the source when a user selects a file that is already
+	// at Ariane's export path.
+	if(pathsEqualCiNormalized(src, dst))
+		return doesFileExist(src);
+
 	FILE *in = fopen(src, "rb");
 	if(in == nil)
 		return false;
@@ -2502,9 +2507,60 @@ copyFileExact(const char *src, const char *dst)
 			break;
 		}
 	}
+	if(ferror(in))
+		ok = false;
 	fclose(in);
 	fclose(out);
 	return ok;
+}
+
+static bool
+filesHaveSameContents(const char *aPath, const char *bPath)
+{
+	FILE *a = fopen(aPath, "rb");
+	if(a == nil)
+		return false;
+	FILE *b = fopen(bPath, "rb");
+	if(b == nil){
+		fclose(a);
+		return false;
+	}
+
+	bool same = false;
+	long aSize;
+	long bSize;
+	if(fseek(a, 0, SEEK_END) != 0 || fseek(b, 0, SEEK_END) != 0)
+		goto done;
+	aSize = ftell(a);
+	bSize = ftell(b);
+	if(aSize < 0 || bSize < 0 || aSize != bSize)
+		goto done;
+	if(fseek(a, 0, SEEK_SET) != 0 || fseek(b, 0, SEEK_SET) != 0)
+		goto done;
+
+	{
+		char aBuffer[64*1024];
+		char bBuffer[64*1024];
+		same = true;
+		while(true){
+			size_t aRead = fread(aBuffer, 1, sizeof(aBuffer), a);
+			size_t bRead = fread(bBuffer, 1, sizeof(bBuffer), b);
+			if(aRead != bRead || (aRead > 0 && memcmp(aBuffer, bBuffer, aRead) != 0)){
+				same = false;
+				break;
+			}
+			if(aRead == 0){
+				if(ferror(a) || ferror(b))
+					same = false;
+				break;
+			}
+		}
+	}
+
+done:
+	fclose(a);
+	fclose(b);
+	return same;
 }
 
 static bool
@@ -3484,11 +3540,6 @@ finalizeCustomImport(void)
 		         "Model name %s already exists. Change the model name first.", gCustomImport.modelName);
 		return false;
 	}
-	if(FindTxdSlot(gCustomImport.txdName) >= 0){
-		snprintf(gCustomImport.error, sizeof(gCustomImport.error),
-		         "TXD name %s already exists. Change the TXD name first.", gCustomImport.txdName);
-		return false;
-	}
 	if(strlen(gCustomImport.modelName) >= 24){
 		snprintf(gCustomImport.error, sizeof(gCustomImport.error),
 		         "Model name %s is too long for COL internal name/export (max 23 chars).", gCustomImport.modelName);
@@ -3510,6 +3561,22 @@ finalizeCustomImport(void)
 		return false;
 	}
 
+	int existingTxdSlot = FindTxdSlot(gCustomImport.txdName);
+	bool reuseTxd = existingTxdSlot >= 0;
+	if(reuseTxd){
+		// Sharing is safe only when the selected TXD is the one currently
+		// winning modloader resolution. Never replace an existing dictionary
+		// just because another import uses the same basename.
+		const char *activeTxd = ModloaderFindOverride(gCustomImport.txdName, "txd");
+		if(activeTxd == nil || !filesHaveSameContents(gCustomImport.txdSource, activeTxd)){
+			snprintf(gCustomImport.error, sizeof(gCustomImport.error),
+			         "TXD name %s already exists, but the selected file differs from the active TXD (%s). "
+			         "Select the same TXD file or use a different TXD name.",
+			         gCustomImport.txdName, activeTxd ? activeTxd : "not a loose modloader file");
+			return false;
+		}
+	}
+
 	bool importCol = gCustomImport.hasCol;
 	std::vector<FileRollbackEntry> rollbackEntries;
 	if(importCol){
@@ -3529,7 +3596,7 @@ finalizeCustomImport(void)
 	}
 
 	if(!captureRollbackEntry(rollbackEntries, dffTarget) ||
-	   !captureRollbackEntry(rollbackEntries, txdTarget) ||
+	   (!reuseTxd && !captureRollbackEntry(rollbackEntries, txdTarget)) ||
 	   !captureRollbackEntry(rollbackEntries, manifestPath) ||
 	   !captureRollbackEntry(rollbackEntries, iplPath) ||
 	   !captureRollbackEntry(rollbackEntries, colTarget)){
@@ -3548,7 +3615,7 @@ finalizeCustomImport(void)
 	}
 
 	if(!copyFileExact(gCustomImport.dffSource, dffTarget) ||
-	   !copyFileExact(gCustomImport.txdSource, txdTarget)){
+	   (!reuseTxd && !copyFileExact(gCustomImport.txdSource, txdTarget))){
 		snprintf(gCustomImport.error, sizeof(gCustomImport.error), "Failed to copy one or more source files.");
 		rollbackTouchedFiles(rollbackEntries);
 		ModloaderInit();
@@ -3558,12 +3625,19 @@ finalizeCustomImport(void)
 	ModloaderInit();
 	const char *winningDff = ModloaderFindOverride(gCustomImport.modelName, "dff");
 	const char *winningTxd = ModloaderFindOverride(gCustomImport.txdName, "txd");
+	bool winningTxdMatches = winningTxd &&
+		(reuseTxd ? filesHaveSameContents(gCustomImport.txdSource, winningTxd) :
+		            pathsEqualCiNormalized(winningTxd, txdTarget));
 	if(winningDff == nil || !pathsEqualCiNormalized(winningDff, dffTarget) ||
-	   winningTxd == nil || !pathsEqualCiNormalized(winningTxd, txdTarget)){
+	   !winningTxdMatches){
+		// ModloaderInit invalidates the returned pointers, so retain the paths
+		// before restoring files and rebuilding its index.
+		char shownDff[512];
+		char shownTxd[512];
+		snprintf(shownDff, sizeof(shownDff), "%s", winningDff ? winningDff : "<none>");
+		snprintf(shownTxd, sizeof(shownTxd), "%s", winningTxd ? winningTxd : "<none>");
 		rollbackTouchedFiles(rollbackEntries);
 		ModloaderInit();
-		const char *shownDff = winningDff ? winningDff : "<none>";
-		const char *shownTxd = winningTxd ? winningTxd : "<none>";
 		bool sourceInModloader = pathContainsModloaderDir(gCustomImport.dffSource) ||
 		                        pathContainsModloaderDir(gCustomImport.txdSource);
 		if(sourceInModloader)
@@ -3659,7 +3733,10 @@ finalizeCustomImport(void)
 	strncpy(obj->m_name, gCustomImport.modelName, MODELNAMELEN);
 	obj->m_name[MODELNAMELEN-1] = '\0';
 	obj->m_txdSlot = AddTxdSlot(gCustomImport.txdName);
-	createdTxdSlot = obj->m_txdSlot;
+	// A failed import may remove only the slot it created. A reused slot can
+	// already belong to any number of loaded object definitions.
+	if(existingTxdSlot < 0)
+		createdTxdSlot = obj->m_txdSlot;
 	obj->m_numAtomics = 1;
 	obj->m_drawDist[0] = gCustomImport.drawDist;
 	obj->SetFlags(ideFlags);
@@ -3846,6 +3923,7 @@ uiCustomImportPopup(void)
 	}else{
 		ImGui::TextDisabled("No COL selected. Collision will be auto-generated.");
 	}
+	ImGui::TextDisabled("An existing TXD is shared when its contents match; name conflicts are rejected.");
 	ImGui::TextDisabled("Tip: you can also drag & drop .dff/.txd/.col files anywhere in Ariane.");
 
 	ImGui::Separator();
