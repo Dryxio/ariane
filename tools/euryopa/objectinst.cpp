@@ -1148,66 +1148,6 @@ GetLodForObject(int id)
 	}
 }
 
-static const char*
-GetDatFilename(void)
-{
-	switch(gameversion){
-	case GAME_III: return "data/gta3.dat";
-	case GAME_VC:  return "data/gta_vc.dat";
-	case GAME_SA:  return "data/gta.dat";
-	case GAME_LCS: return "data/gta_lcs.dat";
-	case GAME_VCS: return "data/gta_vcs.dat";
-	default:       return nil;
-	}
-}
-
-static bool
-IplEntryExistsInDat(const char *datfile, const char *iplpath)
-{
-	FILE *f = fopen_ci(datfile, "r");
-	if(f == nil) return false;
-	char line[512];
-	while(fgets(line, sizeof(line), f)){
-		char *entry = line;
-		while(*entry && isspace((unsigned char)*entry))
-			entry++;
-		if(rw::strncmp_ci(entry, "IPL", 3) != 0 || !isspace((unsigned char)entry[3]))
-			continue;
-		entry += 3;
-		while(*entry && isspace((unsigned char)*entry))
-			entry++;
-		char *end = entry + strlen(entry);
-		while(end > entry && isspace((unsigned char)*(end-1)))
-			*--end = '\0';
-		if(LogicalPathEquals(entry, iplpath)){
-			fclose(f);
-			return true;
-		}
-	}
-	fclose(f);
-	return false;
-}
-
-static void
-AppendIplToDat(const char *iplpath)
-{
-	const char *datfile = GetDatFilename();
-	if(datfile == nil) return;
-	if(IplEntryExistsInDat(datfile, iplpath)) return;
-
-	const char *targetPath = ModloaderGetSourcePath(datfile);
-	if(targetPath == nil)
-		targetPath = getPath(datfile);
-	FILE *f = fopen(targetPath, "a");
-	if(f == nil){
-		log("WARNING: could not append to %s\n", datfile);
-		return;
-	}
-	fprintf(f, "\nIPL %s\n", iplpath);
-	fclose(f);
-	log("Added IPL %s to %s\n", iplpath, datfile);
-}
-
 static GameFile*
 GetOrCreateCustomIplFile(void)
 {
@@ -1221,8 +1161,6 @@ GetOrCreateCustomIplFile(void)
 		free(customIplFile->sourcePath);
 		customIplFile->sourcePath = strdup(currentCustomIplSourcePath);
 	}
-	if(currentCustomIplAppendToDat && gSaveDestination != SAVE_DESTINATION_MODLOADER)
-		AppendIplToDat(currentCustomIplPath);
 	return customIplFile;
 }
 

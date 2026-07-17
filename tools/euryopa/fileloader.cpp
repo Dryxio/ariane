@@ -1269,6 +1269,107 @@ LineExistsTrimmed(const std::string &text, const char *line)
 	return false;
 }
 
+static const char*
+GetMainDatLogicalPath(void)
+{
+	switch(gameversion){
+	case GAME_III: return "data/gta3.dat";
+	case GAME_VC:  return "data/gta_vc.dat";
+	case GAME_SA:  return "data/gta.dat";
+	case GAME_LCS: return "data/gta_lcs.dat";
+	case GAME_VCS: return "data/gta_vcs.dat";
+	default:       return nil;
+	}
+}
+
+static bool
+DatContainsIplEntry(const std::string &text, const char *iplPath)
+{
+	const char *line = text.c_str();
+	const char *textEnd = line + text.size();
+	while(line < textEnd){
+		const char *lineEnd = line;
+		while(lineEnd < textEnd && *lineEnd != '\n' && *lineEnd != '\r')
+			lineEnd++;
+		const char *nextLine = lineEnd;
+
+		const char *entry = line;
+		while(entry < lineEnd && isspace((unsigned char)*entry))
+			entry++;
+		if(lineEnd - entry >= 4 &&
+		   rw::strncmp_ci(entry, "IPL", 3) == 0 &&
+		   isspace((unsigned char)entry[3])){
+			entry += 3;
+			while(entry < lineEnd && isspace((unsigned char)*entry))
+				entry++;
+			while(lineEnd > entry && isspace((unsigned char)*(lineEnd-1)))
+				lineEnd--;
+
+			std::string existingPath(entry, lineEnd);
+			if(LogicalPathEquals(existingPath.c_str(), iplPath))
+				return true;
+		}
+
+		while(nextLine < textEnd && (*nextLine == '\n' || *nextLine == '\r'))
+			nextLine++;
+		line = nextLine;
+	}
+	return false;
+}
+
+static bool
+QueueOriginalCustomIplDatSave(std::vector<PendingSaveFile> &pendingFiles)
+{
+	const char *datLogicalPath = GetMainDatLogicalPath();
+	if(datLogicalPath == nil)
+		return false;
+
+	char datPath[1024];
+	const char *sourcePath = ModloaderGetSourcePath(datLogicalPath);
+	if(sourcePath){
+		strncpy(datPath, sourcePath, sizeof(datPath)-1);
+		datPath[sizeof(datPath)-1] = '\0';
+	}else{
+		strncpy(datPath, datLogicalPath, sizeof(datPath)-1);
+		datPath[sizeof(datPath)-1] = '\0';
+		rw::makePath(datPath);
+	}
+
+	FILE *f = fopen(datPath, "rb");
+	if(f == nil){
+		log("SaveScene: can't read %s before registering custom IPL\n", datPath);
+		return false;
+	}
+	std::string out;
+	char buf[1024];
+	size_t n;
+	while((n = fread(buf, 1, sizeof(buf), f)) > 0)
+		out.append(buf, n);
+	bool readOk = ferror(f) == 0;
+	fclose(f);
+	if(!readOk){
+		log("SaveScene: failed reading %s before registering custom IPL\n", datPath);
+		return false;
+	}
+
+	// Keep the native DAT spelling used by the games; comparisons accept
+	// either slash style so an existing equivalent entry is not duplicated.
+	const char *iplPath = "data\\maps\\custom.ipl";
+	if(DatContainsIplEntry(out, iplPath))
+		return true;
+	if(!out.empty() && out[out.size()-1] != '\n' && out[out.size()-1] != '\r')
+		out += "\n";
+	out += "IPL ";
+	out += iplPath;
+	out += "\n";
+
+	PendingSaveFile pending;
+	pending.finalPath = datPath;
+	pending.data.assign(out.begin(), out.end());
+	pendingFiles.push_back(pending);
+	return true;
+}
+
 static bool
 QueueModloaderCustomIplManifestSave(std::vector<PendingSaveFile> &pendingFiles)
 {
@@ -1636,9 +1737,14 @@ WriteSceneFileInternal(const char *filename, ObjectInst **insts, int numInsts, b
 	if(!EnsureParentDirectories(realpath))
 		return false;
 
-	std::vector<PendingSaveFile> files(1);
-	files[0].finalPath = realpath;
-	files[0].data.assign(out.begin(), out.end());
+	std::vector<PendingSaveFile> files;
+	PendingSaveFile sceneFile;
+	sceneFile.finalPath = realpath;
+	sceneFile.data.assign(out.begin(), out.end());
+	files.push_back(sceneFile);
+	if(IsDefaultCustomIplLogicalPath(filename) &&
+	   !QueueOriginalCustomIplDatSave(files))
+		return false;
 	return CommitPendingSaveFiles(files);
 }
 
