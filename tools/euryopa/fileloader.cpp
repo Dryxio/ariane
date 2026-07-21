@@ -1854,6 +1854,7 @@ SaveScene(const char *filename)
 
 		for(int i = 0; i < numInsts; i++){
 			inst = fileInsts[i];
+			textStates.push_back({ inst, inst->m_iplIndex, inst->m_lodId, inst->m_lod });
 			if(inst->m_iplIndex >= 0 && inst->m_iplIndex <= maxOldIndex)
 				oldTextInsts[inst->m_iplIndex] = inst;
 			if(inst->m_isDeleted)
@@ -1864,7 +1865,6 @@ SaveScene(const char *filename)
 
 		for(int i = 0; i < numActiveTextInsts; i++){
 			inst = activeTextInsts[i];
-			textStates.push_back({ inst, inst->m_iplIndex, inst->m_lodId, inst->m_lod });
 
 			int oldLodId = inst->m_lodId;
 			if(oldLodId >= 0 &&
@@ -2001,8 +2001,43 @@ SaveScene(const char *filename)
 		log("SaveScene: family save completed for %s\n", filename);
 		hotReloadTrace("SaveScene: family save completed for %s\n", filename);
 
+		// The compacted file contains only live text instances. Keep deleted
+		// instances after that range with unique indices so Save -> Undo -> Save
+		// cannot make restored entries collide with the compacted live indices.
+		int nextTextIndex = 0;
 		for(int i = 0; i < numActiveTextInsts; i++)
-			activeTextInsts[i]->m_iplIndex = i;
+			activeTextInsts[i]->m_iplIndex = nextTextIndex++;
+		for(int i = 0; i < numInsts; i++)
+			if(fileInsts[i]->m_isDeleted)
+				fileInsts[i]->m_iplIndex = nextTextIndex++;
+
+		// Saving needs temporary on-disk LOD indices, but the logical pointer
+		// must survive even when both sides of a deleted HD/LOD pair are omitted
+		// from the compacted files. Undo relies on that pointer to restore the
+		// pair. Rebuild every runtime LOD id from the preserved pointer and the
+		// normalized post-save text indices.
+		for(size_t i = 0; i < textStates.size(); i++){
+			ObjectInst *savedInst = textStates[i].inst;
+			ObjectInst *savedLod = textStates[i].oldLod;
+			if(savedLod == nil && textStates[i].oldLodId >= 0 &&
+			   textStates[i].oldLodId <= maxOldIndex)
+				savedLod = oldTextInsts[textStates[i].oldLodId];
+			if(savedLod == savedInst)
+				savedLod = nil;
+			savedInst->m_lod = savedLod;
+			savedInst->m_lodId = savedLod ? savedLod->m_iplIndex : -1;
+		}
+		for(size_t i = 0; i < binaryStates.size(); i++){
+			ObjectInst *savedInst = binaryStates[i].inst;
+			ObjectInst *savedLod = binaryStates[i].oldLod;
+			if(savedLod == nil && binaryStates[i].oldLodId >= 0 &&
+			   binaryStates[i].oldLodId <= maxOldIndex)
+				savedLod = oldTextInsts[binaryStates[i].oldLodId];
+			if(savedLod == savedInst)
+				savedLod = nil;
+			savedInst->m_lod = savedLod;
+			savedInst->m_lodId = savedLod ? savedLod->m_iplIndex : -1;
+		}
 	}else{
 		if(gSaveDestination == SAVE_DESTINATION_MODLOADER){
 			std::vector<PendingSaveFile> pendingFiles;
@@ -2198,6 +2233,12 @@ BuildBinaryImageByIndexInternal(int32 imgIdx, BinaryIplSaveResult *result, int *
 			fillBinaryInstData(&instData[nextIdx], inst);
 			rebuiltIndices[i] = nextIdx++;
 		}
+		// Deleted entries are absent on disk, but keeping unique runtime indices
+		// after the live range makes a later Undo deterministic: restored entries
+		// are appended instead of colliding with compacted survivors.
+		for(size_t i = 0; i < imageInsts.size(); i++)
+			if(imageInsts[i]->m_isDeleted)
+				rebuiltIndices[i] = nextIdx++;
 		hdr->numInst = numAlive;
 		modified = true;
 	}else{
