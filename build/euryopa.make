@@ -42,9 +42,9 @@ endef
 
 ifeq ($(config),release_macos-amd64-gl3)
 TARGETDIR = ../bin/macos-amd64-gl3/Release
-TARGET = $(TARGETDIR)/euryopa
+TARGET = $(TARGETDIR)/ariane
 OBJDIR = obj/macos-amd64-gl3/Release/euryopa
-DEFINES += -DNDEBUG -DRW_GL3 -DLIBRW_GLFW
+DEFINES += -DNDEBUG -DRW_GL3 -DLIBRW_GLFW -DARIANE_CHANNEL=\"master\"
 ALL_CFLAGS += $(CFLAGS) $(ALL_CPPFLAGS) -m64 -O2
 ALL_CXXFLAGS += $(CXXFLAGS) $(ALL_CPPFLAGS) -m64 -O2 -std=c++14
 LIBS += ../lib/macos-amd64-gl3/Release/librwgta.a -lrw -lglfw
@@ -53,9 +53,9 @@ ALL_LDFLAGS += $(LDFLAGS) -L../../librw/lib/macos-amd64-gl3/Release -L../lib/mac
 
 else ifeq ($(config),release_macos-arm64-gl3)
 TARGETDIR = ../bin/macos-arm64-gl3/Release
-TARGET = $(TARGETDIR)/euryopa
+TARGET = $(TARGETDIR)/ariane
 OBJDIR = obj/macos-arm64-gl3/Release/euryopa
-DEFINES += -DNDEBUG -DRW_GL3 -DLIBRW_GLFW
+DEFINES += -DNDEBUG -DRW_GL3 -DLIBRW_GLFW -DARIANE_CHANNEL=\"master\"
 ALL_CFLAGS += $(CFLAGS) $(ALL_CPPFLAGS) -O2
 ALL_CXXFLAGS += $(CXXFLAGS) $(ALL_CPPFLAGS) -O2 -std=c++14
 LIBS += ../lib/macos-arm64-gl3/Release/librwgta.a -lrw -lglfw
@@ -64,9 +64,9 @@ ALL_LDFLAGS += $(LDFLAGS) -L../../librw/lib/macos-arm64-gl3/Release -L../lib/mac
 
 else ifeq ($(config),debug_macos-amd64-gl3)
 TARGETDIR = ../bin/macos-amd64-gl3/Debug
-TARGET = $(TARGETDIR)/euryopa
+TARGET = $(TARGETDIR)/ariane
 OBJDIR = obj/macos-amd64-gl3/Debug/euryopa
-DEFINES += -DDEBUG -DRW_GL3 -DLIBRW_GLFW
+DEFINES += -DDEBUG -DRW_GL3 -DLIBRW_GLFW -DARIANE_CHANNEL=\"master\"
 ALL_CFLAGS += $(CFLAGS) $(ALL_CPPFLAGS) -m64 -g
 ALL_CXXFLAGS += $(CXXFLAGS) $(ALL_CPPFLAGS) -m64 -g -std=c++14
 LIBS += ../lib/macos-amd64-gl3/Debug/librwgta.a -lrw -lglfw
@@ -75,9 +75,9 @@ ALL_LDFLAGS += $(LDFLAGS) -L../../librw/lib/macos-amd64-gl3/Debug -L../lib/macos
 
 else ifeq ($(config),debug_macos-arm64-gl3)
 TARGETDIR = ../bin/macos-arm64-gl3/Debug
-TARGET = $(TARGETDIR)/euryopa
+TARGET = $(TARGETDIR)/ariane
 OBJDIR = obj/macos-arm64-gl3/Debug/euryopa
-DEFINES += -DDEBUG -DRW_GL3 -DLIBRW_GLFW
+DEFINES += -DDEBUG -DRW_GL3 -DLIBRW_GLFW -DARIANE_CHANNEL=\"master\"
 ALL_CFLAGS += $(CFLAGS) $(ALL_CPPFLAGS) -g
 ALL_CXXFLAGS += $(CXXFLAGS) $(ALL_CPPFLAGS) -g -std=c++14
 LIBS += ../lib/macos-arm64-gl3/Debug/librwgta.a -lrw -lglfw
@@ -102,6 +102,7 @@ GENERATED += $(OBJDIR)/Pad.o
 GENERATED += $(OBJDIR)/PtrNode.o
 GENERATED += $(OBJDIR)/Sprite.o
 GENERATED += $(OBJDIR)/WaterLevel.o
+GENERATED += $(OBJDIR)/autocol.o
 GENERATED += $(OBJDIR)/buildingpipe.o
 GENERATED += $(OBJDIR)/buildingpipe_d3d9.o
 GENERATED += $(OBJDIR)/buildingpipe_gl3.o
@@ -124,6 +125,7 @@ GENERATED += $(OBJDIR)/imgui_widgets.o
 GENERATED += $(OBJDIR)/iplstore.o
 GENERATED += $(OBJDIR)/main.o
 GENERATED += $(OBJDIR)/minilzo.o
+GENERATED += $(OBJDIR)/modloader.o
 GENERATED += $(OBJDIR)/neoWorld_d3d9.o
 GENERATED += $(OBJDIR)/neoWorld_gl3.o
 GENERATED += $(OBJDIR)/objectdef.o
@@ -131,11 +133,15 @@ GENERATED += $(OBJDIR)/objectinst.o
 GENERATED += $(OBJDIR)/path.o
 GENERATED += $(OBJDIR)/postfx.o
 GENERATED += $(OBJDIR)/renderer.o
+GENERATED += $(OBJDIR)/sapaths.o
 GENERATED += $(OBJDIR)/sdl2.o
 GENERATED += $(OBJDIR)/sdl3.o
 GENERATED += $(OBJDIR)/skeleton.o
+GENERATED += $(OBJDIR)/style.o
+GENERATED += $(OBJDIR)/telemetry.o
 GENERATED += $(OBJDIR)/timecycle.o
 GENERATED += $(OBJDIR)/txdstore.o
+GENERATED += $(OBJDIR)/updater.o
 GENERATED += $(OBJDIR)/win.o
 GENERATED += $(OBJDIR)/zones.o
 OBJECTS += $(OBJDIR)/Clouds.o
@@ -144,6 +150,7 @@ OBJECTS += $(OBJDIR)/Pad.o
 OBJECTS += $(OBJDIR)/PtrNode.o
 OBJECTS += $(OBJDIR)/Sprite.o
 OBJECTS += $(OBJDIR)/WaterLevel.o
+OBJECTS += $(OBJDIR)/autocol.o
 OBJECTS += $(OBJDIR)/buildingpipe.o
 OBJECTS += $(OBJDIR)/buildingpipe_d3d9.o
 OBJECTS += $(OBJDIR)/buildingpipe_gl3.o
@@ -166,6 +173,7 @@ OBJECTS += $(OBJDIR)/imgui_widgets.o
 OBJECTS += $(OBJDIR)/iplstore.o
 OBJECTS += $(OBJDIR)/main.o
 OBJECTS += $(OBJDIR)/minilzo.o
+OBJECTS += $(OBJDIR)/modloader.o
 OBJECTS += $(OBJDIR)/neoWorld_d3d9.o
 OBJECTS += $(OBJDIR)/neoWorld_gl3.o
 OBJECTS += $(OBJDIR)/objectdef.o
@@ -173,11 +181,15 @@ OBJECTS += $(OBJDIR)/objectinst.o
 OBJECTS += $(OBJDIR)/path.o
 OBJECTS += $(OBJDIR)/postfx.o
 OBJECTS += $(OBJDIR)/renderer.o
+OBJECTS += $(OBJDIR)/sapaths.o
 OBJECTS += $(OBJDIR)/sdl2.o
 OBJECTS += $(OBJDIR)/sdl3.o
 OBJECTS += $(OBJDIR)/skeleton.o
+OBJECTS += $(OBJDIR)/style.o
+OBJECTS += $(OBJDIR)/telemetry.o
 OBJECTS += $(OBJDIR)/timecycle.o
 OBJECTS += $(OBJDIR)/txdstore.o
+OBJECTS += $(OBJDIR)/updater.o
 OBJECTS += $(OBJDIR)/win.o
 OBJECTS += $(OBJDIR)/zones.o
 
@@ -294,6 +306,9 @@ $(OBJDIR)/Sprite.o: ../tools/euryopa/Sprite.cpp
 $(OBJDIR)/WaterLevel.o: ../tools/euryopa/WaterLevel.cpp
 	@echo "$(notdir $<)"
 	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
+$(OBJDIR)/autocol.o: ../tools/euryopa/autocol.cpp
+	@echo "$(notdir $<)"
+	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
 $(OBJDIR)/buildingpipe.o: ../tools/euryopa/buildingpipe.cpp
 	@echo "$(notdir $<)"
 	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
@@ -339,6 +354,9 @@ $(OBJDIR)/main.o: ../tools/euryopa/main.cpp
 $(OBJDIR)/minilzo.o: ../tools/euryopa/minilzo/minilzo.c
 	@echo "$(notdir $<)"
 	$(SILENT) $(CC) $(ALL_CFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
+$(OBJDIR)/modloader.o: ../tools/euryopa/modloader.cpp
+	@echo "$(notdir $<)"
+	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
 $(OBJDIR)/neoWorld_d3d9.o: ../tools/euryopa/neoWorld_d3d9.cpp
 	@echo "$(notdir $<)"
 	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
@@ -360,10 +378,22 @@ $(OBJDIR)/postfx.o: ../tools/euryopa/postfx.cpp
 $(OBJDIR)/renderer.o: ../tools/euryopa/renderer.cpp
 	@echo "$(notdir $<)"
 	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
+$(OBJDIR)/sapaths.o: ../tools/euryopa/sapaths.cpp
+	@echo "$(notdir $<)"
+	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
+$(OBJDIR)/style.o: ../tools/euryopa/style.cpp
+	@echo "$(notdir $<)"
+	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
+$(OBJDIR)/telemetry.o: ../tools/euryopa/telemetry.cpp
+	@echo "$(notdir $<)"
+	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
 $(OBJDIR)/timecycle.o: ../tools/euryopa/timecycle.cpp
 	@echo "$(notdir $<)"
 	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
 $(OBJDIR)/txdstore.o: ../tools/euryopa/txdstore.cpp
+	@echo "$(notdir $<)"
+	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
+$(OBJDIR)/updater.o: ../tools/euryopa/updater.cpp
 	@echo "$(notdir $<)"
 	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
 $(OBJDIR)/zones.o: ../tools/euryopa/zones.cpp
