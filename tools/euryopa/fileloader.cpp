@@ -1781,6 +1781,17 @@ QueueSceneFileSave(const char *filename, ObjectInst **insts, int numInsts, bool 
 	return true;
 }
 
+static bool
+IsKnownLodObjectId(int objectId)
+{
+	if(!isSA() || objectId < 0)
+		return false;
+	for(int id = 0; id < NUMOBJECTDEFS; id++)
+		if(GetLodForObject(id) == objectId)
+			return true;
+	return false;
+}
+
 // Save all instances that belong to a given IPL file
 // Text-only IPLs keep the historical "commented delete" behaviour.
 // For SA families with related streaming IPLs, the text file is compacted
@@ -1857,6 +1868,81 @@ SaveScene(const char *filename)
 			textStates.push_back({ inst, inst->m_iplIndex, inst->m_lodId, inst->m_lod });
 			if(inst->m_iplIndex >= 0 && inst->m_iplIndex <= maxOldIndex)
 				oldTextInsts[inst->m_iplIndex] = inst;
+		}
+
+		// Repair pointer-only/index-only LOD state before deciding which text LODs
+		// survive compaction. A deleted HD instance must take its LOD with it when
+		// it was the last live child, even if a previous save temporarily cleared
+		// m_lod while leaving m_lodId intact.
+		std::vector<int> liveLodChildren(maxOldIndex+1, 0);
+		std::vector<int> deletedLodChildren(maxOldIndex+1, 0);
+		auto countFamilyLodChild = [&](ObjectInst *child) {
+			if(child == nil)
+				return;
+			ObjectInst *lod = child->m_lod;
+			int lodIndex = -1;
+			if(lod && lod->m_iplIndex >= 0 && lod->m_iplIndex <= maxOldIndex &&
+			   oldTextInsts[lod->m_iplIndex] == lod)
+				lodIndex = lod->m_iplIndex;
+			else
+				lodIndex = child->m_lodId;
+			if(lodIndex < 0 || lodIndex > maxOldIndex)
+				return;
+			ObjectInst *indexedLod = oldTextInsts[lodIndex];
+			if(indexedLod == nil || indexedLod == child)
+				return;
+			child->m_lod = indexedLod;
+			child->m_lodId = lodIndex;
+			if(child->m_isDeleted)
+				deletedLodChildren[lodIndex]++;
+			else
+				liveLodChildren[lodIndex]++;
+		};
+
+		for(int i = 0; i < numInsts; i++)
+			countFamilyLodChild(fileInsts[i]);
+		for(p = instances.first; p; p = p->next){
+			inst = (ObjectInst*)p->item;
+			if(inst->m_imageIndex >= 0 &&
+			   IsImageInList(inst->m_imageIndex, relatedImages, numRelatedImages))
+				countFamilyLodChild(inst);
+		}
+
+		int repairedOrphanLods = 0;
+		for(int i = 0; i <= maxOldIndex; i++){
+			ObjectInst *lod = oldTextInsts[i];
+			if(lod == nil || lod->m_isDeleted || liveLodChildren[i] != 0)
+				continue;
+
+			ObjectDef *lodObj = GetObjectDef(lod->m_objectId);
+			bool lostDeletedChildren = deletedLodChildren[i] > 0;
+			bool unsafePreExistingOrphan =
+				deletedLodChildren[i] == 0 &&
+				lod->m_isBigBuilding &&
+				lodObj && lodObj->m_colModel == nil &&
+				IsKnownLodObjectId(lod->m_objectId);
+			if(!lostDeletedChildren && !unsafePreExistingOrphan)
+				continue;
+
+			if(lostDeletedChildren){
+				log("SaveScene: deleting orphaned LOD %d (model %d) after its last %d child deletion(s)\n",
+				    i, lod->m_objectId, deletedLodChildren[i]);
+				hotReloadTrace("SaveScene: deleting orphaned LOD %d (model %d) after its last %d child deletion(s)\n",
+				               i, lod->m_objectId, deletedLodChildren[i]);
+			}else{
+				log("SaveScene: deleting unsafe pre-existing orphan LOD %d (model %d, no collision)\n",
+				    i, lod->m_objectId);
+				hotReloadTrace("SaveScene: deleting unsafe pre-existing orphan LOD %d (model %d, no collision)\n",
+				               i, lod->m_objectId);
+			}
+			lod->Delete();
+			repairedOrphanLods++;
+		}
+		if(repairedOrphanLods > 0)
+			log("SaveScene: repaired %d orphaned LOD(s) in %s\n", repairedOrphanLods, filename);
+
+		for(int i = 0; i < numInsts; i++){
+			inst = fileInsts[i];
 			if(inst->m_isDeleted)
 				continue;
 			oldToNew[inst->m_iplIndex] = numActiveTextInsts;
@@ -1900,7 +1986,10 @@ SaveScene(const char *filename)
 				inst->m_lodId = -1;
 			}
 
-			if(inst->m_lodId != oldLodId)
+			// Deleted instances are not present in the compacted file. Their logical
+			// LOD is restored after the save, but the temporary on-disk remap must
+			// not turn them into in-place patch candidates.
+			if(!inst->m_isDeleted && inst->m_lodId != oldLodId)
 				inst->m_isDirty = true;
 		}
 
@@ -2069,7 +2158,8 @@ static bool
 binaryInstNeedsSave(ObjectInst *inst)
 {
 	return inst->m_imageIndex >= 0 &&
-		(inst->m_isDirty || inst->m_isDeleted != inst->m_wasSavedDeleted);
+		(inst->m_isDeleted != inst->m_wasSavedDeleted ||
+		 (!inst->m_isDeleted && inst->m_isDirty));
 }
 
 static int
@@ -2244,7 +2334,10 @@ BuildBinaryImageByIndexInternal(int32 imgIdx, BinaryIplSaveResult *result, int *
 	}else{
 		for(size_t i = 0; i < imageInsts.size(); i++){
 			ObjectInst *inst = imageInsts[i];
-			if(!inst->m_isDirty)
+			// An already-saved deletion has no slot in the compacted binary IPL.
+			// Ignore stale dirty state defensively instead of treating its runtime
+			// index (which starts at hdr->numInst) as an in-file index.
+			if(inst->m_isDeleted || !inst->m_isDirty)
 				continue;
 			int idx = inst->m_binInstIndex;
 			if(idx < 0 || (uint32)idx >= hdr->numInst){
@@ -2985,7 +3078,7 @@ QueueSceneBackupSnapshot(const char *filename, const char *snapshotDir,
 			inst->m_lod = nil;
 			inst->m_lodId = -1;
 		}
-		if(inst->m_lodId != oldLodId)
+		if(!inst->m_isDeleted && inst->m_lodId != oldLodId)
 			inst->m_isDirty = true;
 	}
 

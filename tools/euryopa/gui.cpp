@@ -1138,7 +1138,8 @@ binaryInstNeedsDiskSave(ObjectInst *inst)
 {
 	return inst &&
 		inst->m_imageIndex >= 0 &&
-		(inst->m_isDirty || inst->m_isDeleted != inst->m_wasSavedDeleted);
+		(inst->m_isDeleted != inst->m_wasSavedDeleted ||
+		 (!inst->m_isDeleted && inst->m_isDirty));
 }
 
 static bool
