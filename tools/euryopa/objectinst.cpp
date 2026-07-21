@@ -730,7 +730,7 @@ sameIplFamily(ObjectInst *a, ObjectInst *b)
 	if(a == nil || b == nil)
 		return false;
 	if(a->m_iplFilterKey[0] != '\0' && b->m_iplFilterKey[0] != '\0' &&
-	   strcmp(a->m_iplFilterKey, b->m_iplFilterKey) == 0)
+	   rw::strcmp_ci(a->m_iplFilterKey, b->m_iplFilterKey) == 0)
 		return true;
 	if(a->m_file && b->m_file && LogicalPathEquals(a->m_file->name, b->m_file->name))
 		return true;
@@ -740,24 +740,36 @@ sameIplFamily(ObjectInst *a, ObjectInst *b)
 static ObjectInst*
 resolveInstanceLod(ObjectInst *inst)
 {
-	if(inst == nil || inst->m_lodId < 0)
-		return inst ? inst->m_lod : nil;
-	if(inst->m_lod && inst->m_lod != inst && sameIplFamily(inst, inst->m_lod))
+	if(inst == nil)
+		return nil;
+	if(inst->m_lodId < 0){
+		inst->m_lod = nil;
+		return nil;
+	}
+	if(inst->m_lod && inst->m_lod != inst &&
+	   inst->m_lod->m_iplIndex == inst->m_lodId &&
+	   sameIplFamily(inst, inst->m_lod))
 		return inst->m_lod;
 
 	// A family save temporarily rewrites LOD pointers. If a previous operation
 	// left only the local IPL index behind, recover the pointer before Delete or
 	// Undelete decides whether the paired LOD must follow the HD instance.
+	ObjectInst *resolved = nil;
 	for(CPtrNode *p = instances.first; p; p = p->next){
 		ObjectInst *candidate = (ObjectInst*)p->item;
 		if(candidate == nil || candidate == inst || candidate->m_imageIndex >= 0)
 			continue;
 		if(candidate->m_iplIndex != inst->m_lodId || !sameIplFamily(inst, candidate))
 			continue;
-		inst->m_lod = candidate;
-		return candidate;
+		if(resolved != nil && resolved != candidate){
+			log("Ambiguous LOD index %d in IPL family; refusing delete cascade\n", inst->m_lodId);
+			inst->m_lod = nil;
+			return nil;
+		}
+		resolved = candidate;
 	}
-	return nil;
+	inst->m_lod = resolved;
+	return resolved;
 }
 
 static bool
@@ -765,8 +777,6 @@ instanceReferencesLod(ObjectInst *inst, ObjectInst *lodInst)
 {
 	if(inst == nil || lodInst == nil || inst == lodInst)
 		return false;
-	if(inst->m_lod == lodInst)
-		return true;
 	return inst->m_lodId >= 0 &&
 	       inst->m_lodId == lodInst->m_iplIndex &&
 	       sameIplFamily(inst, lodInst);
@@ -1035,6 +1045,19 @@ ObjectInst::Undelete(void)
 	}
 }
 
+static void
+setDeletedWithoutCascade(ObjectInst *inst, bool deleted)
+{
+	if(inst == nil || inst->m_isDeleted == deleted)
+		return;
+	inst->m_isDeleted = deleted;
+	StampChangeSeq(inst);
+	if(deleted)
+		inst->Deselect();
+	else if(inst->m_imageIndex >= 0 && inst->m_wasSavedDeleted)
+		inst->m_isDirty = true;
+}
+
 void
 DeleteSelected(void)
 {
@@ -1058,27 +1081,23 @@ DeleteSelected(void)
 	if(capped)
 		Toast(TOAST_DELETE, "Delete limited to first %d selected instance(s)", MAX_BATCH_OBJECTS);
 
-	// Now delete them and collect ALL that got deleted (including LOD cascade)
-	int numAllDeleted = 0;
+	// Record the exact transition set. Undo must not recursively undelete an HD
+	// child that was already deleted before this action and shares the same LOD.
+	std::vector<ObjectInst*> previouslyLive;
+	for(p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst && !inst->m_isDeleted)
+			previouslyLive.push_back(inst);
+	}
 
-	// Snapshot which are already deleted
-	// Then delete, and find newly deleted ones
 	for(int i = 0; i < (int)toDelete.size(); i++)
 		toDelete[i]->Delete();
 
-	// Scan for all instances that are now deleted to record in undo
-	for(p = instances.first; p; p = p->next){
-		ObjectInst *inst = (ObjectInst*)p->item;
-		if(inst->m_isDeleted && numAllDeleted < MAX_BATCH_OBJECTS){
-			// Check if this was freshly deleted (it's in our set or cascaded)
-			// Simple approach: just record all deleted. On undo we undelete them.
-			// This is slightly broad but safe.
-		}
-	}
-
-	// Simpler: just record what we explicitly asked to delete,
-	// the cascade is handled by Undelete() automatically
-	UndoRecordDelete(toDelete.data(), (int)toDelete.size());
+	std::vector<ObjectInst*> newlyDeleted;
+	for(size_t i = 0; i < previouslyLive.size(); i++)
+		if(previouslyLive[i]->m_isDeleted)
+			newlyDeleted.push_back(previouslyLive[i]);
+	UndoRecordDelete(newlyDeleted.data(), (int)newlyDeleted.size());
 }
 
 int
@@ -2453,7 +2472,7 @@ Undo(void)
 		break;
 	case UNDO_DELETE:
 		for(int i = 0; i < a->numDeleted; i++)
-			a->deletedInsts[i]->Undelete();
+			setDeletedWithoutCascade(a->deletedInsts[i], false);
 		break;
 	case UNDO_PASTE:
 		for(int i = 0; i < a->numPasted; i++){
@@ -2493,7 +2512,7 @@ Redo(void)
 		break;
 	case UNDO_DELETE:
 		for(int i = 0; i < a->numDeleted; i++)
-			a->deletedInsts[i]->Delete();
+			setDeletedWithoutCascade(a->deletedInsts[i], true);
 		break;
 	case UNDO_PASTE:
 		for(int i = 0; i < a->numPasted; i++){

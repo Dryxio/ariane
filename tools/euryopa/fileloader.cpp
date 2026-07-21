@@ -1781,16 +1781,115 @@ QueueSceneFileSave(const char *filename, ObjectInst **insts, int numInsts, bool 
 	return true;
 }
 
-static bool
-IsKnownLodObjectId(int objectId)
+static std::vector<ObjectInst*>
+CollectProjectedOrphanLods(const char *filename,
+                          const std::vector<ObjectInst*> &oldTextInsts,
+                          int32 *relatedImages, int numRelatedImages)
 {
-	if(!isSA() || objectId < 0)
-		return false;
-	for(int id = 0; id < NUMOBJECTDEFS; id++)
-		if(GetLodForObject(id) == objectId)
-			return true;
-	return false;
+	const int numTextInsts = (int)oldTextInsts.size();
+	std::vector<int> liveChildren(numTextInsts, 0);
+	std::vector<int> deletedChildren(numTextInsts, 0);
+	std::vector<int> textIndexCounts(numTextInsts, 0);
+	std::vector<bool> projected(numTextInsts, false);
+	std::vector<ObjectInst*> projectedLods;
+
+	// The IPL lod index is authoritative. Keep this pass pure: save and backup
+	// both use its result, and neither may leave pointer repairs behind on error.
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *textInst = (ObjectInst*)p->item;
+		if(textInst && textInst->m_imageIndex < 0 && textInst->m_file &&
+		   LogicalPathEquals(textInst->m_file->name, filename) &&
+		   textInst->m_iplIndex >= 0 && textInst->m_iplIndex < numTextInsts)
+			textIndexCounts[textInst->m_iplIndex]++;
+	}
+
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *child = (ObjectInst*)p->item;
+		if(child == nil || child->m_lodId < 0 || child->m_lodId >= numTextInsts)
+			continue;
+		if(textIndexCounts[child->m_lodId] != 1)
+			continue;
+
+		bool belongsToFamily =
+			(child->m_imageIndex < 0 && child->m_file &&
+			 LogicalPathEquals(child->m_file->name, filename)) ||
+			(child->m_imageIndex >= 0 &&
+			 IsImageInList(child->m_imageIndex, relatedImages, numRelatedImages));
+		if(!belongsToFamily)
+			continue;
+
+		ObjectInst *lod = oldTextInsts[child->m_lodId];
+		if(lod == nil || lod == child)
+			continue;
+		if(child->m_isDeleted)
+			deletedChildren[child->m_lodId]++;
+		else
+			liveChildren[child->m_lodId]++;
+	}
+
+	// Closing transitively matters for HD -> LOD -> super-LOD chains. Projecting
+	// one LOD changes it from a live child into a deleted child of its own LOD.
+	bool changed;
+	do{
+		changed = false;
+		for(int i = 0; i < numTextInsts; i++){
+			ObjectInst *lod = oldTextInsts[i];
+			if(projected[i] || textIndexCounts[i] != 1 ||
+			   lod == nil || lod->m_isDeleted ||
+			   liveChildren[i] != 0 || deletedChildren[i] == 0)
+				continue;
+
+			projected[i] = true;
+			projectedLods.push_back(lod);
+			changed = true;
+
+			int parentIndex = lod->m_lodId;
+			if(parentIndex >= 0 && parentIndex < numTextInsts &&
+			   textIndexCounts[parentIndex] == 1 &&
+			   oldTextInsts[parentIndex] && oldTextInsts[parentIndex] != lod){
+				if(liveChildren[parentIndex] > 0)
+					liveChildren[parentIndex]--;
+				deletedChildren[parentIndex]++;
+			}
+		}
+	}while(changed);
+
+	return projectedLods;
 }
+
+class ScopedLodDeletionProjection
+{
+public:
+	explicit ScopedLodDeletionProjection(const std::vector<ObjectInst*> &projected)
+	: m_projected(projected), m_restore(true)
+	{
+		for(size_t i = 0; i < m_projected.size(); i++)
+			m_projected[i]->m_isDeleted = true;
+	}
+
+	~ScopedLodDeletionProjection()
+	{
+		if(m_restore)
+			for(size_t i = 0; i < m_projected.size(); i++)
+				m_projected[i]->m_isDeleted = false;
+	}
+
+	void Commit()
+	{
+		for(size_t i = 0; i < m_projected.size(); i++){
+			StampChangeSeq(m_projected[i]);
+			m_projected[i]->Deselect();
+		}
+		m_restore = false;
+	}
+
+private:
+	std::vector<ObjectInst*> m_projected;
+	bool m_restore;
+
+	ScopedLodDeletionProjection(const ScopedLodDeletionProjection&);
+	ScopedLodDeletionProjection &operator=(const ScopedLodDeletionProjection&);
+};
 
 // Save all instances that belong to a given IPL file
 // Text-only IPLs keep the historical "commented delete" behaviour.
@@ -1870,76 +1969,16 @@ SaveScene(const char *filename)
 				oldTextInsts[inst->m_iplIndex] = inst;
 		}
 
-		// Repair pointer-only/index-only LOD state before deciding which text LODs
-		// survive compaction. A deleted HD instance must take its LOD with it when
-		// it was the last live child, even if a previous save temporarily cleared
-		// m_lod while leaving m_lodId intact.
-		std::vector<int> liveLodChildren(maxOldIndex+1, 0);
-		std::vector<int> deletedLodChildren(maxOldIndex+1, 0);
-		auto countFamilyLodChild = [&](ObjectInst *child) {
-			if(child == nil)
-				return;
-			ObjectInst *lod = child->m_lod;
-			int lodIndex = -1;
-			if(lod && lod->m_iplIndex >= 0 && lod->m_iplIndex <= maxOldIndex &&
-			   oldTextInsts[lod->m_iplIndex] == lod)
-				lodIndex = lod->m_iplIndex;
-			else
-				lodIndex = child->m_lodId;
-			if(lodIndex < 0 || lodIndex > maxOldIndex)
-				return;
-			ObjectInst *indexedLod = oldTextInsts[lodIndex];
-			if(indexedLod == nil || indexedLod == child)
-				return;
-			child->m_lod = indexedLod;
-			child->m_lodId = lodIndex;
-			if(child->m_isDeleted)
-				deletedLodChildren[lodIndex]++;
-			else
-				liveLodChildren[lodIndex]++;
-		};
-
-		for(int i = 0; i < numInsts; i++)
-			countFamilyLodChild(fileInsts[i]);
-		for(p = instances.first; p; p = p->next){
-			inst = (ObjectInst*)p->item;
-			if(inst->m_imageIndex >= 0 &&
-			   IsImageInList(inst->m_imageIndex, relatedImages, numRelatedImages))
-				countFamilyLodChild(inst);
+		std::vector<ObjectInst*> projectedOrphanLods =
+			CollectProjectedOrphanLods(filename, oldTextInsts, relatedImages, numRelatedImages);
+		ScopedLodDeletionProjection orphanProjection(projectedOrphanLods);
+		for(size_t i = 0; i < projectedOrphanLods.size(); i++){
+			ObjectInst *lod = projectedOrphanLods[i];
+			log("SaveScene: projecting orphaned LOD %d (model %d) after child deletion\n",
+			    lod->m_iplIndex, lod->m_objectId);
+			hotReloadTrace("SaveScene: projecting orphaned LOD %d (model %d) after child deletion\n",
+			               lod->m_iplIndex, lod->m_objectId);
 		}
-
-		int repairedOrphanLods = 0;
-		for(int i = 0; i <= maxOldIndex; i++){
-			ObjectInst *lod = oldTextInsts[i];
-			if(lod == nil || lod->m_isDeleted || liveLodChildren[i] != 0)
-				continue;
-
-			ObjectDef *lodObj = GetObjectDef(lod->m_objectId);
-			bool lostDeletedChildren = deletedLodChildren[i] > 0;
-			bool unsafePreExistingOrphan =
-				deletedLodChildren[i] == 0 &&
-				lod->m_isBigBuilding &&
-				lodObj && lodObj->m_colModel == nil &&
-				IsKnownLodObjectId(lod->m_objectId);
-			if(!lostDeletedChildren && !unsafePreExistingOrphan)
-				continue;
-
-			if(lostDeletedChildren){
-				log("SaveScene: deleting orphaned LOD %d (model %d) after its last %d child deletion(s)\n",
-				    i, lod->m_objectId, deletedLodChildren[i]);
-				hotReloadTrace("SaveScene: deleting orphaned LOD %d (model %d) after its last %d child deletion(s)\n",
-				               i, lod->m_objectId, deletedLodChildren[i]);
-			}else{
-				log("SaveScene: deleting unsafe pre-existing orphan LOD %d (model %d, no collision)\n",
-				    i, lod->m_objectId);
-				hotReloadTrace("SaveScene: deleting unsafe pre-existing orphan LOD %d (model %d, no collision)\n",
-				               i, lod->m_objectId);
-			}
-			lod->Delete();
-			repairedOrphanLods++;
-		}
-		if(repairedOrphanLods > 0)
-			log("SaveScene: repaired %d orphaned LOD(s) in %s\n", repairedOrphanLods, filename);
 
 		for(int i = 0; i < numInsts; i++){
 			inst = fileInsts[i];
@@ -2086,6 +2125,10 @@ SaveScene(const char *filename)
 			result.numSavedImages = 0;
 			return result;
 		}
+		orphanProjection.Commit();
+		if(!projectedOrphanLods.empty())
+			log("SaveScene: repaired %d orphaned LOD(s) in %s\n",
+			    (int)projectedOrphanLods.size(), filename);
 
 		log("SaveScene: family save completed for %s\n", filename);
 		hotReloadTrace("SaveScene: family save completed for %s\n", filename);
@@ -3037,6 +3080,14 @@ QueueSceneBackupSnapshot(const char *filename, const char *snapshotDir,
 		inst = fileInsts[i];
 		if(inst->m_iplIndex >= 0 && inst->m_iplIndex <= maxOldIndex)
 			oldTextInsts[inst->m_iplIndex] = inst;
+	}
+
+	std::vector<ObjectInst*> projectedOrphanLods =
+		CollectProjectedOrphanLods(filename, oldTextInsts, relatedImages, numRelatedImages);
+	ScopedLodDeletionProjection orphanProjection(projectedOrphanLods);
+
+	for(int i = 0; i < numInsts; i++){
+		inst = fileInsts[i];
 		if(inst->m_isDeleted)
 			continue;
 		oldToNew[inst->m_iplIndex] = numActiveTextInsts;
