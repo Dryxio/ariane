@@ -724,6 +724,54 @@ HasEarlierSelectedTxd(CPtrNode *upto, const char *name)
 	return false;
 }
 
+static bool
+sameIplFamily(ObjectInst *a, ObjectInst *b)
+{
+	if(a == nil || b == nil)
+		return false;
+	if(a->m_iplFilterKey[0] != '\0' && b->m_iplFilterKey[0] != '\0' &&
+	   strcmp(a->m_iplFilterKey, b->m_iplFilterKey) == 0)
+		return true;
+	if(a->m_file && b->m_file && LogicalPathEquals(a->m_file->name, b->m_file->name))
+		return true;
+	return false;
+}
+
+static ObjectInst*
+resolveInstanceLod(ObjectInst *inst)
+{
+	if(inst == nil || inst->m_lodId < 0)
+		return inst ? inst->m_lod : nil;
+	if(inst->m_lod && inst->m_lod != inst && sameIplFamily(inst, inst->m_lod))
+		return inst->m_lod;
+
+	// A family save temporarily rewrites LOD pointers. If a previous operation
+	// left only the local IPL index behind, recover the pointer before Delete or
+	// Undelete decides whether the paired LOD must follow the HD instance.
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *candidate = (ObjectInst*)p->item;
+		if(candidate == nil || candidate == inst || candidate->m_imageIndex >= 0)
+			continue;
+		if(candidate->m_iplIndex != inst->m_lodId || !sameIplFamily(inst, candidate))
+			continue;
+		inst->m_lod = candidate;
+		return candidate;
+	}
+	return nil;
+}
+
+static bool
+instanceReferencesLod(ObjectInst *inst, ObjectInst *lodInst)
+{
+	if(inst == nil || lodInst == nil || inst == lodInst)
+		return false;
+	if(inst->m_lod == lodInst)
+		return true;
+	return inst->m_lodId >= 0 &&
+	       inst->m_lodId == lodInst->m_iplIndex &&
+	       sameIplFamily(inst, lodInst);
+}
+
 static int
 countLiveLodChildren(ObjectInst *lodInst, ObjectInst *ignoreInst)
 {
@@ -737,7 +785,7 @@ countLiveLodChildren(ObjectInst *lodInst, ObjectInst *ignoreInst)
 		ObjectInst *other = (ObjectInst*)p->item;
 		if(other == ignoreInst || other->m_isDeleted)
 			continue;
-		if(other->m_lod == lodInst)
+		if(instanceReferencesLod(other, lodInst))
 			count++;
 	}
 	return count;
@@ -950,15 +998,16 @@ ObjectInst::Delete(void)
 	Deselect();
 
 	// If this HD building was the last live child of its LOD, delete the LOD too.
-	if(m_lod && !m_lod->m_isDeleted &&
-	   countLiveLodChildren(m_lod, this) == 0)
-		m_lod->Delete();
+	ObjectInst *lodInst = resolveInstanceLod(this);
+	if(lodInst && !lodInst->m_isDeleted &&
+	   countLiveLodChildren(lodInst, this) == 0)
+		lodInst->Delete();
 
 	// If this IS a LOD, delete all HD buildings that reference it
 	CPtrNode *p;
 	for(p = instances.first; p; p = p->next){
 		ObjectInst *other = (ObjectInst*)p->item;
-		if(other->m_lod == this && !other->m_isDeleted)
+		if(instanceReferencesLod(other, this) && !other->m_isDeleted)
 			other->Delete();
 	}
 }
@@ -973,14 +1022,15 @@ ObjectInst::Undelete(void)
 		m_isDirty = true;
 
 	// Also undelete the LOD pair
-	if(m_lod && m_lod->m_isDeleted)
-		m_lod->Undelete();
+	ObjectInst *lodInst = resolveInstanceLod(this);
+	if(lodInst && lodInst->m_isDeleted)
+		lodInst->Undelete();
 
 	// If this IS a LOD, undelete HD children
 	CPtrNode *p;
 	for(p = instances.first; p; p = p->next){
 		ObjectInst *other = (ObjectInst*)p->item;
-		if(other->m_lod == this && other->m_isDeleted)
+		if(instanceReferencesLod(other, this) && other->m_isDeleted)
 			other->Undelete();
 	}
 }
@@ -2591,19 +2641,6 @@ findPasteDestinationFile(ObjectInst *src)
 	// copying one original-map object does not force a full replacement export
 	// of that area's IPL.
 	return GetOrCreateCustomIplFile();
-}
-
-static bool
-sameIplFamily(ObjectInst *a, ObjectInst *b)
-{
-	if(a == nil || b == nil)
-		return false;
-	if(a->m_iplFilterKey[0] != '\0' && b->m_iplFilterKey[0] != '\0' &&
-	   strcmp(a->m_iplFilterKey, b->m_iplFilterKey) == 0)
-		return true;
-	if(a->m_file && b->m_file && LogicalPathEquals(a->m_file->name, b->m_file->name))
-		return true;
-	return false;
 }
 
 static float
