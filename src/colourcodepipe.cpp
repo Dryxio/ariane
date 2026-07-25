@@ -77,31 +77,202 @@ makeColourCodePipeline(void)
 	return pipe;
 }
 
+static IDirect3DSurface9 *colourCodeSavedTarget;
+static IDirect3DSurface9 *colourCodeSavedDepth;
+static IDirect3DSurface9 *colourCodeTarget;
+static IDirect3DSurface9 *colourCodeDepth;
+static D3DVIEWPORT9 colourCodeSavedViewport;
+static bool colourCodePassActive;
+static bool colourCodeTargetSwitched;
+
+static void
+releaseSurface(IDirect3DSurface9 *&surface)
+{
+	if(surface){
+		surface->Release();
+		surface = nil;
+	}
+}
+
+static void
+releaseColourCodePassSurfaces(void)
+{
+	releaseSurface(colourCodeDepth);
+	releaseSurface(colourCodeTarget);
+	releaseSurface(colourCodeSavedDepth);
+	releaseSurface(colourCodeSavedTarget);
+	colourCodePassActive = false;
+	colourCodeTargetSwitched = false;
+}
+
+bool
+BeginColourCodePass(rw::Camera *camera, const rw::RGBA *clearColour)
+{
+	if(colourCodePassActive || camera == nil || clearColour == nil)
+		return false;
+
+	IDirect3DSurface9 *savedTarget = nil;
+	IDirect3DSurface9 *savedDepth = nil;
+	IDirect3DSurface9 *pickTarget = nil;
+	IDirect3DSurface9 *pickDepth = nil;
+	D3DVIEWPORT9 savedViewport;
+	D3DSURFACE_DESC targetDesc, depthDesc;
+
+	if(FAILED(d3ddevice->GetRenderTarget(0, &savedTarget)) || savedTarget == nil)
+		return false;
+	if(FAILED(savedTarget->GetDesc(&targetDesc)) ||
+	   FAILED(d3ddevice->GetDepthStencilSurface(&savedDepth)) || savedDepth == nil ||
+	   FAILED(savedDepth->GetDesc(&depthDesc)) ||
+	   FAILED(d3ddevice->GetViewport(&savedViewport))){
+		releaseSurface(savedDepth);
+		releaseSurface(savedTarget);
+		return false;
+	}
+
+	bool needsNonMsaaTarget = targetDesc.MultiSampleType != D3DMULTISAMPLE_NONE;
+	if(needsNonMsaaTarget){
+		if(FAILED(d3ddevice->CreateRenderTarget(targetDesc.Width, targetDesc.Height,
+				targetDesc.Format, D3DMULTISAMPLE_NONE, 0, FALSE, &pickTarget, nil)) ||
+		   pickTarget == nil ||
+		   FAILED(d3ddevice->CreateDepthStencilSurface(targetDesc.Width, targetDesc.Height,
+				depthDesc.Format, D3DMULTISAMPLE_NONE, 0, FALSE, &pickDepth, nil)) ||
+		   pickDepth == nil){
+			releaseSurface(pickDepth);
+			releaseSurface(pickTarget);
+			releaseSurface(savedDepth);
+			releaseSurface(savedTarget);
+			return false;
+		}
+
+		// A multisampled depth surface cannot remain bound while switching to a
+		// non-multisampled render target. Bypass librw's cache temporarily, then
+		// restore the exact cached surfaces in EndColourCodePass.
+		HRESULT bindResult = d3ddevice->SetDepthStencilSurface(nil);
+		if(SUCCEEDED(bindResult))
+			bindResult = d3ddevice->SetRenderTarget(0, pickTarget);
+		if(SUCCEEDED(bindResult))
+			bindResult = d3ddevice->SetDepthStencilSurface(pickDepth);
+		if(SUCCEEDED(bindResult))
+			bindResult = d3ddevice->SetViewport(&savedViewport);
+		if(FAILED(bindResult)){
+			d3ddevice->SetDepthStencilSurface(nil);
+			d3ddevice->SetRenderTarget(0, savedTarget);
+			d3ddevice->SetDepthStencilSurface(savedDepth);
+			d3ddevice->SetViewport(&savedViewport);
+			releaseSurface(pickDepth);
+			releaseSurface(pickTarget);
+			releaseSurface(savedDepth);
+			releaseSurface(savedTarget);
+			return false;
+		}
+	}
+
+	D3DCOLOR clear = D3DCOLOR_RGBA(clearColour->red, clearColour->green,
+		clearColour->blue, clearColour->alpha);
+	if(FAILED(d3ddevice->Clear(0, nil, D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER,
+	                         clear, 1.0f, 0))){
+		if(needsNonMsaaTarget){
+			d3ddevice->SetDepthStencilSurface(nil);
+			d3ddevice->SetRenderTarget(0, savedTarget);
+			d3ddevice->SetDepthStencilSurface(savedDepth);
+			d3ddevice->SetViewport(&savedViewport);
+		}
+		releaseSurface(pickDepth);
+		releaseSurface(pickTarget);
+		releaseSurface(savedDepth);
+		releaseSurface(savedTarget);
+		return false;
+	}
+
+	colourCodeSavedTarget = savedTarget;
+	colourCodeSavedDepth = savedDepth;
+	colourCodeTarget = needsNonMsaaTarget ? pickTarget : savedTarget;
+	colourCodeDepth = pickDepth;
+	colourCodeSavedViewport = savedViewport;
+	colourCodeTargetSwitched = needsNonMsaaTarget;
+	colourCodePassActive = true;
+	return true;
+}
+
+void
+EndColourCodePass(void)
+{
+	if(!colourCodePassActive)
+		return;
+	if(colourCodeTargetSwitched){
+		d3ddevice->SetDepthStencilSurface(nil);
+		d3ddevice->SetRenderTarget(0, colourCodeSavedTarget);
+		d3ddevice->SetDepthStencilSurface(colourCodeSavedDepth);
+		d3ddevice->SetViewport(&colourCodeSavedViewport);
+	}
+
+	// When no target switch was needed, colourCodeTarget aliases the saved
+	// target and must only be released once.
+	if(!colourCodeTargetSwitched)
+		colourCodeTarget = nil;
+	releaseColourCodePassSurfaces();
+}
+
+static IDirect3DSurface9*
+copyColourCodeTarget(D3DSURFACE_DESC *desc)
+{
+	IDirect3DSurface9 *source = colourCodePassActive ? colourCodeTarget : nil;
+	IDirect3DSurface9 *copy = nil;
+	bool releaseSource = false;
+	if(source == nil){
+		if(FAILED(d3ddevice->GetRenderTarget(0, &source)) || source == nil)
+			return nil;
+		releaseSource = true;
+	}
+
+	HRESULT result = source->GetDesc(desc);
+	if(SUCCEEDED(result) && desc->MultiSampleType == D3DMULTISAMPLE_NONE)
+		result = d3ddevice->CreateOffscreenPlainSurface(desc->Width, desc->Height,
+			desc->Format, D3DPOOL_SYSTEMMEM, &copy, nil);
+	else if(SUCCEEDED(result))
+		result = D3DERR_INVALIDCALL;
+	if(SUCCEEDED(result))
+		result = d3ddevice->GetRenderTargetData(source, copy);
+	if(releaseSource)
+		source->Release();
+	if(FAILED(result)){
+		releaseSurface(copy);
+		return nil;
+	}
+	return copy;
+}
+
+static bool
+isReadableColourCodeFormat(D3DFORMAT format)
+{
+	return format == D3DFMT_A8R8G8B8 || format == D3DFMT_X8R8G8B8;
+}
+
 int32
 GetColourCode(int x, int y)
 {
-	int32 res = 0;
-	IDirect3DSurface9 *backbuffer = nil;
-	d3ddevice->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backbuffer);
-
-	D3DLOCKED_RECT d3dlr;
 	D3DSURFACE_DESC desc;
-	IDirect3DSurface9 *surf = nil;
-	backbuffer->GetDesc(&desc);
-	d3ddevice->CreateOffscreenPlainSurface(desc.Width, desc.Height, desc.Format,
-		D3DPOOL_SYSTEMMEM, &surf, nil);
-	d3ddevice->GetRenderTargetData(backbuffer, surf);
+	IDirect3DSurface9 *surf = copyColourCodeTarget(&desc);
+	if(surf == nil)
+		return -1;
+	if(!isReadableColourCodeFormat(desc.Format)){
+		releaseSurface(surf);
+		return -1;
+	}
+	if(x < 0 || y < 0 || x >= (int)desc.Width || y >= (int)desc.Height){
+		surf->Release();
+		return 0;
+	}
 
-	surf->LockRect(&d3dlr, nil, D3DLOCK_NO_DIRTY_UPDATE|D3DLOCK_READONLY);
-	// TODO: check format and dimensions properly
-	if(desc.Format == D3DFMT_A8R8G8B8){
+	int32 res = -1;
+	D3DLOCKED_RECT d3dlr;
+	if(SUCCEEDED(surf->LockRect(&d3dlr, nil,
+	                           D3DLOCK_NO_DIRTY_UPDATE|D3DLOCK_READONLY))){
 		uint8 *col = (uint8*)d3dlr.pBits + d3dlr.Pitch*y + x*4;
 		res = col[0]<<16 | col[1]<<8 | col[2];
+		surf->UnlockRect();
 	}
-	surf->UnlockRect();
-
 	surf->Release();
-	backbuffer->Release();
 	return res;
 }
 
@@ -109,26 +280,35 @@ int
 GetColourCodesInRect(int rx, int ry, int w, int h, int32 *out, int maxOut)
 {
 	int count = 0;
-	if(w <= 0 || h <= 0 || maxOut <= 0) return 0;
+	if(w <= 0 || h <= 0 || out == nil || maxOut <= 0) return 0;
 
-	IDirect3DSurface9 *backbuffer = nil;
-	d3ddevice->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &backbuffer);
+	D3DSURFACE_DESC desc;
+	IDirect3DSurface9 *surf = copyColourCodeTarget(&desc);
+	if(surf == nil)
+		return -1;
+	if(!isReadableColourCodeFormat(desc.Format)){
+		releaseSurface(surf);
+		return -1;
+	}
+
+	long long rawXEnd = (long long)rx + w;
+	long long rawYEnd = (long long)ry + h;
+	int xStart = rx < 0 ? 0 : rx;
+	int yStart = ry < 0 ? 0 : ry;
+	int xEnd = rawXEnd > (long long)desc.Width ? (int)desc.Width : (int)rawXEnd;
+	int yEnd = rawYEnd > (long long)desc.Height ? (int)desc.Height : (int)rawYEnd;
+	if(xStart >= xEnd || yStart >= yEnd){
+		surf->Release();
+		return 0;
+	}
 
 	D3DLOCKED_RECT d3dlr;
-	D3DSURFACE_DESC desc;
-	IDirect3DSurface9 *surf = nil;
-	backbuffer->GetDesc(&desc);
-	d3ddevice->CreateOffscreenPlainSurface(desc.Width, desc.Height, desc.Format,
-		D3DPOOL_SYSTEMMEM, &surf, nil);
-	d3ddevice->GetRenderTargetData(backbuffer, surf);
-
-	surf->LockRect(&d3dlr, nil, D3DLOCK_NO_DIRTY_UPDATE|D3DLOCK_READONLY);
-	if(desc.Format == D3DFMT_A8R8G8B8){
-		int xEnd = rx + w < (int)desc.Width  ? rx + w : (int)desc.Width;
-		int yEnd = ry + h < (int)desc.Height ? ry + h : (int)desc.Height;
-		for(int row = ry; row < yEnd; row++){
+	HRESULT lockResult = surf->LockRect(&d3dlr, nil,
+		D3DLOCK_NO_DIRTY_UPDATE|D3DLOCK_READONLY);
+	if(SUCCEEDED(lockResult)){
+		for(int row = yStart; row < yEnd; row++){
 			uint8 *scanline = (uint8*)d3dlr.pBits + d3dlr.Pitch*row;
-			for(int col = rx; col < xEnd; col++){
+			for(int col = xStart; col < xEnd; col++){
 				uint8 *px = scanline + col*4;
 				int32 code = px[0]<<16 | px[1]<<8 | px[2];
 				if(code == 0) continue;
@@ -141,12 +321,11 @@ GetColourCodesInRect(int rx, int ry, int w, int h, int32 *out, int maxOut)
 				}
 			}
 		}
+	done:
+		surf->UnlockRect();
 	}
-done:
-	surf->UnlockRect();
 	surf->Release();
-	backbuffer->Release();
-	return count;
+	return SUCCEEDED(lockResult) ? count : -1;
 }
 
 #endif
@@ -218,14 +397,31 @@ makeColourCodePipeline(void)
 	return pipe;
 }
 
+bool
+BeginColourCodePass(rw::Camera *camera, const rw::RGBA *clearColour)
+{
+	if(camera == nil || clearColour == nil)
+		return false;
+	camera->clear((rw::RGBA*)clearColour, rw::Camera::CLEARIMAGE|rw::Camera::CLEARZ);
+	return true;
+}
+
+void
+EndColourCodePass(void)
+{
+}
+
 int32
 GetColourCode(int x, int y)
 {
-	rw::RGBA col;
+	rw::RGBA col = { 0, 0, 0, 0 };
 	int viewport[4];
-	// TODO: check format and dimensions properly
-	glGetIntegerv(GL_VIEWPORT, viewport); 
-	glReadPixels(x, viewport[3]-y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, &col);
+	glGetIntegerv(GL_VIEWPORT, viewport);
+	if(x < viewport[0] || y < viewport[1] ||
+	   x >= viewport[0] + viewport[2] || y >= viewport[1] + viewport[3])
+		return 0;
+	glReadPixels(x, viewport[1] + viewport[3] - 1 - y,
+	             1, 1, GL_RGBA, GL_UNSIGNED_BYTE, &col);
 	return col.blue<<16 | col.green<<8 | col.red;
 }
 
@@ -233,19 +429,32 @@ int
 GetColourCodesInRect(int rx, int ry, int w, int h, int32 *out, int maxOut)
 {
 	int count = 0;
-	if(w <= 0 || h <= 0 || maxOut <= 0) return 0;
+	if(w <= 0 || h <= 0 || out == nil || maxOut <= 0) return 0;
 
 	int viewport[4];
 	glGetIntegerv(GL_VIEWPORT, viewport);
 
-	int glx = rx;
-	int gly = viewport[3] - ry - h;
-	rw::RGBA *pixels = (rw::RGBA*)rwMalloc(w * h * sizeof(rw::RGBA), 0);
-	if(pixels == nil) return 0;
-	glReadPixels(glx, gly, w, h, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+	long long rawXEnd = (long long)rx + w;
+	long long rawYEnd = (long long)ry + h;
+	int xStart = rx < viewport[0] ? viewport[0] : rx;
+	int yStart = ry < viewport[1] ? viewport[1] : ry;
+	int xLimit = viewport[0] + viewport[2];
+	int yLimit = viewport[1] + viewport[3];
+	int xEnd = rawXEnd > xLimit ? xLimit : (int)rawXEnd;
+	int yEnd = rawYEnd > yLimit ? yLimit : (int)rawYEnd;
+	if(xStart >= xEnd || yStart >= yEnd)
+		return 0;
+
+	int readWidth = xEnd - xStart;
+	int readHeight = yEnd - yStart;
+	int glx = xStart;
+	int gly = viewport[1] + viewport[3] - yEnd;
+	rw::RGBA *pixels = (rw::RGBA*)rwMalloc(readWidth * readHeight * sizeof(rw::RGBA), 0);
+	if(pixels == nil) return -1;
+	glReadPixels(glx, gly, readWidth, readHeight, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 
 	// glReadPixels returns bottom-up rows; iterate all pixels
-	for(int i = 0; i < w*h; i++){
+	for(int i = 0; i < readWidth*readHeight; i++){
 		int32 code = pixels[i].blue<<16 | pixels[i].green<<8 | pixels[i].red;
 		if(code == 0) continue;
 		bool found = false;

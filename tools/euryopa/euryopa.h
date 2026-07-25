@@ -138,6 +138,7 @@ bool GetIplVisibilityEntryVisible(int i);
 void SetIplVisibilityEntryVisible(int i, bool visible);
 void SetAllIplVisibilityEntries(bool visible);
 void ShowOnlyIplVisibilityEntry(int i);
+int SelectIplVisibilityEntryInstances(int i);
 
 // non-rendering things
 extern bool gRenderCollision;

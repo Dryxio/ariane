@@ -452,6 +452,9 @@ void registerPDSPipes(void);
 extern bool renderColourCoded;
 extern rw::RGBA colourCode;
 rw::ObjPipeline *makeColourCodePipeline(void);
+bool BeginColourCodePass(rw::Camera *camera, const rw::RGBA *clearColour);
+void EndColourCodePass(void);
+// Readback returns -1 on a graphics error; 0 remains the background/no-hit code.
 rw::int32 GetColourCode(int x, int y);
 int GetColourCodesInRect(int x, int y, int w, int h, rw::int32 *out, int maxOut);
 
