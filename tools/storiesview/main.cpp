@@ -877,9 +877,13 @@ void
 pickWorldObject(void)
 {
 	static rw::RGBA white = { 0xFF, 0xFF, 0xFF, 0xFF };
-	TheCamera.m_rwcam->clear(&white, rw::Camera::CLEARIMAGE|rw::Camera::CLEARZ);
+	if(!gta::BeginColourCodePass(TheCamera.m_rwcam, &white))
+		return;
 	Renderer::renderEverythingColourCoded();
 	int32 c = gta::GetColourCode(CPad::newMouseState.x, CPad::newMouseState.y);
+	gta::EndColourCodePass();
+	if(c < 0)
+		return;
 	BuildingExt *build = FindBuildingExt(c);
 	if(build){
 		if(CPad::IsShiftDown())
@@ -902,13 +906,17 @@ pickColModel(void)
 {
 	CEntity *e;
 	static rw::RGBA white = { 0xFF, 0xFF, 0xFF, 0xFF };
-	TheCamera.m_rwcam->clear(&white, rw::Camera::CLEARIMAGE|rw::Camera::CLEARZ);
+	if(!gta::BeginColourCodePass(TheCamera.m_rwcam, &white))
+		return;
 	gta::renderColourCoded = 1;
 	Renderer::renderColModels();
 	gta::renderColourCoded = 0;
 	RenderDebugTris();
 	RenderDebugLines();
 	int32 c = gta::GetColourCode(CPad::newMouseState.x, CPad::newMouseState.y);
+	gta::EndColourCodePass();
+	if(c < 0)
+		return;
 	switch(c >> 16){
 	case 1: e = pBuildingPool->GetSlot(c & 0xFFFF); break;
 	case 2: e = pTreadablePool->GetSlot(c & 0xFFFF); break;

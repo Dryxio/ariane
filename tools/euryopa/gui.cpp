@@ -4430,6 +4430,14 @@ uiView(void)
 		if(ImGui::SmallButton("Only"))
 			ShowOnlyIplVisibilityEntry(i);
 		ImGui::SameLine();
+		if(ImGui::SmallButton("Select")){
+			int selected = SelectIplVisibilityEntryInstances(i);
+			visible = true;
+			Toast(TOAST_SPAWN, "Selected %d instance%s from %s",
+			      selected, selected == 1 ? "" : "s", name);
+		}
+		ImGui::SetItemTooltip("Select every non-deleted instance from this IPL for group transforms.");
+		ImGui::SameLine();
 		if(ImGui::Checkbox("##visible", &visible))
 			SetIplVisibilityEntryVisible(i, visible);
 		ImGui::SameLine();

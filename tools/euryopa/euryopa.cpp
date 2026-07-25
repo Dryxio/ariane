@@ -274,6 +274,32 @@ ShowOnlyIplVisibilityEntry(int i)
 		gIplVisibilityEntries[j].visible = (int)j == i;
 }
 
+int
+SelectIplVisibilityEntryInstances(int i)
+{
+	RefreshIplVisibilityEntries();
+	if(i < 0 || i >= (int)gIplVisibilityEntries.size())
+		return 0;
+
+	const char *key = gIplVisibilityEntries[i].key;
+	int selected = 0;
+	ClearSelection();
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		char instKey[256];
+		if(inst == nil || inst->m_isDeleted)
+			continue;
+		if(!buildInstIplVisibilityKey(inst, instKey, sizeof(instKey)))
+			continue;
+		if(rw::strcmp_ci(instKey, key) != 0)
+			continue;
+		inst->Select();
+		selected++;
+	}
+	gIplVisibilityEntries[i].visible = true;
+	return selected;
+}
+
 bool
 IsInstVisibleByIplFilter(const ObjectInst *inst)
 {
@@ -624,9 +650,12 @@ int32
 pick(void)
 {
 	static rw::RGBA black = { 0, 0, 0, 0xFF };
-	TheCamera.m_rwcam->clear(&black, rw::Camera::CLEARIMAGE|rw::Camera::CLEARZ);
+	if(!gta::BeginColourCodePass(TheCamera.m_rwcam, &black))
+		return -1;
 	RenderEverythingColourCoded();
-	return gta::GetColourCode(CPad::newMouseState.x, CPad::newMouseState.y);
+	int32 code = gta::GetColourCode(CPad::newMouseState.x, CPad::newMouseState.y);
+	gta::EndColourCodePass();
+	return code;
 }
 
 static rw::V3d
@@ -1735,12 +1764,15 @@ handleRectSelect(void)
 	}else{
 		// LMB released — commit selection via colour-coded picking pass
 		bool addMode = CPad::IsCtrlDown();
-		if(!addMode && !ctx.removeMode)
-			ClearSelection();
 
 		// Render scene with colour codes and read the selection rectangle
 		static rw::RGBA black = { 0, 0, 0, 0xFF };
-		TheCamera.m_rwcam->clear(&black, rw::Camera::CLEARIMAGE|rw::Camera::CLEARZ);
+		if(!gta::BeginColourCodePass(TheCamera.m_rwcam, &black)){
+			sRectSelectDragging = false;
+			gRectSelectActive = false;
+			Toast(TOAST_SELECTION, "Rectangle select failed to create the picking buffer");
+			return;
+		}
 		RenderEverythingColourCoded();
 
 		int rx = (int)ctx.x1;
@@ -1749,6 +1781,15 @@ handleRectSelect(void)
 		int rh = (int)(ctx.y2 - ctx.y1 + 0.5f);
 		int32 codes[MAX_BATCH_OBJECTS];
 		int numCodes = gta::GetColourCodesInRect(rx, ry, rw, rh, codes, MAX_BATCH_OBJECTS);
+		gta::EndColourCodePass();
+		if(numCodes < 0){
+			sRectSelectDragging = false;
+			gRectSelectActive = false;
+			Toast(TOAST_SELECTION, "Rectangle select failed to read the picking buffer");
+			return;
+		}
+		if(!addMode && !ctx.removeMode)
+			ClearSelection();
 		if(numCodes >= MAX_BATCH_OBJECTS)
 			Toast(TOAST_SELECTION, "Rectangle select limited to %d object(s)", MAX_BATCH_OBJECTS);
 
@@ -1834,7 +1875,12 @@ handleTool(void)
 			SAPaths::selectedNode = SAPaths::hoveredNode;
 			Effects::selectedEffect = Effects::hoveredEffect;
 		}else{
-			ObjectInst *inst = GetInstanceByID(pick());
+			int32 code = pick();
+			if(code < 0){
+				Toast(TOAST_SELECTION, "Selection failed to create or read the picking buffer");
+				return;
+			}
+			ObjectInst *inst = GetInstanceByID(code);
 			if(inst && !inst->m_isDeleted){
 				if(CPad::IsShiftDown())
 					inst->Select();
@@ -1866,8 +1912,13 @@ handleTool(void)
 				SAPaths::selectedNode = SAPaths::hoveredNode;
 				Effects::selectedEffect = Effects::hoveredEffect;
 			}else{
+				int32 code = pick();
+				if(code < 0){
+					Toast(TOAST_SELECTION, "Selection failed to create or read the picking buffer");
+					return;
+				}
 				ClearSelection();
-				ObjectInst *inst = GetInstanceByID(pick());
+				ObjectInst *inst = GetInstanceByID(code);
 				if(inst && !inst->m_isDeleted)
 					inst->Select();
 			}
