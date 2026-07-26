@@ -113,13 +113,10 @@ LoadDataFile(const char *filename, DatDesc *desc)
 		return;
 log("Loading data file %s\n", filename);
 	while(line = LoadLine(file)){
-		if(line[0] == '#'){
-			// Only inst sections need commented lines so deleted
-			// placeholders keep their original indices.
-			if(handler == LoadObjectInstance)
-				handler(line);
+		// Match GTA's text IPL parser: comments never reach a section handler
+		// and therefore never consume an instance/LOD ordinal.
+		if(line[0] == '#')
 			continue;
-		}
 		void *tmp = DatDesc::get(desc, line);
 		if(tmp){
 			handler = (void(*)(char*))tmp;
@@ -425,55 +422,15 @@ LoadTXDParent(char *line)
 static std::vector<ObjectInst*> tmpInsts;
 static int iplInstCounter;  // tracks instance index within current IPL file
 
-static char*
-SkipCommentPrefix(char *line)
-{
-	while(*line == '#')
-		line++;
-	return skipWhite(line);
-}
-
-static bool
-LooksLikeObjectInstanceLine(char *line)
-{
-	using namespace rw;
-
-	FileObjectInstance fi;
-	char model[MODELNAMELEN];
-	float area, sx, sy, sz;
-	if(isSA()){
-		return sscanf(line, "%d %s %d  %f %f %f  %f %f %f %f  %d",
-		              &fi.objectId, model, &fi.area,
-		              &fi.position.x, &fi.position.y, &fi.position.z,
-		              &fi.rotation.x, &fi.rotation.y, &fi.rotation.z, &fi.rotation.w,
-		              &fi.lod) == 11;
-	}
-	if(sscanf(line, "%d %s %f  %f %f %f  %f %f %f  %f %f %f %f",
-	          &fi.objectId, model, &area,
-	          &fi.position.x, &fi.position.y, &fi.position.z,
-	          &sx, &sy, &sz,
-	          &fi.rotation.x, &fi.rotation.y, &fi.rotation.z, &fi.rotation.w) == 13)
-		return true;
-	return sscanf(line, "%d %s  %f %f %f  %f %f %f  %f %f %f %f",
-	              &fi.objectId, model,
-	              &fi.position.x, &fi.position.y, &fi.position.z,
-	              &sx, &sy, &sz,
-	              &fi.rotation.x, &fi.rotation.y, &fi.rotation.z, &fi.rotation.w) == 12;
-}
-
 void
 LoadObjectInstance(char *line)
 {
 	using namespace rw;
 
-	// Deleted instance (commented out) - keep index slot for streaming IPL compatibility
-	if(line[0] == '#'){
-		if(LooksLikeObjectInstanceLine(SkipCommentPrefix(line))){
-			tmpInsts.push_back(nil);
-			iplInstCounter++;
-		}
+	// GTA skips commented placement lines entirely. They must not consume an
+	// IPL ordinal: every text LOD reference indexes only active inst entries.
+	if(line[0] == '#')
 		return;
-	}
 
 	FileObjectInstance fi = {};
 	fi.lod = -1;
@@ -1580,8 +1537,7 @@ FindAssociatedTextLodOutputIndex(ObjectInst *inst, const TextLodIndexState &stat
 }
 
 static void
-BuildTextLodIndexState(ObjectInst **insts, int numInsts, bool compactDeletes,
-                       TextLodIndexState &state)
+BuildTextLodIndexState(ObjectInst **insts, int numInsts, TextLodIndexState &state)
 {
 	int maxOldIndex = -1;
 	int outputIndex = 0;
@@ -1600,11 +1556,8 @@ BuildTextLodIndexState(ObjectInst **insts, int numInsts, bool compactDeletes,
 		if(inst == nil)
 			continue;
 		if(inst->m_isDeleted){
-			// Text-only IPL saves retain deleted instances as commented
-			// placeholders, and the loader counts each placeholder as an
-			// IPL index slot. Keep output indices aligned with that layout.
-			if(!compactDeletes)
-				outputIndex++;
+			// Text saves retain this line as a comment for undo/history, but
+			// GTA ignores comments when assigning text IPL instance ordinals.
 			continue;
 		}
 
@@ -1654,7 +1607,7 @@ BuildSceneFileContents(const char *filename, ObjectInst **insts, int numInsts, b
 	TextLodIndexState lodIndexState;
 
 	out.clear();
-	BuildTextLodIndexState(insts, numInsts, compactDeletes, lodIndexState);
+	BuildTextLodIndexState(insts, numInsts, lodIndexState);
 	ResolveSceneReadPath(filename, realpath, sizeof(realpath));
 	fin = fopen(realpath, "rb");
 	if(fin){
