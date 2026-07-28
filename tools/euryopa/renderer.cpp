@@ -590,7 +590,11 @@ RenderTransparentInst(ObjectInst *inst)
 		SetRenderState(rw::ZWRITEENABLE, 0);
 		SetRenderState(rw::ALPHATESTREF, 0);
 	}else
-		SetRenderState(rw::ALPHATESTREF, params.alphaRef);
+		// The opaque pass uses SA's high cutout threshold (100), but sorted
+		// draw-last objects also contain soft-alpha decals, grime and shadows.
+		// Restore the platform's default threshold here so those pixels blend
+		// instead of being discarded almost entirely.
+		SetRenderState(rw::ALPHATESTREF, params.alphaRefDefault);
 
 //	This is not handled that way by GTA, only on fading entities....
 //	if(obj->m_additive)

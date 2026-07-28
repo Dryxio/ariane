@@ -2,6 +2,29 @@
 #include "icons.h"
 #include "font_data.h"
 
+#if defined(__APPLE__) && defined(LIBRW_GLFW)
+#include <GLFW/glfw3.h>
+extern GLFWwindow *window;
+#endif
+
+static float
+GetEditorUiScale(void)
+{
+#if defined(__APPLE__) && defined(LIBRW_GLFW)
+	float xscale = 1.0f;
+	float yscale = 1.0f;
+	if(window)
+		glfwGetWindowContentScale(window, &xscale, &yscale);
+
+	float scale = xscale > yscale ? xscale : yscale;
+	if(scale < 1.0f) scale = 1.0f;
+	if(scale > 4.0f) scale = 4.0f;
+	return scale;
+#else
+	return 1.0f;
+#endif
+}
+
 // Accent color — used for highlights, active elements, selection
 static const ImVec4 kAccent       = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);  // soft blue
 static const ImVec4 kAccentHover  = ImVec4(0.33f, 0.67f, 1.00f, 1.00f);
@@ -121,13 +144,19 @@ SetupStyle(void)
 
 	// Modal dimming
 	c[ImGuiCol_ModalWindowDimBg]     = ImVec4(0.00f, 0.00f, 0.00f, 0.55f);
+
+	// The GLFW backend renders in framebuffer pixels. On a Retina Mac the
+	// framebuffer is commonly 2x the logical window size, so fixed pixel sizes
+	// otherwise make the interface appear half-sized. Other platforms keep the
+	// existing 1.0 scale.
+	style.ScaleAllSizes(GetEditorUiScale());
 }
 
 void
 SetupFonts(void)
 {
 	ImGuiIO &io = ImGui::GetIO();
-	float fontSize = 15.0f;
+	float fontSize = 15.0f * GetEditorUiScale();
 
 	// Only bake the exact icons used by Ariane. Packing the entire private-use
 	// area creates a very large atlas, which can fail on some D3D9 GPUs during
