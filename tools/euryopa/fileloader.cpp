@@ -64,9 +64,20 @@ SceneWasAlreadyLoaded(const char *filename)
 void*
 DatDesc::get(DatDesc *desc, const char *name)
 {
-	for(; desc->name[0] != '\0'; desc++)
-		if(strcmp(desc->name, name) == 0)
+	for(; desc->name[0] != '\0'; desc++){
+		size_t len = strlen(desc->name);
+		if(strncmp(desc->name, name, len) != 0)
+			continue;
+
+		// Mod Loader text files can annotate section markers, for example
+		// "inst // Proper Fixes ...". GTA accepts these comments, so match a
+		// section when the remaining text is empty or contains only a comment.
+		const char *rest = name + len;
+		while(isspace((unsigned char)*rest))
+			rest++;
+		if(*rest == '\0' || *rest == '#' || (rest[0] == '/' && rest[1] == '/'))
 			return (void*)desc->handler;
+	}
 	return (void*)desc->handler;
 }
 
