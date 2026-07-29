@@ -1624,10 +1624,12 @@ ReadPrefabEntries(const char *path, PrefabEntry *entries, int maxEntries, int *n
 	return true;
 }
 
-// 3D Preview — uses Scene camera with swapped framebuffers (librw pattern)
+// Keep preview passes isolated from the main scene camera. On GL3, endUpdate()
+// does not restore the framebuffer, viewport, matrices, or other device state.
 rw::Texture *gPreviewTexture;
 static rw::Raster *previewColorRaster;
 static rw::Raster *previewDepthRaster;
+static rw::Camera *previewCamera;
 static bool previewInited;
 static bool previewInitFailed;
 
@@ -1643,6 +1645,7 @@ struct ObjectThumbnailSlot
 {
 	int objectId;
 	bool ready;
+	bool failed;
 	uint32 lastUsed;
 	int lastRequestedFrame;
 	rw::Raster *colorRaster;
@@ -1659,6 +1662,7 @@ struct PrefabThumbnailSlot
 {
 	char path[512];
 	bool ready;
+	bool failed;
 	uint32 lastUsed;
 	int lastRequestedFrame;
 	rw::Raster *colorRaster;
@@ -1669,6 +1673,27 @@ struct PrefabThumbnailSlot
 static PrefabThumbnailSlot prefabThumbnailSlots[PREFAB_THUMBNAIL_SLOTS];
 static uint32 prefabThumbnailUseSeq;
 static bool prefabThumbnailInitFailed;
+
+static rw::Camera*
+getPreviewCamera(void)
+{
+	if(previewCamera)
+		return previewCamera;
+
+	previewCamera = rw::Camera::create();
+	if(previewCamera == nil)
+		return nil;
+	rw::Frame *frame = rw::Frame::create();
+	if(frame == nil){
+		previewCamera->destroy();
+		previewCamera = nil;
+		return nil;
+	}
+	previewCamera->setFrame(frame);
+	if(Scene.world)
+		Scene.world->addCamera(previewCamera);
+	return previewCamera;
+}
 
 static void
 initObjectThumbnailSlots(void)
@@ -1692,6 +1717,7 @@ destroyObjectThumbnailSlot(ObjectThumbnailSlot *slot)
 	if(slot->depthRaster){ slot->depthRaster->destroy(); slot->depthRaster = nil; }
 	slot->objectId = -1;
 	slot->ready = false;
+	slot->failed = false;
 	slot->lastUsed = 0;
 	slot->lastRequestedFrame = 0;
 }
@@ -1708,6 +1734,7 @@ destroyPrefabThumbnailSlot(PrefabThumbnailSlot *slot)
 	if(slot->depthRaster){ slot->depthRaster->destroy(); slot->depthRaster = nil; }
 	slot->path[0] = '\0';
 	slot->ready = false;
+	slot->failed = false;
 	slot->lastUsed = 0;
 	slot->lastRequestedFrame = 0;
 }
@@ -1739,6 +1766,7 @@ initObjectThumbnailSlot(ObjectThumbnailSlot *slot)
 	slot->texture->setFilter(rw::Texture::LINEAR);
 	slot->objectId = -1;
 	slot->ready = false;
+	slot->failed = false;
 	slot->lastUsed = 0;
 	slot->lastRequestedFrame = 0;
 	return true;
@@ -1776,6 +1804,7 @@ initPrefabThumbnailSlot(PrefabThumbnailSlot *slot)
 	}
 	slot->texture->setFilter(rw::Texture::LINEAR);
 	slot->ready = false;
+	slot->failed = false;
 	slot->lastUsed = 0;
 	slot->lastRequestedFrame = 0;
 	return true;
@@ -1808,25 +1837,10 @@ renderObjectToRaster(int objectId, rw::Raster *colorRaster, rw::Raster *depthRas
 	ObjectDef *obj = GetObjectDef(objectId);
 	if(obj == nil)
 		return false;
-	if(!obj->IsLoaded()){
-		RequestObject(objectId);
-		return false;
-	}
 
 	rw::Atomic *atm = nil;
 	rw::Clump *clump = nil;
-	if(obj->m_type == ObjectDef::ATOMIC && obj->m_atomics[0]){
-		atm = obj->m_atomics[0]->clone();
-		rw::Frame *f = rw::Frame::create();
-		if(f)
-			atm->setFrame(f);
-		else{
-			atm->destroy();
-			atm = nil;
-		}
-	}else if(obj->m_type == ObjectDef::CLUMP && obj->m_clump)
-		clump = obj->m_clump->clone();
-	if(atm == nil && clump == nil)
+	if(!CreateObjectPreviewRwObject(objectId, &atm, &clump))
 		return false;
 
 	float radius = 5.0f;
@@ -1842,14 +1856,13 @@ renderObjectToRaster(int objectId, rw::Raster *colorRaster, rw::Raster *depthRas
 	rw::V3d up = { 0.0f, 0.0f, -1.0f };
 	rw::V3d dir = normalize(sub(target, eye));
 
-	rw::Camera *cam = Scene.camera;
-	rw::Raster *savedFB = cam->frameBuffer;
-	rw::Raster *savedZB = cam->zBuffer;
-	float savedNear = cam->nearPlane;
-	float savedFar = cam->farPlane;
-	float savedFog = cam->fogPlane;
+	rw::Camera *cam = getPreviewCamera();
+	if(cam == nil){
+		if(atm){ atm->getFrame()->destroy(); atm->destroy(); }
+		if(clump){ clump->destroy(); }
+		return false;
+	}
 	rw::Frame *camFrame = cam->getFrame();
-	rw::Matrix savedMatrix = camFrame->matrix;
 
 	cam->frameBuffer = colorRaster;
 	cam->zBuffer = depthRaster;
@@ -1883,15 +1896,6 @@ renderObjectToRaster(int objectId, rw::Raster *colorRaster, rw::Raster *depthRas
 
 	cam->endUpdate();
 
-	cam->frameBuffer = savedFB;
-	cam->zBuffer = savedZB;
-	cam->setNearPlane(savedNear);
-	cam->setFarPlane(savedFar);
-	cam->fogPlane = savedFog;
-	cam->setFOV(TheCamera.m_fov, TheCamera.m_aspectRatio);
-	camFrame->matrix = savedMatrix;
-	camFrame->updateObjects();
-
 	if(atm){ atm->getFrame()->destroy(); atm->destroy(); }
 	if(clump){ clump->destroy(); }
 	Timecycle::SetLights();
@@ -1904,19 +1908,6 @@ renderPrefabToRaster(const char *path, rw::Raster *colorRaster, rw::Raster *dept
 	PrefabEntry entries[256];
 	int numEntries = 0;
 	if(!ReadPrefabEntries(path, entries, 256, &numEntries, false))
-		return false;
-
-	bool anyMissing = false;
-	for(int i = 0; i < numEntries; i++){
-		ObjectDef *obj = GetObjectDef(entries[i].objectId);
-		if(obj == nil)
-			continue;
-		if(!obj->IsLoaded()){
-			RequestObject(entries[i].objectId);
-			anyMissing = true;
-		}
-	}
-	if(anyMissing)
 		return false;
 
 	rw::V3d minPt = { 1.0e30f, 1.0e30f, 1.0e30f };
@@ -1958,6 +1949,36 @@ renderPrefabToRaster(const char *path, rw::Raster *colorRaster, rw::Raster *dept
 	}
 	if(radius < 2.0f) radius = 2.0f;
 
+	struct PrefabPreviewModel
+	{
+		int objectId;
+		rw::Atomic *atomic;
+		rw::Clump *clump;
+	};
+	PrefabPreviewModel models[256];
+	int numModels = 0;
+	for(int i = 0; i < numEntries; i++){
+		int modelIndex = -1;
+		for(int j = 0; j < numModels; j++)
+			if(models[j].objectId == entries[i].objectId){
+				modelIndex = j;
+				break;
+			}
+		if(modelIndex >= 0)
+			continue;
+
+		rw::Atomic *atomic = nil;
+		rw::Clump *clump = nil;
+		if(!CreateObjectPreviewRwObject(entries[i].objectId, &atomic, &clump))
+			continue;
+		models[numModels].objectId = entries[i].objectId;
+		models[numModels].atomic = atomic;
+		models[numModels].clump = clump;
+		numModels++;
+	}
+	if(numModels == 0)
+		return false;
+
 	uint32 hash = 2166136261u;
 	for(const char *s = path; *s; s++)
 		hash = (hash ^ (uint8)*s) * 16777619u;
@@ -1967,14 +1988,15 @@ renderPrefabToRaster(const char *path, rw::Raster *colorRaster, rw::Raster *dept
 	rw::V3d up = { 0.0f, 0.0f, -1.0f };
 	rw::V3d dir = normalize(sub(target, eye));
 
-	rw::Camera *cam = Scene.camera;
-	rw::Raster *savedFB = cam->frameBuffer;
-	rw::Raster *savedZB = cam->zBuffer;
-	float savedNear = cam->nearPlane;
-	float savedFar = cam->farPlane;
-	float savedFog = cam->fogPlane;
+	rw::Camera *cam = getPreviewCamera();
+	if(cam == nil){
+		for(int i = 0; i < numModels; i++){
+			if(models[i].atomic){ models[i].atomic->getFrame()->destroy(); models[i].atomic->destroy(); }
+			if(models[i].clump){ models[i].clump->destroy(); }
+		}
+		return false;
+	}
 	rw::Frame *camFrame = cam->getFrame();
-	rw::Matrix savedMatrix = camFrame->matrix;
 
 	cam->frameBuffer = colorRaster;
 	cam->zBuffer = depthRaster;
@@ -1997,52 +2019,34 @@ renderPrefabToRaster(const char *path, rw::Raster *colorRaster, rw::Raster *dept
 	pDirect->setColor(0.52f, 0.52f, 0.52f);
 
 	for(int i = 0; i < numEntries; i++){
-		ObjectDef *obj = GetObjectDef(entries[i].objectId);
-		if(obj == nil)
-			continue;
-
-		rw::Atomic *atm = nil;
-		rw::Clump *clump = nil;
-		if(obj->m_type == ObjectDef::ATOMIC && obj->m_atomics[0]){
-			atm = obj->m_atomics[0]->clone();
-			rw::Frame *f = rw::Frame::create();
-			if(f)
-				atm->setFrame(f);
-			else{
-				atm->destroy();
-				atm = nil;
+		PrefabPreviewModel *model = nil;
+		for(int j = 0; j < numModels; j++)
+			if(models[j].objectId == entries[i].objectId){
+				model = &models[j];
+				break;
 			}
-		}else if(obj->m_type == ObjectDef::CLUMP && obj->m_clump)
-			clump = obj->m_clump->clone();
-		if(atm == nil && clump == nil)
+		if(model == nil)
 			continue;
 
 		rw::Quat rotation = { entries[i].rotX, entries[i].rotY, entries[i].rotZ, entries[i].rotW };
 		rw::V3d translation = { entries[i].relX, entries[i].relY, entries[i].relZ };
 		rw::Matrix matrix;
 		BuildPreviewMatrix(&matrix, rotation, translation);
-		if(atm){
-			atm->getFrame()->transform(&matrix, rw::COMBINEREPLACE);
-			atm->render();
+		if(model->atomic){
+			model->atomic->getFrame()->transform(&matrix, rw::COMBINEREPLACE);
+			model->atomic->render();
 		}else{
-			clump->getFrame()->transform(&matrix, rw::COMBINEREPLACE);
-			clump->render();
+			model->clump->getFrame()->transform(&matrix, rw::COMBINEREPLACE);
+			model->clump->render();
 		}
-
-		if(atm){ atm->getFrame()->destroy(); atm->destroy(); }
-		if(clump){ clump->destroy(); }
 	}
 
 	cam->endUpdate();
 
-	cam->frameBuffer = savedFB;
-	cam->zBuffer = savedZB;
-	cam->setNearPlane(savedNear);
-	cam->setFarPlane(savedFar);
-	cam->fogPlane = savedFog;
-	cam->setFOV(TheCamera.m_fov, TheCamera.m_aspectRatio);
-	camFrame->matrix = savedMatrix;
-	camFrame->updateObjects();
+	for(int i = 0; i < numModels; i++){
+		if(models[i].atomic){ models[i].atomic->getFrame()->destroy(); models[i].atomic->destroy(); }
+		if(models[i].clump){ models[i].clump->destroy(); }
+	}
 
 	Timecycle::SetLights();
 	return true;
@@ -2052,6 +2056,7 @@ void
 InitPreviewRenderer(void)
 {
 	if(previewInited || previewInitFailed) return;
+	if(getPreviewCamera() == nil){ previewInitFailed = true; return; }
 
 	previewColorRaster = rw::Raster::create(PREVIEW_SIZE, PREVIEW_SIZE, 0, rw::Raster::CAMERATEXTURE);
 	if(previewColorRaster == nil){ previewInitFailed = true; return; }
@@ -2082,6 +2087,14 @@ ShutdownPreviewRenderer(void)
 	}
 	if(previewColorRaster){ previewColorRaster->destroy(); previewColorRaster = nil; }
 	if(previewDepthRaster){ previewDepthRaster->destroy(); previewDepthRaster = nil; }
+	if(previewCamera){
+		rw::Frame *frame = previewCamera->getFrame();
+		if(previewCamera->world)
+			previewCamera->world->removeCamera(previewCamera);
+		previewCamera->destroy();
+		previewCamera = nil;
+		if(frame) frame->destroy();
+	}
 	previewInited = false;
 }
 
@@ -2121,6 +2134,7 @@ GetObjectThumbnailTexture(int objectId)
 
 	slot->objectId = objectId;
 	slot->ready = false;
+	slot->failed = false;
 	slot->lastUsed = ++objectThumbnailUseSeq;
 	slot->lastRequestedFrame = requestFrame;
 	return nil;
@@ -2136,7 +2150,7 @@ RenderRequestedObjectThumbnails(void)
 	int attempted = 0;
 	for(int i = 0; i < OBJECT_THUMBNAIL_SLOTS && attempted < OBJECT_THUMBNAILS_PER_FRAME; i++){
 		ObjectThumbnailSlot *slot = &objectThumbnailSlots[i];
-		if(slot->objectId < 0 || slot->ready)
+		if(slot->objectId < 0 || slot->ready || slot->failed)
 			continue;
 		attempted++;
 		int objectId = slot->objectId;
@@ -2150,6 +2164,8 @@ RenderRequestedObjectThumbnails(void)
 			ObjectDef *obj = GetObjectDef(objectId);
 			if(obj == nil)
 				slot->objectId = -1;
+			else
+				slot->failed = true;
 		}
 	}
 }
@@ -2190,6 +2206,7 @@ GetPrefabThumbnailTexture(const char *path)
 	strncpy(slot->path, path, sizeof(slot->path));
 	slot->path[sizeof(slot->path)-1] = '\0';
 	slot->ready = false;
+	slot->failed = false;
 	slot->lastUsed = ++prefabThumbnailUseSeq;
 	slot->lastRequestedFrame = requestFrame;
 	return nil;
@@ -2204,7 +2221,7 @@ RenderRequestedPrefabThumbnails(void)
 	int attempted = 0;
 	for(int i = 0; i < PREFAB_THUMBNAIL_SLOTS && attempted < PREFAB_THUMBNAILS_PER_FRAME; i++){
 		PrefabThumbnailSlot *slot = &prefabThumbnailSlots[i];
-		if(slot->path[0] == '\0' || slot->ready)
+		if(slot->path[0] == '\0' || slot->ready || slot->failed)
 			continue;
 		attempted++;
 		char path[512];
@@ -2218,6 +2235,8 @@ RenderRequestedPrefabThumbnails(void)
 			slot->ready = true;
 		else if(!doesFileExist(path))
 			slot->path[0] = '\0';
+		else
+			slot->failed = true;
 	}
 }
 
@@ -2274,17 +2293,10 @@ RenderPreviewObject(int objectId)
 	rw::V3d up = { 0.0f, 0.0f, -1.0f };  // negative Z because FBO is Y-flipped
 	rw::V3d dir = normalize(sub(target, eye));
 
-	// Use scene camera with swapped framebuffers (librw pattern)
-	rw::Camera *cam = Scene.camera;
-
-	// Save ALL camera state
-	rw::Raster *savedFB = cam->frameBuffer;
-	rw::Raster *savedZB = cam->zBuffer;
-	float savedNear = cam->nearPlane;
-	float savedFar = cam->farPlane;
-	float savedFog = cam->fogPlane;
+	rw::Camera *cam = getPreviewCamera();
+	if(cam == nil)
+		return;
 	rw::Frame *camFrame = cam->getFrame();
-	rw::Matrix savedMatrix = camFrame->matrix;
 
 	// Set preview camera state
 	cam->frameBuffer = previewColorRaster;
@@ -2318,16 +2330,6 @@ RenderPreviewObject(int objectId)
 	}
 
 	cam->endUpdate();
-
-	// Restore ALL camera state
-	cam->frameBuffer = savedFB;
-	cam->zBuffer = savedZB;
-	cam->setNearPlane(savedNear);
-	cam->setFarPlane(savedFar);
-	cam->fogPlane = savedFog;
-	cam->setFOV(TheCamera.m_fov, TheCamera.m_aspectRatio);
-	camFrame->matrix = savedMatrix;
-	camFrame->updateObjects();
 
 	Timecycle::SetLights();
 }
