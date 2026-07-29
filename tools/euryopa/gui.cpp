@@ -50,6 +50,7 @@ static char gAutomaticBackupLastSnapshot[1024];
 static ImGuiTextFilter gEditorModelFilter;
 static ImGuiTextFilter gEditorTxdFilter;
 static bool gEditorHighlightMatches;
+static bool gEditorFilterByIpl;
 
 static ImGuiTextFilter gBrowserCategoryFilter;
 static ImGuiTextFilter gBrowserIdeFilter;
@@ -5787,10 +5788,14 @@ uiEditorWindow(void)
 		if(ImGui::Button("Clear##Txd"))
 			gEditorTxdFilter.Clear();
 		ImGui::Checkbox("Highlight matches", &gEditorHighlightMatches);
+		ImGui::SameLine();
+		ImGui::Checkbox("Filter by IPL visibility", &gEditorFilterByIpl);
 		for(p = instances.first; p; p = p->next){
 			inst = (ObjectInst*)p->item;
 			obj = GetObjectDef(inst->m_objectId);
 			txd = GetTxdDef(obj->m_txdSlot);
+			if(gEditorFilterByIpl && !IsInstVisibleByIplFilter(inst))
+				continue;
 			if(gEditorModelFilter.PassFilter(obj->m_name) &&
 			   gEditorTxdFilter.PassFilter(txd->name)){
 				int numPops = 0;
