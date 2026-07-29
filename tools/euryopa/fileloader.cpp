@@ -100,9 +100,8 @@ again:
 	char *s = skipWhite(linebuf);
 	// remove trailing whitespace
 	int end = strlen(s);
-	char c;
-	while(c = s[--end], isspace(c))
-		s[end] = '\0';
+	while(end > 0 && isspace((unsigned char)s[end-1]))
+		s[--end] = '\0';
 	// convert ',' -> ' '
 	for(char *t = s; *t; t++)
 		if(*t == ',') *t = ' ';

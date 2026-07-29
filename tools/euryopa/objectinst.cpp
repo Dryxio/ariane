@@ -1506,6 +1506,23 @@ GetLatestChangeSeq(void)
 	return gChangeSeqCounter;
 }
 
+float
+GetQuaternionSimilarity(const rw::Quat &a, const rw::Quat &b)
+{
+	float dot = a.x*b.x + a.y*b.y + a.z*b.z + a.w*b.w;
+	float lenSqA = a.x*a.x + a.y*a.y + a.z*a.z + a.w*a.w;
+	float lenSqB = b.x*b.x + b.y*b.y + b.z*b.z + b.w*b.w;
+	if(lenSqA <= 1.0e-12f || lenSqB <= 1.0e-12f){
+		float direct = (a.x-b.x)*(a.x-b.x) + (a.y-b.y)*(a.y-b.y) +
+		               (a.z-b.z)*(a.z-b.z) + (a.w-b.w)*(a.w-b.w);
+		float negated = (a.x+b.x)*(a.x+b.x) + (a.y+b.y)*(a.y+b.y) +
+		                (a.z+b.z)*(a.z+b.z) + (a.w+b.w)*(a.w+b.w);
+		return direct <= 1.0e-12f || negated <= 1.0e-12f ? 1.0f : 0.0f;
+	}
+	float similarity = fabsf(dot) / sqrtf(lenSqA*lenSqB);
+	return similarity < 1.0f ? similarity : 1.0f;
+}
+
 // Diff viewer — compute bitmask of changes since last save
 int
 GetInstanceDiffFlags(ObjectInst *inst)
@@ -1527,12 +1544,7 @@ GetInstanceDiffFlags(ObjectInst *inst)
 	float dist = length(sub(inst->m_translation, inst->m_savedTranslation));
 	if(dist >= 0.001f)
 		flags |= DIFF_MOVED;
-	// quaternion distance: if |dot| < 0.9999 the rotation changed
-	float dot = fabsf(inst->m_rotation.x * inst->m_savedRotation.x +
-	                   inst->m_rotation.y * inst->m_savedRotation.y +
-	                   inst->m_rotation.z * inst->m_savedRotation.z +
-	                   inst->m_rotation.w * inst->m_savedRotation.w);
-	if(dot < 0.9999f)
+	if(GetQuaternionSimilarity(inst->m_rotation, inst->m_savedRotation) < 0.9999f)
 		flags |= DIFF_ROTATED;
 	return flags;
 }
@@ -2743,8 +2755,11 @@ findPasteSourceLod(ObjectInst *src, int *lodObjIdOut, bool *usedAssociationOut)
 }
 
 static rw::V3d
-getClipboardPasteOffset(ObjectInst **toPaste, int numToPaste)
+getClipboardPasteOffset(ObjectInst **toPaste, int numToPaste, bool pasteInPlace)
 {
+	if(pasteInPlace)
+		return { 0.0f, 0.0f, 0.0f };
+
 	rw::V3d anchor = { 0.0f, 0.0f, 0.0f };
 	int numAnchors = 0;
 
@@ -2798,8 +2813,8 @@ PasteCutClipboard(void)
 	return (int)restored.size();
 }
 
-int
-PasteClipboard(void)
+static int
+pasteClipboard(bool pasteInPlace)
 {
 	if(clipboard.empty()) return 0;
 	if(clipboardIsCut)
@@ -2822,7 +2837,7 @@ PasteClipboard(void)
 		if(lodsCopiedWithParent.find(clipboard[i]) == lodsCopiedWithParent.end())
 			toPaste.push_back(clipboard[i]);
 
-	rw::V3d offset = getClipboardPasteOffset(toPaste.data(), (int)toPaste.size());
+	rw::V3d offset = getClipboardPasteOffset(toPaste.data(), (int)toPaste.size(), pasteInPlace);
 
 	ClearSelection();
 
@@ -2886,6 +2901,18 @@ PasteClipboard(void)
 				log("Generated %d associated LOD instance(s) during paste\n", generatedLods);
 	}
 	return (int)pasted.size();
+}
+
+int
+PasteClipboard(void)
+{
+	return pasteClipboard(false);
+}
+
+int
+PasteClipboardInPlace(void)
+{
+	return pasteClipboard(true);
 }
 
 int
