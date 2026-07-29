@@ -420,6 +420,75 @@ ObjectDef::Load(void)
 	SetTxdLookupContext(nil, -1);
 }
 
+static bool
+cloneLoadedObjectForPreview(ObjectDef *obj, rw::Atomic **atomicOut, rw::Clump **clumpOut)
+{
+	*atomicOut = nil;
+	*clumpOut = nil;
+	if(obj->m_type == ObjectDef::ATOMIC && obj->m_atomics[0]){
+		rw::Atomic *atomic = obj->m_atomics[0]->clone();
+		if(atomic == nil)
+			return false;
+		rw::Frame *frame = rw::Frame::create();
+		if(frame == nil){
+			atomic->destroy();
+			return false;
+		}
+		atomic->setFrame(frame);
+		*atomicOut = atomic;
+		return true;
+	}
+	if(obj->m_type == ObjectDef::CLUMP && obj->m_clump){
+		*clumpOut = obj->m_clump->clone();
+		return *clumpOut != nil;
+	}
+	return false;
+}
+
+bool
+CreateObjectPreviewRwObject(int id, rw::Atomic **atomicOut, rw::Clump **clumpOut)
+{
+	if(atomicOut == nil || clumpOut == nil)
+		return false;
+	*atomicOut = nil;
+	*clumpOut = nil;
+
+	ObjectDef *obj = GetObjectDef(id);
+	if(obj == nil || obj->m_cantLoad)
+		return false;
+	if(obj->IsLoaded())
+		return cloneLoadedObjectForPreview(obj, atomicOut, clumpOut);
+
+	// Thumbnail generation must not populate the registered ObjectDef: doing so
+	// changes world streaming and HD/LOD visibility while the browser scrolls.
+	// Load into a detached copy and suppress 2DFX registration, which is another
+	// global side effect of the normal ObjectDef::Load path.
+	ObjectDef preview = *obj;
+	for(int i = 0; i < (int)nelem(preview.m_atomics); i++)
+		preview.m_atomics[i] = nil;
+	preview.m_clump = nil;
+	preview.m_effectIndex = 0;
+	preview.m_numEffects = 0;
+	preview.m_hasPreRendered = false;
+
+	TxdPush();
+	preview.Load();
+	TxdPop();
+	bool ok = cloneLoadedObjectForPreview(&preview, atomicOut, clumpOut);
+
+	if(preview.m_clump){
+		preview.m_clump->destroy();
+		preview.m_clump = nil;
+	}
+	for(int i = 0; i < (int)nelem(preview.m_atomics); i++){
+		if(preview.m_atomics[i]){
+			destroyDetachedAtomic(preview.m_atomics[i]);
+			preview.m_atomics[i] = nil;
+		}
+	}
+	return ok;
+}
+
 void
 ObjectDef::SetAtomic(int n, rw::Atomic *atomic)
 {

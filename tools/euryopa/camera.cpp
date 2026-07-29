@@ -69,23 +69,39 @@ CCamera::Process(void)
 	else if(CPad::IsAltDown()) flyMul = gFlySlowMul;
 
 	static float speed = 0.0f;
-	if(CPad::IsKeyDown('W'))
-		speed += 0.1f;
-	else if(CPad::IsKeyDown('S'))
-		speed -= 0.1f;
-	else
+	static float sidespeed = 0.0f;
+	static bool wasFlyAcceleration = gFlyAcceleration;
+	if(wasFlyAcceleration != gFlyAcceleration){
 		speed = 0.0f;
+		sidespeed = 0.0f;
+		wasFlyAcceleration = gFlyAcceleration;
+	}
+	if(gFlyAcceleration){
+		if(CPad::IsKeyDown('W'))
+			speed += 0.1f;
+		else if(CPad::IsKeyDown('S'))
+			speed -= 0.1f;
+		else
+			speed = 0.0f;
+	}else{
+		speed = CPad::IsKeyDown('W') ? gFlySpeed :
+		        CPad::IsKeyDown('S') ? -gFlySpeed : 0.0f;
+	}
 	if(speed > 70.0f) speed = 70.0f;
 	if(speed < -70.0f) speed = -70.0f;
 	dolly(speed*scl*flyMul);
 
-	static float sidespeed = 0.0f;
-	if(CPad::IsKeyDown('A'))
-		sidespeed -= 0.1f;
-	else if(CPad::IsKeyDown('D'))
-		sidespeed += 0.1f;
-	else
-		sidespeed = 0.0f;
+	if(gFlyAcceleration){
+		if(CPad::IsKeyDown('A'))
+			sidespeed -= 0.1f;
+		else if(CPad::IsKeyDown('D'))
+			sidespeed += 0.1f;
+		else
+			sidespeed = 0.0f;
+	}else{
+		sidespeed = CPad::IsKeyDown('A') ? -gFlySpeed :
+		            CPad::IsKeyDown('D') ? gFlySpeed : 0.0f;
+	}
 	if(sidespeed > 70.0f) sidespeed = 70.0f;
 	if(sidespeed < -70.0f) sidespeed = -70.0f;
 	pan(sidespeed*scl*flyMul, 0.0f);

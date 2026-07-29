@@ -66,6 +66,8 @@ bool gDoBackfaceCulling;	// init from params
 bool gPlayAnimations = true;
 bool gUseViewerCam;
 bool gDrawTarget = true;
+bool gFlyAcceleration = true;
+float gFlySpeed = 2.0f;
 float gFlyFastMul = 2.0f;
 float gFlySlowMul = 0.5f;
 float gFovWheelStep = 2.0f;
@@ -2428,11 +2430,16 @@ Draw(void)
 		Scene.camera = TheCamera.m_rwcam_viewer;
 	else
 		Scene.camera = TheCamera.m_rwcam;
-	// Render 3D preview to texture (before main camera update)
+	// Keep PS2's framebuffer-only alpha emulation out of the offscreen browser
+	// passes. It performs an extra depth-mask pass for blended materials and is
+	// intended for the visible world, not thumbnails or the selected preview.
+	int previewGsAlphaTest = rw::GetRenderState(rw::GSALPHATEST);
+	rw::SetRenderState(rw::GSALPHATEST, 0);
 	if(GetSpawnObjectId() >= 0)
 		RenderPreviewObject(GetSpawnObjectId());
 	RenderRequestedObjectThumbnails();
 	RenderRequestedPrefabThumbnails();
+	rw::SetRenderState(rw::GSALPHATEST, previewGsAlphaTest);
 
 	Scene.camera->beginUpdate();
 

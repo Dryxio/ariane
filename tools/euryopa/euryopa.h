@@ -126,6 +126,8 @@ extern bool gDoBackfaceCulling;
 extern bool gPlayAnimations;
 extern bool gUseViewerCam;
 extern bool gDrawTarget;
+extern bool gFlyAcceleration;
+extern float gFlySpeed;
 extern float gFlyFastMul;
 extern float gFlySlowMul;
 extern float gFovWheelStep;
@@ -667,6 +669,7 @@ ObjectDef *AddObjectDef(int id);
 void RemoveObjectDef(int id);
 ObjectDef *GetObjectDef(int id);
 ObjectDef *GetObjectDef(const char *name, int *id);
+bool CreateObjectPreviewRwObject(int id, rw::Atomic **atomicOut, rw::Clump **clumpOut);
 
 
 struct FileObjectInstance

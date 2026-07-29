@@ -50,6 +50,11 @@ static char gAutomaticBackupLastSnapshot[1024];
 static ImGuiTextFilter gEditorModelFilter;
 static ImGuiTextFilter gEditorTxdFilter;
 static bool gEditorHighlightMatches;
+static std::vector<ObjectInst*> gEditorFilteredInstances;
+static std::string gEditorCachedModelFilter;
+static std::string gEditorCachedTxdFilter;
+static uint32 gEditorCachedInstanceChangeSeq = (uint32)-1;
+static CPtrNode *gEditorCachedInstancesFirst;
 
 static ImGuiTextFilter gBrowserCategoryFilter;
 static ImGuiTextFilter gBrowserIdeFilter;
@@ -543,6 +548,7 @@ normalizePersistentSettings(void)
 	Weather::interpolation = clamp(Weather::interpolation, 0.0f, 1.0f);
 	TheCamera.m_fov = clamp(TheCamera.m_fov, 1.0f, 150.0f);
 	TheCamera.m_LODmult = clamp(TheCamera.m_LODmult, 0.5f, 3.0f);
+	gFlySpeed = clamp(gFlySpeed, 0.1f, 70.0f);
 	gFlyFastMul = clamp(gFlyFastMul, 1.0f, 10.0f);
 	gFlySlowMul = clamp(gFlySlowMul, 0.05f, 1.0f);
 	gFovWheelStep = clamp(gFovWheelStep, 0.1f, 15.0f);
@@ -557,7 +563,7 @@ normalizePersistentSettings(void)
 	gRenderOnlyHD = gRenderMode == 1;
 	gRenderOnlyLod = gRenderMode == 2;
 	gGizmoMode = gGizmoMode == GIZMO_ROTATE ? GIZMO_ROTATE : GIZMO_TRANSLATE;
-	gBrowserActiveTab = clamp(gBrowserActiveTab, (int)BROWSER_TAB_CATEGORIES, (int)BROWSER_TAB_FAVOURITES);
+	gBrowserActiveTab = clamp(gBrowserActiveTab, (int)BROWSER_TAB_CATEGORIES, (int)BROWSER_TAB_PREFABS);
 	gBrowserSelectedCategory = clamp(gBrowserSelectedCategory, -1, NUM_OBJ_CATEGORIES-1);
 	gDiffFilter = max(gDiffFilter, 0);
 	WaterLevel::gWaterSubMode = clamp(WaterLevel::gWaterSubMode, 0, 1);
@@ -5328,6 +5334,10 @@ loadSaveSettings(void)
 			parseIntSetting(value, &gRenderMode);
 		}else if(strcmp(key, "draw_distance") == 0){
 			parseFloatSetting(value, &TheCamera.m_LODmult);
+		}else if(strcmp(key, "fly_acceleration") == 0){
+			if(parseBoolSetting(value, &boolValue)) gFlyAcceleration = boolValue;
+		}else if(strcmp(key, "fly_speed") == 0){
+			parseFloatSetting(value, &gFlySpeed);
 		}else if(strcmp(key, "fly_fast_mul") == 0){
 			parseFloatSetting(value, &gFlyFastMul);
 		}else if(strcmp(key, "fly_slow_mul") == 0){
@@ -5597,6 +5607,8 @@ saveSaveSettings(void)
 	fprintf(f, "play_animations %d\n", gPlayAnimations ? 1 : 0);
 	fprintf(f, "render_mode %d\n", gRenderMode);
 	fprintf(f, "draw_distance %.9g\n", TheCamera.m_LODmult);
+	fprintf(f, "fly_acceleration %d\n", gFlyAcceleration ? 1 : 0);
+	fprintf(f, "fly_speed %.9g\n", gFlySpeed);
 	fprintf(f, "fly_fast_mul %.9g\n", gFlyFastMul);
 	fprintf(f, "fly_slow_mul %.9g\n", gFlySlowMul);
 	fprintf(f, "fov_wheel_step %.9g\n", gFovWheelStep);
@@ -5707,6 +5719,11 @@ uiEditorWindow(void)
 		if(ImGui::Button("Reset##fov"))
 			TheCamera.m_fov = 70.0f;
 		ImGui::SliderFloat("FOV wheel step", &gFovWheelStep, 0.1f, 15.0f, "%.2f deg");
+		ImGui::Checkbox("Accelerate fly movement", &gFlyAcceleration);
+		ImGui::SetItemTooltip("When disabled, WASD moves at the constant fly speed below.");
+		ImGui::BeginDisabled(gFlyAcceleration);
+		ImGui::SliderFloat("Fly speed", &gFlySpeed, 0.1f, 70.0f, "%.2f");
+		ImGui::EndDisabled();
 		ImGui::SliderFloat("Fly speed fast (Shift)", &gFlyFastMul, 1.0f, 10.0f, "x%.2f");
 		ImGui::SliderFloat("Fly speed slow (Alt)", &gFlySlowMul, 0.05f, 1.0f, "x%.2f");
 		ImGui::Text("Far: %f", Timecycle::currentColours.farClp);
@@ -5787,12 +5804,39 @@ uiEditorWindow(void)
 		if(ImGui::Button("Clear##Txd"))
 			gEditorTxdFilter.Clear();
 		ImGui::Checkbox("Highlight matches", &gEditorHighlightMatches);
-		for(p = instances.first; p; p = p->next){
-			inst = (ObjectInst*)p->item;
-			obj = GetObjectDef(inst->m_objectId);
-			txd = GetTxdDef(obj->m_txdSlot);
-			if(gEditorModelFilter.PassFilter(obj->m_name) &&
-			   gEditorTxdFilter.PassFilter(txd->name)){
+
+		uint32 instanceChangeSeq = GetLatestChangeSeq();
+		if(gEditorCachedInstancesFirst != instances.first ||
+		   gEditorCachedInstanceChangeSeq != instanceChangeSeq ||
+		   gEditorCachedModelFilter != gEditorModelFilter.InputBuf ||
+		   gEditorCachedTxdFilter != gEditorTxdFilter.InputBuf){
+			gEditorFilteredInstances.clear();
+			for(p = instances.first; p; p = p->next){
+				inst = (ObjectInst*)p->item;
+				obj = GetObjectDef(inst->m_objectId);
+				txd = GetTxdDef(obj->m_txdSlot);
+				if(gEditorModelFilter.PassFilter(obj->m_name) &&
+				   gEditorTxdFilter.PassFilter(txd->name))
+					gEditorFilteredInstances.push_back(inst);
+			}
+			gEditorCachedInstancesFirst = instances.first;
+			gEditorCachedInstanceChangeSeq = instanceChangeSeq;
+			gEditorCachedModelFilter = gEditorModelFilter.InputBuf;
+			gEditorCachedTxdFilter = gEditorTxdFilter.InputBuf;
+		}
+
+		if(gEditorHighlightMatches)
+			for(size_t i = 0; i < gEditorFilteredInstances.size(); i++)
+				if(!gEditorFilteredInstances[i]->m_isDeleted)
+					gEditorFilteredInstances[i]->m_highlight = HIGHLIGHT_FILTER;
+
+		ImGuiListClipper clipper;
+		clipper.Begin((int)gEditorFilteredInstances.size());
+		while(clipper.Step()){
+			for(int i = clipper.DisplayStart; i < clipper.DisplayEnd; i++){
+				inst = gEditorFilteredInstances[i];
+				obj = GetObjectDef(inst->m_objectId);
+				txd = GetTxdDef(obj->m_txdSlot);
 				int numPops = 0;
 				if(inst->m_isDeleted){
 					ImGui::PushStyleColor(ImGuiCol_Text, (ImVec4)ImColor(128, 128, 128));
@@ -5821,8 +5865,6 @@ uiEditorWindow(void)
 				if(numPops)
 					ImGui::PopStyleColor(numPops);
 				if(!inst->m_isDeleted){
-					if(gEditorHighlightMatches)
-						inst->m_highlight = HIGHLIGHT_FILTER;
 					if(ImGui::IsItemHovered())
 						inst->m_highlight = HIGHLIGHT_HOVER;
 				}
@@ -6777,6 +6819,84 @@ uiPrefabResults(int *filtered, int numFiltered)
 }
 
 static void
+uiCenteredSquarePreview(rw::Texture *texture, float maxFontHeights)
+{
+	if(texture == nil || texture->raster == nil)
+		return;
+
+	float availableWidth = ImGui::GetContentRegionAvail().x;
+	float previewSize = min(availableWidth, ImGui::GetFontSize() * maxFontHeights);
+	if(previewSize <= 0.0f)
+		return;
+
+	float cursorX = ImGui::GetCursorPosX();
+	if(availableWidth > previewSize)
+		ImGui::SetCursorPosX(cursorX + (availableWidth - previewSize) * 0.5f);
+	ImGui::Image((void*)(intptr_t)texture, ImVec2(previewSize, previewSize),
+		ImVec2(0, 1), ImVec2(1, 0));
+}
+
+static void
+uiBrowserSelectedObject(int selId)
+{
+	if(selId < 0)
+		return;
+
+	ObjectDef *sel = GetObjectDef(selId);
+	if(sel == nil)
+		return;
+
+	// Preview (rendered in Draw() before main camera)
+	uiCenteredSquarePreview(gPreviewTexture, 13.0f);
+
+	ImGui::TextColored(ImVec4(0,1,0,1), "ID: %d", sel->m_id);
+	InputTextReadonly<MODELNAMELEN>("Model##BrowserSelected", sel->m_name);
+	TxdDef *txd = GetTxdDef(sel->m_txdSlot);
+	InputTextReadonly<MODELNAMELEN>("TXD##BrowserSelected", txd ? txd->name : "");
+	ImGui::TextDisabled("Draw distance: %.0f", sel->GetLargestDrawDist());
+	int lodId = GetLodForObject(selId);
+	if(lodId >= 0){
+		ObjectDef *lod = GetObjectDef(lodId);
+		if(lod){
+			ImGui::SameLine();
+			ImGui::TextDisabled("LOD: %s", lod->m_name);
+		}
+	}
+
+	// Action buttons — Place and Brush are mutually exclusive
+	if(gPlaceMode){
+		if(ImGui::Button("Exit Place Mode"))
+			SpawnExitPlaceMode();
+	}else{
+		if(ImGui::Button("Place")){
+			if(gBrushMode) ExitBrushMode();
+			if(gPrefabPlaceMode) ExitPrefabPlaceMode();
+			gPlaceMode = true;
+		}
+	}
+	ImGui::SameLine();
+	if(gBrushMode){
+		if(ImGui::Button("Exit Brush"))
+			ExitBrushMode();
+	}else{
+		if(ImGui::Button("Brush"))
+			EnterBrushMode(selId);
+	}
+	ImGui::SetItemTooltip("Paint instances onto surfaces.\n"
+		"Click to place one, drag to paint continuously.\n"
+		"Configure Z offset, surface align and spacing in the Tools window.");
+	ImGui::SameLine();
+	if(IsFavourite(selId)){
+		if(ImGui::Button("Unfavourite"))
+			ToggleFavourite(selId);
+	}else{
+		if(ImGui::Button("Favourite"))
+			ToggleFavourite(selId);
+	}
+	ImGui::Separator();
+}
+
+static void
 uiBrowserWindow(void)
 {
 	ImGui::SetNextWindowSize(ImVec2(560, 700), ImGuiCond_FirstUseEver);
@@ -6786,69 +6906,6 @@ uiBrowserWindow(void)
 	int selId = GetSpawnObjectId();
 	static int filtered[NUMOBJECTDEFS];
 	int numFiltered = 0;
-
-	// 3D Preview + selected info panel
-	if(selId >= 0 && gBrowserActiveTab != BROWSER_TAB_PREFABS){
-		ObjectDef *sel = GetObjectDef(selId);
-		if(sel){
-			// Preview (rendered in Draw() before main camera)
-			if(gPreviewTexture && gPreviewTexture->raster){
-				float previewW = ImGui::GetContentRegionAvail().x;
-				float previewH = previewW * 0.75f;
-				if(previewH > 200.0f) previewH = 200.0f;
-				ImGui::Image((void*)(intptr_t)gPreviewTexture,
-					ImVec2(previewW, previewH),
-					ImVec2(0, 1), ImVec2(1, 0));
-			}
-
-			// Info line
-			ImGui::TextColored(ImVec4(0,1,0,1), "ID: %d", sel->m_id);
-			InputTextReadonly<MODELNAMELEN>("Model##BrowserSelected", sel->m_name);
-			TxdDef *txd = GetTxdDef(sel->m_txdSlot);
-			InputTextReadonly<MODELNAMELEN>("TXD##BrowserSelected", txd ? txd->name : "");
-			ImGui::TextDisabled("Draw distance: %.0f", sel->GetLargestDrawDist());
-			int lodId = GetLodForObject(selId);
-			if(lodId >= 0){
-				ObjectDef *lod = GetObjectDef(lodId);
-				if(lod){
-					ImGui::SameLine();
-					ImGui::TextDisabled("LOD: %s", lod->m_name);
-				}
-			}
-
-			// Action buttons — Place and Brush are mutually exclusive
-			if(gPlaceMode){
-				if(ImGui::Button("Exit Place Mode"))
-					SpawnExitPlaceMode();
-			}else{
-				if(ImGui::Button("Place")){
-					if(gBrushMode) ExitBrushMode();
-					if(gPrefabPlaceMode) ExitPrefabPlaceMode();
-					gPlaceMode = true;
-				}
-			}
-			ImGui::SameLine();
-			if(gBrushMode){
-				if(ImGui::Button("Exit Brush"))
-					ExitBrushMode();
-			}else{
-				if(ImGui::Button("Brush"))
-					EnterBrushMode(selId);
-			}
-			ImGui::SetItemTooltip("Paint instances onto surfaces.\n"
-				"Click to place one, drag to paint continuously.\n"
-				"Configure Z offset, surface align and spacing in the Tools window.");
-			ImGui::SameLine();
-			if(IsFavourite(selId)){
-				if(ImGui::Button("Unfavourite"))
-					ToggleFavourite(selId);
-			}else{
-				if(ImGui::Button("Favourite"))
-					ToggleFavourite(selId);
-			}
-			ImGui::Separator();
-		}
-	}
 
 	if(ImGui::RadioButton("List", !gBrowserThumbnailView))
 		gBrowserThumbnailView = false;
@@ -6865,6 +6922,7 @@ uiBrowserWindow(void)
 		   gBrowserTabRestorePending && gBrowserActiveTab == BROWSER_TAB_CATEGORIES ?
 		   ImGuiTabItemFlags_SetSelected : 0)){
 			gBrowserActiveTab = BROWSER_TAB_CATEGORIES;
+			uiBrowserSelectedObject(selId);
 			// Category dropdown
 			char catLabel[128];
 			if(gBrowserSelectedCategory >= 0 && gBrowserSelectedCategory < NUM_OBJ_CATEGORIES)
@@ -6912,6 +6970,7 @@ uiBrowserWindow(void)
 		   gBrowserTabRestorePending && gBrowserActiveTab == BROWSER_TAB_IDE ?
 		   ImGuiTabItemFlags_SetSelected : 0)){
 			gBrowserActiveTab = BROWSER_TAB_IDE;
+			uiBrowserSelectedObject(selId);
 			// Collect unique IDE file names
 			static const char *ideFiles[512];
 			static int numIdeFiles = 0;
@@ -6967,6 +7026,7 @@ uiBrowserWindow(void)
 		   gBrowserTabRestorePending && gBrowserActiveTab == BROWSER_TAB_SEARCH ?
 		   ImGuiTabItemFlags_SetSelected : 0)){
 			gBrowserActiveTab = BROWSER_TAB_SEARCH;
+			uiBrowserSelectedObject(selId);
 			gBrowserSearchFilter.Draw("Search##All");
 			ImGui::SameLine();
 			if(ImGui::Button("Clear##SearchClear"))
@@ -6992,6 +7052,7 @@ uiBrowserWindow(void)
 		   gBrowserTabRestorePending && gBrowserActiveTab == BROWSER_TAB_FAVOURITES ?
 		   ImGuiTabItemFlags_SetSelected : 0)){
 			gBrowserActiveTab = BROWSER_TAB_FAVOURITES;
+			uiBrowserSelectedObject(selId);
 			gBrowserFavFilter.Draw("Filter##Fav");
 
 			numFiltered = 0;
@@ -7025,13 +7086,7 @@ uiBrowserWindow(void)
 
 			if(gBrowserSelectedPrefab >= 0 && gBrowserSelectedPrefab < gBrowserNumPrefabs){
 				rw::Texture *thumb = GetPrefabThumbnailTexture(gBrowserPrefabPaths[gBrowserSelectedPrefab]);
-				if(thumb && thumb->raster){
-					float previewW = ImGui::GetContentRegionAvail().x;
-					float previewH = previewW * 0.45f;
-					if(previewH > 180.0f) previewH = 180.0f;
-					ImGui::Image((void*)(intptr_t)thumb, ImVec2(previewW, previewH),
-						ImVec2(0, 1), ImVec2(1, 0));
-				}
+				uiCenteredSquarePreview(thumb, 12.0f);
 				char name[256];
 				getPrefabDisplayName(gBrowserPrefabFiles[gBrowserSelectedPrefab], name, sizeof(name));
 				ImGui::Text("%s", name);
