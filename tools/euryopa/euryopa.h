@@ -443,6 +443,7 @@ void Redo(void);
 void CopySelected(void);
 void CutSelected(void);
 int PasteClipboard(void);
+int PasteClipboardInPlace(void);
 
 // Prefabs
 int ExportPrefab(const char *path);
@@ -467,6 +468,7 @@ enum ToastCategory {
 	TOAST_NUM_CATEGORIES
 };
 void Toast(ToastCategory cat, const char *fmt, ...);
+void ToastFor(ToastCategory cat, float duration, const char *fmt, ...);
 
 // Diff viewer flags (bitmask — an instance can be both moved and rotated)
 enum DiffFlags {
@@ -477,6 +479,7 @@ enum DiffFlags {
 	DIFF_RESTORED = 16,
 };
 int GetInstanceDiffFlags(ObjectInst *inst);
+float GetQuaternionSimilarity(const rw::Quat &a, const rw::Quat &b);
 void StampChangeSeq(ObjectInst *inst);
 uint32 BumpChangeSeq(void);
 uint32 GetLatestChangeSeq(void);

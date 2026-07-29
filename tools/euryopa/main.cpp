@@ -211,8 +211,15 @@ bool
 GetArianeDataDirectory(char *dir, size_t size)
 {
 	char rootDir[1024];
+	const char *dataDirectory = "ariane";
+#ifndef _WIN32
+	// The Unix executable is named "ariane", so a sibling directory cannot
+	// use the same name. Runtime handoff files are still mirrored at the game
+	// root for the Windows ASI plugin.
+	dataDirectory = "ariane_data";
+#endif
 	if(!GetEditorRootDirectory(rootDir, sizeof(rootDir)) ||
-	   !BuildPath(dir, size, rootDir, "ariane"))
+	   !BuildPath(dir, size, rootDir, dataDirectory))
 		return false;
 	return EnsureDirectoryTree(dir);
 }
@@ -576,7 +583,7 @@ CreateFallbackRaster(void)
 }
 
 static rw::Raster*
-ConvertTexRaster(rw::Raster *ras)
+ConvertTexRaster(rw::Raster *ras, const char *textureName)
 {
 	using namespace rw;
 
@@ -608,8 +615,9 @@ ConvertTexRaster(rw::Raster *ras)
 #else
 	Raster *converted = Raster::convertTexToCurrentPlatform(ras);
 	if(converted == nil){
-		log("warning: failed to create converted raster for platform %d, using fallback texture\n",
-			rw::platform);
+		log("warning: failed to convert texture %s from platform %d to %d, using fallback texture\n",
+			textureName && textureName[0] ? textureName : "(unnamed)", ras->platform, rw::platform);
+		ras->destroy();
 		return CreateFallbackRaster();
 	}
 	return converted;
@@ -626,7 +634,7 @@ ConvertTxd(rw::TexDictionary *txd)
 		tex = rw::Texture::fromDict(lnk);
 		rw::Raster *ras = tex->raster;
 		if(ras)
-			tex->raster = ConvertTexRaster(ras);
+			tex->raster = ConvertTexRaster(ras, tex->name);
 		tex->setFilter(rw::Texture::LINEAR);
 	}
 }

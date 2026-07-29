@@ -846,8 +846,8 @@ static const char *toastCategoryNames[TOAST_NUM_CATEGORIES] = {
 	"Undo / Redo", "Delete", "Copy / Paste", "Save", "Selection", "Spawn"
 };
 
-void
-Toast(ToastCategory cat, const char *fmt, ...)
+static void
+addToast(ToastCategory cat, float duration, const char *fmt, va_list args)
 {
 	if(!toastEnabled || !toastCategoryEnabled[cat])
 		return;
@@ -859,13 +859,28 @@ Toast(ToastCategory cat, const char *fmt, ...)
 	}
 
 	ToastEntry *t = &toasts[numToasts++];
-	va_list args;
-	va_start(args, fmt);
 	vsnprintf(t->text, sizeof(t->text), fmt, args);
-	va_end(args);
-	t->totalTime = TOAST_DURATION + TOAST_FADE_IN + TOAST_FADE_OUT;
+	t->totalTime = duration + TOAST_FADE_IN + TOAST_FADE_OUT;
 	t->timer = t->totalTime;
 	t->category = cat;
+}
+
+void
+Toast(ToastCategory cat, const char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	addToast(cat, TOAST_DURATION, fmt, args);
+	va_end(args);
+}
+
+void
+ToastFor(ToastCategory cat, float duration, const char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	addToast(cat, duration, fmt, args);
+	va_end(args);
 }
 
 static void
@@ -1887,6 +1902,37 @@ testInGame(void)
 #endif
 }
 
+static FILE*
+openHotReloadOutput(const char *finalPath, char *tempPath, size_t tempPathSize)
+{
+	if(finalPath == nil || tempPath == nil || tempPathSize == 0)
+		return nil;
+	if(snprintf(tempPath, tempPathSize, "%s.ariane.tmp", finalPath) >= (int)tempPathSize)
+		return nil;
+	remove(tempPath);
+	return fopen(tempPath, "w");
+}
+
+static bool
+publishHotReloadOutput(FILE *f, const char *tempPath, const char *finalPath)
+{
+	if(f == nil)
+		return false;
+	if(fclose(f) != 0){
+		remove(tempPath);
+		return false;
+	}
+#ifdef _WIN32
+	bool published = MoveFileExA(tempPath, finalPath,
+		MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+	bool published = rename(tempPath, finalPath) == 0;
+#endif
+	if(!published)
+		remove(tempPath);
+	return published;
+}
+
 static void
 hotReloadIpls(void)
 {
@@ -1905,6 +1951,10 @@ hotReloadIpls(void)
 	char tracePath[2048];
 	char legacyReloadPath[2048];
 	char legacyEntityReloadPath[2048];
+	char reloadTempPath[2048];
+	char legacyReloadTempPath[2048];
+	char entityReloadTempPath[2048];
+	char legacyEntityReloadTempPath[2048];
 	if(!getEditorRootDirectory(rootDir, sizeof(rootDir)) ||
 	   !GetArianeDataPath(tracePath, sizeof(tracePath), "ariane_hot_reload_log.txt") ||
 	   !GetArianeDataPath(reloadPath, sizeof(reloadPath), "ariane_reload.txt") ||
@@ -1930,11 +1980,7 @@ hotReloadIpls(void)
 		float dist = length(sub(inst->m_translation, inst->m_origTranslation));
 		if(dist >= 0.001f)
 			return true;
-		float dot = fabsf(inst->m_rotation.x * inst->m_origRotation.x +
-		                   inst->m_rotation.y * inst->m_origRotation.y +
-		                   inst->m_rotation.z * inst->m_origRotation.z +
-		                   inst->m_rotation.w * inst->m_origRotation.w);
-		return dot < 0.9999f;
+		return GetQuaternionSimilarity(inst->m_rotation, inst->m_origRotation) < 0.9999f;
 	};
 	const auto GetAreaFlags = [](ObjectInst *inst) {
 		int area = inst->m_area;
@@ -1971,29 +2017,50 @@ hotReloadIpls(void)
 	}
 
 	if(numNames > 0){
-		FILE *f = fopen(reloadPath, "w");
-		FILE *legacy = fopen(legacyReloadPath, "w");
-		if(f){
-			for(int i = 0; i < numNames; i++)
-				fprintf(f, "%s\n", iplNames[i]);
-			fclose(f);
-			if(legacy){
-				for(int i = 0; i < numNames; i++)
+		FILE *f = openHotReloadOutput(reloadPath, reloadTempPath, sizeof(reloadTempPath));
+		FILE *legacy = openHotReloadOutput(legacyReloadPath, legacyReloadTempPath, sizeof(legacyReloadTempPath));
+		if(f || legacy){
+			for(int i = 0; i < numNames; i++){
+				if(f)
+					fprintf(f, "%s\n", iplNames[i]);
+				if(legacy)
 					fprintf(legacy, "%s\n", iplNames[i]);
-				fclose(legacy);
 			}
-			numStreamingIpls = numNames;
-		}else if(legacy)
-			fclose(legacy);
+			bool published = publishHotReloadOutput(f, reloadTempPath, reloadPath);
+			bool legacyPublished = publishHotReloadOutput(legacy, legacyReloadTempPath, legacyReloadPath);
+			if(published || legacyPublished)
+				numStreamingIpls = numNames;
+		}
+	}
+
+	// A successful streaming reload becomes the new disk/runtime baseline.
+	// Without this, undoing a hot-reloaded delete compares against the stale
+	// pre-delete snapshot and the restored instance is not written back.
+	if(numStreamingIpls > 0){
+		for(p = instances.first; p; p = p->next){
+			ObjectInst *inst = (ObjectInst*)p->item;
+			if(!binaryImageWasSaved(binaryResult, inst->m_imageIndex))
+				continue;
+			if(!inst->m_isDeleted){
+				inst->m_savedTranslation = inst->m_translation;
+				inst->m_savedRotation = inst->m_rotation;
+			}
+			inst->m_wasSavedDeleted = inst->m_isDeleted;
+			inst->m_savedStateValid = true;
+			inst->m_isDirty = false;
+			inst->m_origTranslation = inst->m_translation;
+			inst->m_origRotation = inst->m_rotation;
+			inst->m_gameEntityExists = !inst->m_isDeleted;
+		}
 	}
 
 	// --- Entity deletes/moves (manipulated directly in game memory) ---
 	// Streaming moves also go through this path as a runtime fallback:
 	// if binary IMG patching/reload fails for a given IPL, the live entity
 	// still gets moved in-game.
-	FILE *fe = fopen(entityReloadPath, "w");
-	FILE *legacyFe = fopen(legacyEntityReloadPath, "w");
-	if(fe){
+	FILE *fe = openHotReloadOutput(entityReloadPath, entityReloadTempPath, sizeof(entityReloadTempPath));
+	FILE *legacyFe = openHotReloadOutput(legacyEntityReloadPath, legacyEntityReloadTempPath, sizeof(legacyEntityReloadTempPath));
+	if(fe || legacyFe){
 		for(p = instances.first; p; p = p->next){
 			ObjectInst *inst = (ObjectInst*)p->item;
 			if(inst->m_imageIndex >= 0 &&
@@ -2022,18 +2089,19 @@ hotReloadIpls(void)
 				}
 
 				// A modelId x y z qx qy qz qw area lodModelId lodX lodY lodZ
-				fprintf(fe, "A %d %f %f %f %f %f %f %f %d %d %f %f %f\n",
-					inst->m_objectId,
-					inst->m_translation.x,
-					inst->m_translation.y,
-					inst->m_translation.z,
-					inst->m_rotation.x,
-					inst->m_rotation.y,
-					inst->m_rotation.z,
-					inst->m_rotation.w,
-					GetAreaFlags(inst),
-					lodModelId,
-					lodX, lodY, lodZ);
+				if(fe)
+					fprintf(fe, "A %d %f %f %f %f %f %f %f %d %d %f %f %f\n",
+						inst->m_objectId,
+						inst->m_translation.x,
+						inst->m_translation.y,
+						inst->m_translation.z,
+						inst->m_rotation.x,
+						inst->m_rotation.y,
+						inst->m_rotation.z,
+						inst->m_rotation.w,
+						GetAreaFlags(inst),
+						lodModelId,
+						lodX, lodY, lodZ);
 				if(legacyFe)
 					fprintf(legacyFe, "A %d %f %f %f %f %f %f %f %d %d %f %f %f\n",
 						inst->m_objectId,
@@ -2057,11 +2125,12 @@ hotReloadIpls(void)
 
 			if(needsDelete){
 				// D modelId oldX oldY oldZ
-				fprintf(fe, "D %d %f %f %f\n",
-					inst->m_objectId,
-					inst->m_origTranslation.x,
-					inst->m_origTranslation.y,
-					inst->m_origTranslation.z);
+				if(fe)
+					fprintf(fe, "D %d %f %f %f\n",
+						inst->m_objectId,
+						inst->m_origTranslation.x,
+						inst->m_origTranslation.y,
+						inst->m_origTranslation.z);
 				if(legacyFe)
 					fprintf(legacyFe, "D %d %f %f %f\n",
 						inst->m_objectId,
@@ -2072,18 +2141,19 @@ hotReloadIpls(void)
 				inst->m_gameEntityExists = false;
 			}else if(needsMove){
 				// M modelId oldX oldY oldZ newX newY newZ qx qy qz qw
-				fprintf(fe, "M %d %f %f %f %f %f %f %f %f %f %f\n",
-					inst->m_objectId,
-					inst->m_origTranslation.x,
-					inst->m_origTranslation.y,
-					inst->m_origTranslation.z,
-					inst->m_translation.x,
-					inst->m_translation.y,
-					inst->m_translation.z,
-					inst->m_rotation.x,
-					inst->m_rotation.y,
-					inst->m_rotation.z,
-					inst->m_rotation.w);
+				if(fe)
+					fprintf(fe, "M %d %f %f %f %f %f %f %f %f %f %f\n",
+						inst->m_objectId,
+						inst->m_origTranslation.x,
+						inst->m_origTranslation.y,
+						inst->m_origTranslation.z,
+						inst->m_translation.x,
+						inst->m_translation.y,
+						inst->m_translation.z,
+						inst->m_rotation.x,
+						inst->m_rotation.y,
+						inst->m_rotation.z,
+						inst->m_rotation.w);
 				if(legacyFe)
 					fprintf(legacyFe, "M %d %f %f %f %f %f %f %f %f %f %f\n",
 						inst->m_objectId,
@@ -2103,14 +2173,22 @@ hotReloadIpls(void)
 				inst->m_origRotation = inst->m_rotation;
 			}
 		}
-		fclose(fe);
-		if(legacyFe)
-			fclose(legacyFe);
-
-		if(numEntityCmds == 0)
+		if(numEntityCmds == 0){
+			if(fe){
+				fclose(fe);
+				remove(entityReloadTempPath);
+			}
+			if(legacyFe){
+				fclose(legacyFe);
+				remove(legacyEntityReloadTempPath);
+			}
 			remove(entityReloadPath);
-	}else if(legacyFe)
-		fclose(legacyFe);
+			remove(legacyEntityReloadPath);
+		}else{
+			publishHotReloadOutput(fe, entityReloadTempPath, entityReloadPath);
+			publishHotReloadOutput(legacyFe, legacyEntityReloadTempPath, legacyEntityReloadPath);
+		}
+	}
 
 	if(numStreamingIpls == 0 && numEntityCmds == 0){
 		if(totalBlockedDeletes)
@@ -4040,6 +4118,7 @@ uiKeyboardShortcutsWindow(void)
 		{ "Clipboard", "Ctrl+C", "Copy selected buildings", "Global" },
 		{ "Clipboard", "Ctrl+X", "Cut selected buildings", "Global" },
 		{ "Clipboard", "Ctrl+V", "Paste copy at camera target, restore cut at original position", "Global" },
+		{ "Clipboard", "Ctrl+Shift+V", "Paste copy at original position", "Global" },
 		{ "Clipboard", "Ctrl+Z", "Undo", "Global" },
 		{ "Clipboard", "Ctrl+Y", "Redo", "Global" },
 
@@ -4165,7 +4244,8 @@ uiHelpWindow(void)
 		"Deleting also removes linked LOD instances.");
 	ImGui::BulletText("Ctrl+C: Copy selected building(s)\n"
 		"Ctrl+X: Cut selected building(s)\n"
-		"Ctrl+V: Paste copy at camera target, restore cut at original position");
+		"Ctrl+V: Paste copy at camera target, restore cut at original position\n"
+		"Ctrl+Shift+V: Paste copy at original position");
 	ImGui::BulletText("G: snap selection to ground\n"
 		"Shift+G: align selection to ground normal and preserve facing.");
 	ImGui::BulletText("Ctrl+S: Save all modified IPL files\n"
@@ -7089,11 +7169,7 @@ uiDiffWindow(void)
 				inst->m_translation.x, inst->m_translation.y, inst->m_translation.z,
 				dist);
 		}else if(flags & DIFF_ROTATED){
-			float dot = fabsf(inst->m_rotation.x * inst->m_savedRotation.x +
-			                   inst->m_rotation.y * inst->m_savedRotation.y +
-			                   inst->m_rotation.z * inst->m_savedRotation.z +
-			                   inst->m_rotation.w * inst->m_savedRotation.w);
-			if(dot > 1.0f) dot = 1.0f;
+			float dot = GetQuaternionSimilarity(inst->m_rotation, inst->m_savedRotation);
 			float angleDeg = 2.0f * acosf(dot) * (180.0f / 3.14159265f);
 			snprintf(buf, sizeof(buf), "%-3s %-20s  %.1f, %.1f, %.1f  (%.1f deg)",
 				prefix, name,
@@ -7170,7 +7246,9 @@ gui(void)
 			for(CPtrNode *p = selection.first; p; p = p->next) before++;
 			CopySelected();
 			if(before > 0)
-				Toast(TOAST_COPY_PASTE, "Copied %d instance(s)", min(before, MAX_BATCH_OBJECTS));
+				ToastFor(TOAST_COPY_PASTE, 6.0f,
+					"Copied %d instance(s) | Ctrl+V: paste at camera | Ctrl+Shift+V: paste in place",
+					min(before, MAX_BATCH_OBJECTS));
 		}
 		if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('X')){
 			int before = 0;
@@ -7180,9 +7258,12 @@ gui(void)
 				Toast(TOAST_COPY_PASTE, "Cut %d instance(s)", min(before, MAX_BATCH_OBJECTS));
 		}
 		if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('V')){
-			int pasted = PasteClipboard();
+			bool pasteInPlace = CPad::IsShiftDown();
+			int pasted = pasteInPlace ? PasteClipboardInPlace() : PasteClipboard();
 			if(pasted > 0)
-				Toast(TOAST_COPY_PASTE, "Pasted %d instance(s)", pasted);
+				Toast(TOAST_COPY_PASTE, pasteInPlace ?
+					"Pasted %d instance(s) at original position" :
+					"Pasted %d instance(s)", pasted);
 		}
 	}
 
