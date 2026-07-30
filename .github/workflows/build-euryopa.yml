@@ -141,9 +141,9 @@ jobs:
       - name: Install Premake5
         run: |
           curl --fail --location --silent --show-error \
-            https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-linux.tar.gz \
+            https://github.com/premake/premake-core/releases/download/v5.0.0-beta4/premake-5.0.0-beta4-linux.tar.gz \
             --output premake5.tar.gz
-          echo "63edd3e7461eebdd45b500a3c7e8ad4e7a67d68f230010f9a97cbb71b4ec59c8  premake5.tar.gz" | sha256sum --check
+          echo "98c0dbf55f20d28ecc2b5fdd4a5c9bfe5ef461d26d3b023b4dfd7d75f4df3a3f  premake5.tar.gz" | sha256sum --check
           mkdir premake5
           tar --extract --gzip --file premake5.tar.gz --directory premake5
           chmod +x premake5/premake5
