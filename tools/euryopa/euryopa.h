@@ -123,6 +123,7 @@ extern bool gOverrideBlurAmb;
 extern bool gNoTimeCull;
 extern bool gNoAreaCull;
 extern bool gDoBackfaceCulling;
+extern int gSelectionHighlightOpacity;
 extern bool gPlayAnimations;
 extern bool gUseViewerCam;
 extern bool gDrawTarget;
@@ -353,7 +354,12 @@ enum GizmoMode {
 	GIZMO_TRANSLATE,
 	GIZMO_ROTATE
 };
+enum GizmoSpace {
+	GIZMO_LOCAL,
+	GIZMO_WORLD
+};
 extern int gGizmoMode;
+extern int gGizmoSpace;
 extern bool gGizmoEnabled;
 extern bool gGizmoHovered;
 extern bool gGizmoUsing;
@@ -403,6 +409,7 @@ enum UndoTransformFlags {
 
 struct UndoTransform {
 	ObjectInst *inst;
+	bool oldDirty;
 	rw::V3d oldPos;
 	rw::V3d newPos;
 	rw::Quat oldRot;
@@ -440,6 +447,17 @@ void UndoRecordPaste(ObjectInst **insts, int num);
 void UndoRecordTransformBatch(UndoTransform *transforms, int num);
 void Undo(void);
 void Redo(void);
+
+rw::V3d GetObjectRotationDegrees(const rw::Quat &rotation);
+rw::Quat MakeObjectRotationDegrees(const rw::V3d &degrees);
+rw::Quat ApplyObjectRotationDelta(const rw::Quat &startRotation,
+	const rw::V3d &degrees, bool worldSpace);
+bool CaptureObjectTransformTargets(ObjectInst *leader, bool includeSelection,
+	std::vector<UndoTransform> &transforms, bool *capped = nil);
+void PreviewObjectTransformTargets(ObjectInst *leader,
+	std::vector<UndoTransform> &transforms, const rw::V3d &leaderPos,
+	const rw::Quat &leaderRot, uint8 requestedFlags);
+int CommitObjectTransformTargets(std::vector<UndoTransform> &transforms);
 
 // Copy/Paste
 void CopySelected(void);
