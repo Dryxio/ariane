@@ -12,6 +12,7 @@ permissions:
 
 env:
   LIBRW: ${{ github.workspace }}/librw
+  LIBRW_REF: a24886794eacc8d62d9cc096f06d02b87c35c1cd
 
 jobs:
   build-windows:
@@ -27,6 +28,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: Southland-FR/librw
+          ref: ${{ env.LIBRW_REF }}
           path: librw
           # If this repo is private, add a PAT secret:
           # token: ${{ secrets.LIBRW_TOKEN }}
@@ -111,3 +113,87 @@ jobs:
           prerelease: ${{ steps.version.outputs.channel == 'PE' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-linux:
+    name: Build Linux x64 (OpenGL)
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout ariane
+        uses: actions/checkout@v4
+        with:
+          path: ariane
+
+      - name: Checkout librw
+        uses: actions/checkout@v4
+        with:
+          repository: Southland-FR/librw
+          ref: ${{ env.LIBRW_REF }}
+          path: librw
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libgl1-mesa-dev libglfw3-dev xauth xvfb
+
+      - name: Install Premake5
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-linux.tar.gz \
+            --output premake5.tar.gz
+          echo "63edd3e7461eebdd45b500a3c7e8ad4e7a67d68f230010f9a97cbb71b4ec59c8  premake5.tar.gz" | sha256sum --check
+          mkdir premake5
+          tar --extract --gzip --file premake5.tar.gz --directory premake5
+          echo "${{ github.workspace }}/premake5" >> "$GITHUB_PATH"
+
+      - name: Generate librw project files
+        working-directory: librw
+        run: premake5 gmake2
+
+      - name: Build librw
+        working-directory: librw
+        env:
+          CXXFLAGS: -std=c++14
+        run: make --directory build --jobs 2 config=release_linux-amd64-gl3 librw
+
+      - name: Generate ariane project files
+        working-directory: ariane
+        env:
+          ARIANE_CHANNEL: ${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
+        run: premake5 gmake2 --channel="$ARIANE_CHANNEL"
+
+      - name: Build Ariane
+        working-directory: ariane
+        run: make --directory build --jobs 2 config=release_linux-amd64-gl3 euryopa
+
+      - name: Smoke test OpenGL startup
+        working-directory: ariane/bin/linux-amd64-gl3/Release
+        run: |
+          set +e
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x800x24" \
+            ./ariane > smoke-test.log 2>&1
+          status=$?
+          set -e
+          cat smoke-test.log
+          test "$status" -eq 1
+          grep --quiet "OpenGL version:" smoke-test.log
+          grep --quiet "error: unknown game" smoke-test.log
+
+      - name: Package Linux artifact
+        working-directory: ariane
+        run: |
+          tar --create --gzip --file ariane-linux-x64.tar.gz \
+            --directory bin/linux-amd64-gl3/Release ariane
+          sha256sum ariane-linux-x64.tar.gz > ariane-linux-x64.tar.gz.sha256
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ariane-linux-x64
+          path: |
+            ariane/ariane-linux-x64.tar.gz
+            ariane/ariane-linux-x64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 14

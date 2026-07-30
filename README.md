@@ -52,7 +52,30 @@ For development updates, support and community downloads, [join the Ariane Disco
 
 ## Building from source
 
-Ariane requires [Premake 5](https://premake.github.io/) and a matching prebuilt copy of [librw](https://github.com/Southland-FR/librw). Set `LIBRW` to the librw source directory before generating the project.
+Ariane requires [Premake 5](https://premake.github.io/) and a matching built copy of [librw](https://github.com/Southland-FR/librw). Set `LIBRW` to the librw source directory before generating the project.
+
+### Linux
+
+Install the compiler and OpenGL/GLFW development packages. On Ubuntu or Debian:
+
+```bash
+sudo apt-get install build-essential libgl1-mesa-dev libglfw3-dev
+```
+
+Build librw, then Ariane:
+
+```bash
+export LIBRW=/path/to/librw
+
+(cd "$LIBRW" && premake5 gmake2)
+CXXFLAGS=-std=c++14 make -C "$LIBRW/build" -j2 \
+  config=release_linux-amd64-gl3 librw
+
+premake5 gmake2 --channel=master
+make -C build -j2 config=release_linux-amd64-gl3 euryopa
+```
+
+Run `bin/linux-amd64-gl3/Release/ariane` with a supported GTA game directory as the current working directory.
 
 ### macOS
 
