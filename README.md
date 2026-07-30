@@ -1,44 +1,88 @@
-ariane
-======
+# Ariane
 
-Join the Discord for download, latest updates, progress etc..
-Discord : https://discord.gg/8NS59AbQtN
+[![Watch the complete Ariane walkthrough](docs/ariane-complete-walkthrough.png)](https://www.youtube.com/watch?v=jJipK1woGAk)
 
-A map editor for GTA III, Vice City and San Andreas, built on [librw](https://github.com/aap/librw).
+**[Watch the complete Ariane walkthrough on YouTube →](https://www.youtube.com/watch?v=jJipK1woGAk)**
 
-Forked from [euryopa](https://github.com/aap/librwgta) by aap.
+Ariane is a map viewer and editor for Grand Theft Auto III, Vice City and San Andreas, built on [librw](https://github.com/Southland-FR/librw) and based on aap's euryopa.
+
+[Download the latest release](https://github.com/Dryxio/ariane/releases/latest) · [Join the Discord](https://discord.gg/8NS59AbQtN)
 
 ## Features
 
-- Map viewer and editor for GTA III, Vice City and San Andreas
-- Place, move, rotate and delete map objects
-- Object browser
-- Undo/redo support
-- Save changes back to IPL files and IMG archives
-- Day/night cycle and weather control
+### Map editing
 
-## Building
+- Place, move, rotate and delete map objects, with brush placement for repeated objects
+- Select individual objects or whole areas, then translate and rotate them with 3D gizmos
+- Use grid and angle snapping, align objects to the ground, and snap them to nearby surfaces
+- Copy, cut and paste selections—including paste in place—with undo and redo support
 
-Requires [librw](https://github.com/aap/librw) built from source. Set the `LIBRW` environment variable to point to your librw directory, then use premake5 to generate build files.
+### Object Browser and prefabs
+
+- Browse objects in list or thumbnail views, with categories, IDE filters, search and favorites
+- Preview models in 3D before placing them
+- Build reusable prefabs from map selections, then browse, import and place them as a group
+- Import custom DFF models and TXD textures
+
+### Saving and iteration
+
+- Save to original game files or keep edits isolated in a modloader/Ariane destination
+- Write text or binary IPL data and update IMG archives
+- Review changes made since the last save and recover work from automatic backups
+- Test San Andreas maps in game and hot-reload supported changes with `ariane.asi`
+
+### World tools
+
+- Edit San Andreas water and path nodes
+- Control time, weather, rendering distance and post-processing while you work
+- Inspect collisions, zones, object information and other map data
+
+## Download and usage
+
+Download a current build from [GitHub Releases](https://github.com/Dryxio/ariane/releases/latest), place it in a supported GTA game directory and run it. Ariane automatically detects GTA III, Vice City or San Andreas.
+
+The San Andreas test-in-game and hot-reload workflows require `ariane.asi`. Hot reload has limitations for streamed binary maps; see the in-app guidance for the current behavior.
+
+For development updates, support and community downloads, [join the Ariane Discord](https://discord.gg/8NS59AbQtN).
+
+### Release channels
+
+- **master** — the standard and recommended build
+- **PE/FLA** — an alternate build for projects that use expanded game limits
+
+## Building from source
+
+Ariane requires [Premake 5](https://premake.github.io/) and a matching prebuilt copy of [librw](https://github.com/Southland-FR/librw). Set `LIBRW` to the librw source directory before generating the project.
+
+### macOS
 
 ```bash
-cd build
-# macOS ARM64
-make config=release_macos-arm64-gl3 euryopa
-# macOS x86_64
-make config=release_macos-amd64-gl3 euryopa
-# Windows (D3D9)
-make config=release_win-amd64-d3d9 euryopa
+export LIBRW=/path/to/librw
+premake5 gmake2 --channel=master
+
+# Apple Silicon
+make -C build config=release_macos-arm64-gl3 euryopa
+
+# Intel
+make -C build config=release_macos-amd64-gl3 euryopa
 ```
 
-## Usage
+### Windows
 
-Run from a GTA game directory (III, VC or SA). Ariane auto-detects the game version.
+Run these commands from a Visual Studio developer shell:
+
+```bat
+set LIBRW=C:\path\to\librw
+premake5 vs2019 --channel=master
+msbuild build\librwgta.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:librwgta;euryopa /m
+```
+
+Use `--channel=PE` instead when building the PE/FLA channel.
 
 ## License
 
-Since this project depends on LZO (GPL), consider the code in this repo dual-licensed as GPL.
+Because the project depends on LZO (GPL), consider the code in this repository dual-licensed as GPL.
 
 ## Credits
 
-- [aap](https://github.com/aap) - original euryopa/librwgta project
+- [aap](https://github.com/aap) — original euryopa/librwgta project and librw
