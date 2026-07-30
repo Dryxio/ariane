@@ -52,7 +52,11 @@ For development updates, support and community downloads, [join the Ariane Disco
 
 ## Building from source
 
-Ariane requires [Premake 5](https://premake.github.io/) and a matching built copy of [librw](https://github.com/Southland-FR/librw). Set `LIBRW` to the librw source directory before generating the project.
+Ariane requires [Premake 5](https://premake.github.io/) and the
+[`ariane` integration branch of librw](https://github.com/Southland-FR/librw/tree/ariane).
+For reproducible release builds, use the exact librw commit pinned as
+`LIBRW_REF` in `.github/workflows/build-euryopa.yml`. Set `LIBRW` to that librw
+worktree before generating the project.
 
 ### Linux
 
@@ -65,7 +69,7 @@ sudo apt-get install build-essential libgl1-mesa-dev libglfw3-dev
 Build librw, then Ariane:
 
 ```bash
-export LIBRW=/path/to/librw
+export LIBRW=/path/to/librw-ariane
 
 (cd "$LIBRW" && premake5 gmake2)
 CXXFLAGS=-std=c++14 make -C "$LIBRW/build" -j2 \
@@ -80,13 +84,17 @@ Run `bin/linux-amd64-gl3/Release/ariane` with a supported GTA game directory as 
 ### macOS
 
 ```bash
-export LIBRW=/path/to/librw
-premake5 gmake2 --channel=master
+export LIBRW=/path/to/librw-ariane
+(cd "$LIBRW" && premake5 gmake2 --gfxlib=glfw)
 
 # Apple Silicon
+make -C "$LIBRW/build" config=release_macos-arm64-gl3 librw
+premake5 gmake2 --channel=master
 make -C build config=release_macos-arm64-gl3 euryopa
 
 # Intel
+make -C "$LIBRW/build" config=release_macos-amd64-gl3 librw
+premake5 gmake2 --channel=master
 make -C build config=release_macos-amd64-gl3 euryopa
 ```
 
@@ -95,7 +103,13 @@ make -C build config=release_macos-amd64-gl3 euryopa
 Run these commands from a Visual Studio developer shell:
 
 ```bat
-set LIBRW=C:\path\to\librw
+set LIBRW=C:\path\to\librw-ariane
+
+pushd %LIBRW%
+premake5 vs2019
+msbuild build\librw.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:librw /m
+popd
+
 premake5 vs2019 --channel=master
 msbuild build\librwgta.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:librwgta;euryopa /m
 ```

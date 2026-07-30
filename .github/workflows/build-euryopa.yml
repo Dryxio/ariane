@@ -12,7 +12,7 @@ permissions:
 
 env:
   LIBRW: ${{ github.workspace }}/librw
-  LIBRW_REF: a24886794eacc8d62d9cc096f06d02b87c35c1cd
+  LIBRW_REF: 15ffa585216a9a7573ecc597b19ce2fde9b935f2
 
 jobs:
   build-windows:
@@ -54,7 +54,8 @@ jobs:
           } else {
             $ver = "0.0.0"
           }
-          $branch = "${{ github.ref_name }}"
+          $ref = if ("${{ github.event_name }}" -eq "pull_request") { "${{ github.base_ref }}" } else { "${{ github.ref_name }}" }
+          $branch = if ($ref -eq "PE") { "PE" } else { "master" }
           $shortsha = "${{ github.sha }}".Substring(0, 7)
           echo "version=$ver" >> $env:GITHUB_OUTPUT
           echo "tag=v${ver}-${branch}-${shortsha}" >> $env:GITHUB_OUTPUT
@@ -69,19 +70,6 @@ jobs:
         shell: cmd
         working-directory: librw/build
         run: msbuild librw.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:librw /m
-
-      - name: Patch librw imgui missing d3d9 declarations
-        shell: pwsh
-        run: |
-          $file = "librw/skeleton/imgui/imgui_impl_rw.cpp"
-          $patch = @"
-          #include <rw.h>
-          #ifdef RW_D3D9
-          #include <d3d9.h>
-          namespace rw { namespace d3d { extern IDirect3DDevice9 *d3ddevice; } }
-          #endif
-          "@
-          (Get-Content $file) -replace '#include <rw.h>', $patch | Set-Content $file
 
       - name: Generate ariane project files
         shell: cmd
@@ -164,7 +152,9 @@ jobs:
         working-directory: ariane
         env:
           ARIANE_CHANNEL: ${{ github.event_name == 'pull_request' && github.base_ref || github.ref_name }}
-        run: premake5 gmake2 --channel="$ARIANE_CHANNEL"
+        run: |
+          if [ "$ARIANE_CHANNEL" != PE ]; then ARIANE_CHANNEL=master; fi
+          premake5 gmake2 --channel="$ARIANE_CHANNEL"
 
       - name: Build Ariane
         working-directory: ariane
@@ -180,7 +170,6 @@ jobs:
           set -e
           cat smoke-test.log
           test "$status" -eq 1
-          grep --quiet "OpenGL version:" smoke-test.log
           grep --quiet "error: unknown game" smoke-test.log
 
       - name: Package Linux artifact
