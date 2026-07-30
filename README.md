@@ -4,7 +4,7 @@ ariane
 Join the Discord for download, latest updates, progress etc..
 Discord : https://discord.gg/8NS59AbQtN
 
-A map editor for GTA III, Vice City and San Andreas, built on [librw](https://github.com/aap/librw).
+A map editor for GTA III, Vice City and San Andreas, built on the [`ariane` integration branch of Southland-FR/librw](https://github.com/Southland-FR/librw/tree/ariane).
 
 Forked from [euryopa](https://github.com/aap/librwgta) by aap.
 
@@ -19,16 +19,32 @@ Forked from [euryopa](https://github.com/aap/librwgta) by aap.
 
 ## Building
 
-Requires [librw](https://github.com/aap/librw) built from source. Set the `LIBRW` environment variable to point to your librw directory, then use premake5 to generate build files.
+Set `LIBRW` to the dedicated `librw-ariane` worktree. For reproducible builds,
+use the exact commit recorded as `LIBRW_REF` in
+`.github/workflows/build-euryopa.yml`, currently
+`15ffa585216a9a7573ecc597b19ce2fde9b935f2`. Build librw before generating
+Ariane with the PE channel.
 
 ```bash
-cd build
-# macOS ARM64
-make config=release_macos-arm64-gl3 euryopa
-# macOS x86_64
-make config=release_macos-amd64-gl3 euryopa
-# Windows (D3D9)
-make config=release_win-amd64-d3d9 euryopa
+export LIBRW=/path/to/librw-ariane
+(cd "$LIBRW" && premake5 gmake2 --gfxlib=glfw)
+make -C "$LIBRW/build" config=release_macos-arm64-gl3 librw
+
+premake5 gmake2 --channel=PE
+make -C build config=release_macos-arm64-gl3 euryopa
+```
+
+On Windows, run from a Visual Studio developer shell:
+
+```bat
+set LIBRW=C:\path\to\librw-ariane
+pushd %LIBRW%
+premake5 vs2019
+msbuild build\librw.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:librw /m
+popd
+
+premake5 vs2019 --channel=PE
+msbuild build\librwgta.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:librwgta;euryopa /m
 ```
 
 ## Usage
