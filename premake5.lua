@@ -95,6 +95,8 @@ workspace "librwgta"
 
 	filter { "platforms:*amd64*" }
 		architecture "x86_64"
+	filter { "platforms:*arm64*" }
+		architecture "ARM64"
 	filter { "platforms:*x86*" }
 		architecture "x86"
 	filter { "platforms:*-arm-*" }
@@ -343,4 +345,3 @@ project "convcdimage"
 	kind "ConsoleApp"
 	files { "tools/euryopa/minilzo/minilzo.c" }
 	removeplatforms { "*gl3", "*d3d9" }
-
