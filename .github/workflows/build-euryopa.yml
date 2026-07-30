@@ -146,6 +146,8 @@ jobs:
           echo "63edd3e7461eebdd45b500a3c7e8ad4e7a67d68f230010f9a97cbb71b4ec59c8  premake5.tar.gz" | sha256sum --check
           mkdir premake5
           tar --extract --gzip --file premake5.tar.gz --directory premake5
+          chmod +x premake5/premake5
+          premake5/premake5 --version
           echo "${{ github.workspace }}/premake5" >> "$GITHUB_PATH"
 
       - name: Generate librw project files
