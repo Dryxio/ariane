@@ -393,6 +393,7 @@ ProcessLodList(void)
 }
 
 static rw::RGBA highlightColor;
+static uint8 highlightAlpha = 128;
 
 static void
 BuildGhostMatrix(rw::Matrix *matrix, const rw::Quat &rotation, const rw::V3d &translation)
@@ -519,7 +520,7 @@ myRenderCB(rw::Atomic *atomic)
 	else if(highlightColor.red || highlightColor.green || highlightColor.blue){
 		atomic->getPipeline()->render(atomic);
 		gta::colourCode = highlightColor;
-		gta::colourCode.alpha = 128;
+		gta::colourCode.alpha = highlightAlpha;
 		int32 zwrite, fog, aref;
 		zwrite = GetRenderState(rw::ZWRITEENABLE);
 		fog = rw::GetRenderState(rw::FOGENABLE);
@@ -567,6 +568,8 @@ RenderInst(ObjectInst *inst)
 	if(inst->m_selected && inst->m_highlight < HIGHLIGHT_SELECTION)
 		inst->m_highlight = HIGHLIGHT_SELECTION;
 	highlightColor = highlightCols[inst->m_highlight];
+	highlightAlpha = inst->m_highlight == HIGHLIGHT_SELECTION ?
+		(uint8)(gSelectionHighlightOpacity * 255 / 100) : 128;
 
 	if(obj->m_type == ObjectDef::ATOMIC)
 		((rw::Atomic*)inst->m_rwObject)->render();

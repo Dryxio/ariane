@@ -56,10 +56,14 @@ EnsureDirectoryTree(const char *path)
 	}
 #ifdef _WIN32
 	_mkdir(dirpath);
+	DWORD attributes = GetFileAttributesA(dirpath);
+	return attributes != INVALID_FILE_ATTRIBUTES &&
+	       (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
 #else
 	mkdir(dirpath, 0777);
+	struct stat info;
+	return stat(dirpath, &info) == 0 && S_ISDIR(info.st_mode);
 #endif
-	return true;
 }
 
 // TODO: print to log as well
@@ -211,17 +215,16 @@ bool
 GetArianeDataDirectory(char *dir, size_t size)
 {
 	char rootDir[1024];
-	const char *dataDirectory = "ariane";
-#ifndef _WIN32
-	// The Unix executable is named "ariane", so a sibling directory cannot
-	// use the same name. Runtime handoff files are still mirrored at the game
-	// root for the Windows ASI plugin.
-	dataDirectory = "ariane_data";
-#endif
-	if(!GetEditorRootDirectory(rootDir, sizeof(rootDir)) ||
-	   !BuildPath(dir, size, rootDir, dataDirectory))
+	if(!GetEditorRootDirectory(rootDir, sizeof(rootDir)))
 		return false;
-	return EnsureDirectoryTree(dir);
+
+	if(BuildPath(dir, size, rootDir, "ariane") && EnsureDirectoryTree(dir))
+		return true;
+
+	// The macOS executable is named `ariane`. It can also sit beside the
+	// Windows build in a Parallels shared game folder, so select the fallback
+	// based on the filesystem entry rather than the editor's platform.
+	return BuildPath(dir, size, rootDir, "ariane_data") && EnsureDirectoryTree(dir);
 }
 
 bool

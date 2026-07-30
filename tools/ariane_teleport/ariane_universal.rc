@@ -1,0 +1,5 @@
+#include "universal_resource.h"
+
+IDR_ARIANE_III RCDATA "bin\\GTA3\\Release\\ariane_teleport.III.asi"
+IDR_ARIANE_VC  RCDATA "bin\\GTA-VC\\Release\\ariane_teleport.VC.asi"
+IDR_ARIANE_SA  RCDATA "bin\\GTA-SA\\Release\\ariane_teleport.SA.asi"

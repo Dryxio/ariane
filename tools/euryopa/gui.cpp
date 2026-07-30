@@ -6,6 +6,7 @@
 #include "telemetry.h"
 #include "updater.h"
 #include "icons.h"
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -103,10 +104,12 @@ static int gSavedWindowHeight = 800;
 static bool gSavedWindowMaximized;
 static float gSettingsAutosaveSeconds;
 static bool gPersistentSettingsLoaded;
+static const int SAVE_SETTINGS_VERSION = 2;
 
 static void loadSaveSettings(void);
 static void saveSaveSettings(void);
 static void normalizePersistentSettings(void);
+static void finishTransformPanelEdit(void);
 static bool splitSettingLine(const char *line, char *key, size_t keySize, const char **value);
 static bool parseIntSetting(const char *value, int *out);
 
@@ -562,7 +565,10 @@ normalizePersistentSettings(void)
 	gRenderMode = clamp(gRenderMode, 0, 2);
 	gRenderOnlyHD = gRenderMode == 1;
 	gRenderOnlyLod = gRenderMode == 2;
+	gSelectionHighlightOpacity = clamp(gSelectionHighlightOpacity, 0, 100);
 	gGizmoMode = gGizmoMode == GIZMO_ROTATE ? GIZMO_ROTATE : GIZMO_TRANSLATE;
+	if(gGizmoSpace != GIZMO_LOCAL && gGizmoSpace != GIZMO_WORLD)
+		gGizmoSpace = GIZMO_WORLD;
 	gBrowserActiveTab = clamp(gBrowserActiveTab, (int)BROWSER_TAB_CATEGORIES, (int)BROWSER_TAB_PREFABS);
 	gBrowserSelectedCategory = clamp(gBrowserSelectedCategory, -1, NUM_OBJ_CATEGORIES-1);
 	gDiffFilter = max(gDiffFilter, 0);
@@ -3327,11 +3333,13 @@ uiMainmenu(void)
 	if(ImGui::BeginMainMenuBar()){
 		if(ImGui::BeginMenu(ICON_FA_FOLDER_OPEN " File")){
 			if(ImGui::MenuItem(ICON_FA_FLOPPY_DISK " Save All IPLs", "Ctrl+S")){
+				finishTransformPanelEdit();
 				if(saveAllIpls())
 					Toast(TOAST_SAVE, "Saved all IPL files to %s", getSaveDestinationLabel());
 			}
 			ImGui::SetItemTooltip("Saves all modified objects in their respective placement files (.ipl).\nCurrent target: %s.", getSaveDestinationLabel());
 			if(ImGui::MenuItem(ICON_FA_GAMEPAD " Test in Game", "Ctrl+G")){
+				finishTransformPanelEdit();
 				testInGame();
 			}
 			ImGui::SetItemTooltip("Launches your game and spawns you to the current camera position.\nRequires ariane.asi installed in your game folder.");
@@ -3354,6 +3362,7 @@ uiMainmenu(void)
 			}
 			ImGui::SetItemTooltip("Choose whether Save writes back to loaded files or exports an override copy to modloader/Ariane.");
 			if(ImGui::MenuItem(ICON_FA_BOLT " Hot Reload", "Ctrl+R")){
+				finishTransformPanelEdit();
 				hotReloadIpls();
 			}
 			ImGui::SetItemTooltip("Instantly apply your changes in a running SA game without restarting.\nRequires ariane.asi.");
@@ -4119,6 +4128,7 @@ uiKeyboardShortcutsWindow(void)
 
 		{ "Gizmo", "W", "Translate gizmo mode", "Object/path selection" },
 		{ "Gizmo", "Q", "Rotate gizmo mode", "Object selection" },
+		{ "Gizmo", "L", "Toggle local/world axes", "Object selection" },
 		{ "Gizmo", "Shift while dragging", "Use selected snap increment", "Gizmo" },
 
 		{ "Clipboard", "Ctrl+C", "Copy selected buildings", "Global" },
@@ -4541,6 +4551,8 @@ uiRendering(void)
 	static const uint32 aaOptions[] = { 1, 2, 4, 8, 16 };
 
 	ImGui::Checkbox("Draw PostFX", &gRenderPostFX);
+	ImGui::SliderInt("Selection Highlight Opacity", &gSelectionHighlightOpacity, 0, 100, "%d%%");
+	ImGui::SetItemTooltip("Opacity of the red overlay drawn on selected objects.");
 	if(ImGui::BeginCombo("Anti-aliasing", getAASamplesLabel(gRequestedAASamples))){
 		for(uint32 samples : aaOptions){
 			if(samples > 1 && (maxAASamples <= 1 || samples > maxAASamples))
@@ -5023,6 +5035,347 @@ uiFxInfo(ObjectInst *inst)
 	ImGui::EndChild();
 }
 
+enum TransformPanelEditKind
+{
+	TRANSFORM_PANEL_NONE,
+	TRANSFORM_PANEL_POSITION,
+	TRANSFORM_PANEL_ROTATION
+};
+
+struct TransformPanelState
+{
+	ObjectInst *leader;
+	bool relative;
+	bool applyToSelection = true;
+	bool invalidWarningShown;
+	int editKind;
+	float position[3];
+	float rotation[3];
+	float validPosition[3];
+	float validRotation[3];
+	rw::V3d startLeaderPos;
+	rw::Quat startLeaderRot;
+	std::vector<UndoTransform> transforms;
+};
+
+struct TransformClipboard
+{
+	bool valid;
+	rw::V3d position;
+	rw::V3d rotationDegrees;
+};
+
+static TransformPanelState gTransformPanel = {};
+static TransformClipboard gTransformClipboard = {};
+static bool gTransformPanelDrawnThisFrame;
+
+static void
+copyTransformValues(float dst[3], const float src[3])
+{
+	dst[0] = src[0];
+	dst[1] = src[1];
+	dst[2] = src[2];
+}
+
+static bool
+finiteTransformValues(const float values[3])
+{
+	return std::isfinite(values[0]) && std::isfinite(values[1]) && std::isfinite(values[2]);
+}
+
+static bool
+finiteTransformVector(const rw::V3d &value)
+{
+	return std::isfinite(value.x) && std::isfinite(value.y) && std::isfinite(value.z);
+}
+
+static bool
+finiteTransformRotation(const rw::Quat &value)
+{
+	return std::isfinite(value.x) && std::isfinite(value.y) &&
+	       std::isfinite(value.z) && std::isfinite(value.w);
+}
+
+static void
+refreshTransformPanel(ObjectInst *inst)
+{
+	gTransformPanel.leader = inst;
+	if(inst == nil)
+		return;
+	rw::V3d degrees = GetObjectRotationDegrees(inst->m_rotation);
+	if(gTransformPanel.relative){
+		gTransformPanel.position[0] = 0.0f;
+		gTransformPanel.position[1] = 0.0f;
+		gTransformPanel.position[2] = 0.0f;
+		gTransformPanel.rotation[0] = 0.0f;
+		gTransformPanel.rotation[1] = 0.0f;
+		gTransformPanel.rotation[2] = 0.0f;
+	}else{
+		gTransformPanel.position[0] = inst->m_translation.x;
+		gTransformPanel.position[1] = inst->m_translation.y;
+		gTransformPanel.position[2] = inst->m_translation.z;
+		gTransformPanel.rotation[0] = degrees.x;
+		gTransformPanel.rotation[1] = degrees.y;
+		gTransformPanel.rotation[2] = degrees.z;
+	}
+	copyTransformValues(gTransformPanel.validPosition, gTransformPanel.position);
+	copyTransformValues(gTransformPanel.validRotation, gTransformPanel.rotation);
+}
+
+static void
+finishTransformPanelEdit(void)
+{
+	if(gTransformPanel.editKind == TRANSFORM_PANEL_NONE)
+		return;
+	CommitObjectTransformTargets(gTransformPanel.transforms);
+	gTransformPanel.editKind = TRANSFORM_PANEL_NONE;
+	gTransformPanel.invalidWarningShown = false;
+	refreshTransformPanel(gTransformPanel.leader);
+}
+
+static bool
+beginTransformPanelEdit(ObjectInst *inst, int editKind)
+{
+	if(gTransformPanel.editKind != TRANSFORM_PANEL_NONE)
+		finishTransformPanelEdit();
+	bool capped = false;
+	if(!CaptureObjectTransformTargets(inst, gTransformPanel.applyToSelection,
+	   gTransformPanel.transforms, &capped))
+		return false;
+	if(capped)
+		Toast(TOAST_SELECTION, "Transform limited to first %d linked object(s)", MAX_BATCH_OBJECTS);
+	gTransformPanel.leader = inst;
+	gTransformPanel.editKind = editKind;
+	gTransformPanel.invalidWarningShown = false;
+	gTransformPanel.startLeaderPos = inst->m_translation;
+	gTransformPanel.startLeaderRot = inst->m_rotation;
+	return true;
+}
+
+static void
+rejectInvalidTransformValues(float values[3], const float validValues[3])
+{
+	copyTransformValues(values, validValues);
+	if(!gTransformPanel.invalidWarningShown){
+		Toast(TOAST_SELECTION, "Transform values must be finite numbers");
+		gTransformPanel.invalidWarningShown = true;
+	}
+}
+
+static bool
+uiTransformVectorField(const char *label, float values[3], float speed,
+	const char *format, const char *tooltip, const char *copiedName,
+	bool *deactivatedAfterEdit, bool *copyClicked)
+{
+	ImGui::PushID(copiedName);
+	ImGui::TextUnformatted(label);
+	ImGui::SameLine(150.0f);
+	float copyButtonWidth = ImGui::GetFrameHeight();
+	float fieldWidth = ImGui::GetContentRegionAvail().x - copyButtonWidth - ImGui::GetStyle().ItemSpacing.x;
+	if(fieldWidth < 120.0f)
+		fieldWidth = 120.0f;
+	ImGui::SetNextItemWidth(fieldWidth);
+	bool changed = ImGui::DragFloat3("##values", values, speed, 0.0f, 0.0f, format);
+	*deactivatedAfterEdit = ImGui::IsItemDeactivatedAfterEdit();
+	ImGui::SetItemTooltip("%s", tooltip);
+
+	ImGui::SameLine();
+	*copyClicked = ImGui::SmallButton(ICON_FA_COPY);
+	if(*copyClicked){
+		char text[128];
+		snprintf(text, sizeof(text), "%.9g %.9g %.9g",
+			values[0], values[1], values[2]);
+		SetEditorClipboardText(text);
+		gCopyableTextCopiedThisFrame = true;
+		Toast(TOAST_COPY_PASTE, "%s copied", copiedName);
+	}
+	ImGui::SetItemTooltip("Copy the visible X Y Z values");
+	ImGui::PopID();
+	return changed;
+}
+
+static void
+previewTransformPanelPosition(ObjectInst *inst)
+{
+	if(gTransformPanel.editKind != TRANSFORM_PANEL_POSITION &&
+	   !beginTransformPanelEdit(inst, TRANSFORM_PANEL_POSITION))
+		return;
+	rw::V3d pos = {
+		gTransformPanel.position[0],
+		gTransformPanel.position[1],
+		gTransformPanel.position[2]
+	};
+	if(gTransformPanel.relative)
+		pos = add(gTransformPanel.startLeaderPos, pos);
+	if(!finiteTransformVector(pos)){
+		rejectInvalidTransformValues(gTransformPanel.position, gTransformPanel.validPosition);
+		return;
+	}
+	PreviewObjectTransformTargets(inst, gTransformPanel.transforms, pos,
+		gTransformPanel.startLeaderRot, UNDO_TRANSFORM_POS);
+	copyTransformValues(gTransformPanel.validPosition, gTransformPanel.position);
+}
+
+static void
+previewTransformPanelRotation(ObjectInst *inst)
+{
+	if(gTransformPanel.editKind != TRANSFORM_PANEL_ROTATION &&
+	   !beginTransformPanelEdit(inst, TRANSFORM_PANEL_ROTATION))
+		return;
+	rw::V3d degrees = {
+		gTransformPanel.rotation[0],
+		gTransformPanel.rotation[1],
+		gTransformPanel.rotation[2]
+	};
+	rw::Quat rotation = gTransformPanel.relative ?
+		ApplyObjectRotationDelta(gTransformPanel.startLeaderRot, degrees,
+			gGizmoSpace == GIZMO_WORLD) :
+		MakeObjectRotationDegrees(degrees);
+	if(!finiteTransformRotation(rotation)){
+		rejectInvalidTransformValues(gTransformPanel.rotation, gTransformPanel.validRotation);
+		return;
+	}
+	PreviewObjectTransformTargets(inst, gTransformPanel.transforms,
+		gTransformPanel.startLeaderPos, rotation,
+		UNDO_TRANSFORM_ROT);
+	copyTransformValues(gTransformPanel.validRotation, gTransformPanel.rotation);
+}
+
+static void
+applyTransformPanelValues(ObjectInst *inst, const rw::V3d &position,
+	const rw::V3d &rotationDegrees, uint8 flags)
+{
+	finishTransformPanelEdit();
+	if(!beginTransformPanelEdit(inst,
+		(flags & UNDO_TRANSFORM_ROT) ? TRANSFORM_PANEL_ROTATION : TRANSFORM_PANEL_POSITION))
+		return;
+	PreviewObjectTransformTargets(inst, gTransformPanel.transforms, position,
+		MakeObjectRotationDegrees(rotationDegrees), flags);
+	finishTransformPanelEdit();
+}
+
+static void
+uiTransformPanel(ObjectInst *inst)
+{
+	gTransformPanelDrawnThisFrame = true;
+	if(gTransformPanel.leader != inst){
+		finishTransformPanelEdit();
+		refreshTransformPanel(inst);
+	}else if(gTransformPanel.editKind == TRANSFORM_PANEL_NONE)
+		refreshTransformPanel(inst);
+
+	int selectedCount = 0;
+	for(CPtrNode *p = selection.first; p; p = p->next)
+		if(!((ObjectInst*)p->item)->m_isDeleted)
+			selectedCount++;
+	bool absolute = !gTransformPanel.relative;
+	if(ImGui::RadioButton("Absolute", absolute)){
+		finishTransformPanelEdit();
+		gTransformPanel.relative = false;
+		refreshTransformPanel(inst);
+	}
+	ImGui::SameLine();
+	if(ImGui::RadioButton("Delta", !absolute)){
+		finishTransformPanelEdit();
+		gTransformPanel.relative = true;
+		refreshTransformPanel(inst);
+	}
+	ImGui::SetItemTooltip("Delta values are offsets from the current transform and reset to zero after each edit.");
+
+	if(selectedCount > 1){
+		ImGui::SameLine();
+		ImGui::Checkbox("Apply to selection", &gTransformPanel.applyToSelection);
+		ImGui::SetItemTooltip("Move and rotate the whole selection while preserving its layout. The first selected object is the pivot.");
+	}
+
+	bool positionDeactivated = false;
+	bool positionCopyClicked = false;
+	bool positionChanged = uiTransformVectorField(
+		gTransformPanel.relative ? "Position delta" : "Position",
+		gTransformPanel.position, 0.1f, "%.3f",
+		"Drag to adjust. Double-click to enter an exact value.",
+		"Position", &positionDeactivated, &positionCopyClicked);
+	if(positionChanged){
+		if(!finiteTransformValues(gTransformPanel.position))
+			rejectInvalidTransformValues(gTransformPanel.position, gTransformPanel.validPosition);
+		else
+			previewTransformPanelPosition(inst);
+	}
+	if(positionDeactivated && gTransformPanel.editKind == TRANSFORM_PANEL_POSITION)
+		finishTransformPanelEdit();
+	if(positionCopyClicked)
+		finishTransformPanelEdit();
+
+	bool rotationDeactivated = false;
+	bool rotationCopyClicked = false;
+	bool rotationChanged = uiTransformVectorField(
+		gTransformPanel.relative ? "Rotation delta (deg)" : "Rotation (deg)",
+		gTransformPanel.rotation, 0.5f, "%.2f",
+		gTransformPanel.relative ?
+			"Drag to adjust. Double-click to enter an exact value. Delta rotation uses the selected World/Local axes." :
+			"Drag to adjust. Double-click to enter an exact value.",
+		"Rotation", &rotationDeactivated, &rotationCopyClicked);
+	if(rotationChanged){
+		if(!finiteTransformValues(gTransformPanel.rotation))
+			rejectInvalidTransformValues(gTransformPanel.rotation, gTransformPanel.validRotation);
+		else
+			previewTransformPanelRotation(inst);
+	}
+	if(rotationDeactivated && gTransformPanel.editKind == TRANSFORM_PANEL_ROTATION)
+		finishTransformPanelEdit();
+	if(rotationCopyClicked)
+		finishTransformPanelEdit();
+
+	if(ImGui::SmallButton(ICON_FA_COPY " Copy transform")){
+		finishTransformPanelEdit();
+		gTransformClipboard.valid = true;
+		gTransformClipboard.position = inst->m_translation;
+		gTransformClipboard.rotationDegrees = GetObjectRotationDegrees(inst->m_rotation);
+		char text[256];
+		snprintf(text, sizeof(text),
+			"Position %.9g %.9g %.9g\nRotation %.9g %.9g %.9g",
+			gTransformClipboard.position.x, gTransformClipboard.position.y, gTransformClipboard.position.z,
+			gTransformClipboard.rotationDegrees.x, gTransformClipboard.rotationDegrees.y,
+			gTransformClipboard.rotationDegrees.z);
+		SetEditorClipboardText(text);
+	}
+	ImGui::SameLine();
+	TransformClipboard systemClipboard = {};
+	const char *clipboardText = ImGui::GetClipboardText();
+	if(clipboardText){
+		float px, py, pz, rx, ry, rz;
+		if(sscanf(clipboardText, "Position %f %f %f\nRotation %f %f %f",
+		   &px, &py, &pz, &rx, &ry, &rz) == 6){
+			systemClipboard.position = { px, py, pz };
+			systemClipboard.rotationDegrees = { rx, ry, rz };
+			systemClipboard.valid = finiteTransformVector(systemClipboard.position) &&
+				finiteTransformVector(systemClipboard.rotationDegrees);
+		}
+	}
+	ImGui::BeginDisabled(!systemClipboard.valid && !gTransformClipboard.valid);
+	if(ImGui::SmallButton(ICON_FA_PASTE " Paste transform")){
+		const TransformClipboard &source = systemClipboard.valid ? systemClipboard : gTransformClipboard;
+		applyTransformPanelValues(inst, source.position,
+			source.rotationDegrees, UNDO_TRANSFORM_POS | UNDO_TRANSFORM_ROT);
+	}
+	ImGui::EndDisabled();
+
+	if(ImGui::SmallButton("Reset rotation"))
+		applyTransformPanelValues(inst, inst->m_translation, { 0.0f, 0.0f, 0.0f },
+			UNDO_TRANSFORM_ROT);
+	ImGui::SetItemTooltip("Set X, Y and Z rotation to zero.");
+	ImGui::SameLine();
+	if(ImGui::SmallButton("Make upright")){
+		rw::V3d degrees = GetObjectRotationDegrees(inst->m_rotation);
+		applyTransformPanelValues(inst, inst->m_translation, { 0.0f, 0.0f, degrees.z },
+			UNDO_TRANSFORM_ROT);
+	}
+	ImGui::SetItemTooltip("Remove tilt while preserving the object's Z heading.");
+
+	ImGui::TextDisabled("Quaternion: %.3f %.3f %.3f %.3f",
+		inst->m_rotation.x, inst->m_rotation.y, inst->m_rotation.z, inst->m_rotation.w);
+}
+
 
 static void
 uiInstInfo(ObjectInst *inst)
@@ -5042,6 +5395,7 @@ uiInstInfo(ObjectInst *inst)
 			inst->Undelete();
 	}else{
 		if(ImGui::Button("Delete")){
+			finishTransformPanelEdit();
 			inst->Delete();
 		}
 		if(inst->m_lod){
@@ -5050,26 +5404,8 @@ uiInstInfo(ObjectInst *inst)
 		}
 	}
 
-	bool changed = false;
-	changed |= ImGui::DragFloat3("Translation", (float*)&inst->m_translation, 0.1f);
-	ImGui::Text("Rotation: %.3f %.3f %.3f %.3f",
-		inst->m_rotation.x,
-		inst->m_rotation.y,
-		inst->m_rotation.z,
-		inst->m_rotation.w);
-	if(changed){
-		StampChangeSeq(inst);
-		inst->m_isDirty = true;
-		inst->UpdateMatrix();
-		if(inst->m_rwObject){
-			rw::Frame *f;
-			if(obj->m_type == ObjectDef::ATOMIC)
-				f = ((rw::Atomic*)inst->m_rwObject)->getFrame();
-			else
-				f = ((rw::Clump*)inst->m_rwObject)->getFrame();
-			f->transform(&inst->m_matrix, rw::COMBINEREPLACE);
-		}
-	}
+	ImGui::SeparatorText("Transform");
+	uiTransformPanel(inst);
 
 	ImGui::InputInt("Interior", &inst->m_area);
 	if(inst->m_area < 0) inst->m_area = 0;
@@ -5189,6 +5525,7 @@ loadSaveSettings(void)
 	bool boolValue;
 	rw::V3d vecValue;
 	int savedSpawnObjectId = -1;
+	int loadedSettingsVersion = 0;
 
 	sanitizeAutomaticBackupSettings();
 	sanitizeCustomImportSettings();
@@ -5208,7 +5545,9 @@ loadSaveSettings(void)
 	while(fgets(line, sizeof(line), f)){
 		if(!splitSettingLine(line, key, sizeof(key), &value))
 			continue;
-		if(strcmp(key, "save_destination") == 0){
+		if(strcmp(key, "settings_version") == 0){
+			parseIntSetting(value, &loadedSettingsVersion);
+		}else if(strcmp(key, "save_destination") == 0){
 			if(parseIntSetting(value, &intValue) && intValue == SAVE_DESTINATION_MODLOADER)
 				gSaveDestination = SAVE_DESTINATION_MODLOADER;
 			else
@@ -5282,7 +5621,13 @@ loadSaveSettings(void)
 			parseFloatSetting(value, &TheCamera.m_fov);
 		}else if(strcmp(key, "draw_target") == 0){
 			if(parseBoolSetting(value, &boolValue)) gDrawTarget = boolValue;
-		}else if(strcmp(key, "render_collision") == 0){
+		}else if(strcmp(key, "selection_highlight_opacity") == 0){
+			parseIntSetting(value, &gSelectionHighlightOpacity);
+		}
+
+		// Keep the settings dispatch in separate chains. A single very long
+		// else-if chain exceeds MSVC's nested-block limit as settings are added.
+		if(strcmp(key, "render_collision") == 0){
 			if(parseBoolSetting(value, &boolValue)) gRenderCollision = boolValue;
 		}else if(strcmp(key, "render_zones") == 0){
 			if(parseBoolSetting(value, &boolValue)) gRenderZones = boolValue;
@@ -5388,6 +5733,8 @@ loadSaveSettings(void)
 			if(parseBoolSetting(value, &boolValue)) gGizmoEnabled = boolValue;
 		}else if(strcmp(key, "gizmo_mode") == 0){
 			parseIntSetting(value, &gGizmoMode);
+		}else if(strcmp(key, "gizmo_space") == 0){
+			parseIntSetting(value, &gGizmoSpace);
 		}else if(strcmp(key, "gizmo_snap") == 0){
 			if(parseBoolSetting(value, &boolValue)) gGizmoSnap = boolValue;
 		}else if(strcmp(key, "gizmo_snap_angle") == 0){
@@ -5483,6 +5830,15 @@ loadSaveSettings(void)
 		}
 	}
 
+	// Version 1 changed the camera target marker to opt-in. Existing settings
+	// files stored the old enabled default, so migrate every user once.
+	if(loadedSettingsVersion < 1)
+		gDrawTarget = false;
+	// Version 2 gives every existing user the softer selection highlight once.
+	// Later saves retain whatever opacity the user chooses.
+	if(loadedSettingsVersion < 2)
+		gSelectionHighlightOpacity = 25;
+
 	sanitizeAutomaticBackupSettings();
 	sanitizeCustomImportSettings();
 	normalizePersistentSettings();
@@ -5540,6 +5896,7 @@ saveSaveSettings(void)
 	if(f == nil)
 		return;
 
+	fprintf(f, "settings_version %d\n", SAVE_SETTINGS_VERSION);
 	fprintf(f, "window_width %d\n", gSavedWindowWidth);
 	fprintf(f, "window_height %d\n", gSavedWindowHeight);
 	if(gSavedWindowPlacementValid){
@@ -5581,6 +5938,7 @@ saveSaveSettings(void)
 	fprintf(f, "camera_target %.9g %.9g %.9g\n", TheCamera.m_target.x, TheCamera.m_target.y, TheCamera.m_target.z);
 	fprintf(f, "camera_fov %.9g\n", TheCamera.m_fov);
 	fprintf(f, "draw_target %d\n", gDrawTarget ? 1 : 0);
+	fprintf(f, "selection_highlight_opacity %d\n", gSelectionHighlightOpacity);
 	fprintf(f, "render_collision %d\n", gRenderCollision ? 1 : 0);
 	fprintf(f, "render_zones %d\n", gRenderZones ? 1 : 0);
 	fprintf(f, "render_map_zones %d\n", gRenderMapZones ? 1 : 0);
@@ -5635,6 +5993,7 @@ saveSaveSettings(void)
 	fprintf(f, "enable_timecycle_boxes %d\n", gEnableTimecycleBoxes ? 1 : 0);
 	fprintf(f, "gizmo_enabled %d\n", gGizmoEnabled ? 1 : 0);
 	fprintf(f, "gizmo_mode %d\n", gGizmoMode);
+	fprintf(f, "gizmo_space %d\n", gGizmoSpace);
 	fprintf(f, "gizmo_snap %d\n", gGizmoSnap ? 1 : 0);
 	fprintf(f, "gizmo_snap_angle %.9g\n", gGizmoSnapAngle);
 	fprintf(f, "gizmo_snap_translate %.9g\n", gGizmoSnapTranslate);
@@ -5929,6 +6288,11 @@ uiToolsWindow(void)
 		ImGui::SameLine();
 		if(ImGui::RadioButton("Rotate (Q)", gGizmoMode == GIZMO_ROTATE))
 			gGizmoMode = GIZMO_ROTATE;
+		ImGui::SameLine();
+		bool worldAxes = gGizmoSpace == GIZMO_WORLD;
+		if(ImGui::Checkbox("World axes", &worldAxes))
+			gGizmoSpace = worldAxes ? GIZMO_WORLD : GIZMO_LOCAL;
+		ImGui::SetItemTooltip("Local when unchecked. World axes stay aligned with the map. Press L to toggle.");
 
 		ImGui::Checkbox("Snap with Shift", &gGizmoSnap);
 		ImGui::SetItemTooltip("Enable snap increments for the gizmo while Shift is held.");
@@ -7278,6 +7642,7 @@ gui(void)
 		camloaded = true;
 	}
 	gCopyableTextCopiedThisFrame = false;
+	gTransformPanelDrawnThisFrame = false;
 
 	Path::guiHoveredNode = nil;
 	uiMainmenu();
@@ -7302,6 +7667,7 @@ gui(void)
 	// Copy/Paste (not in water edit mode)
 	if(allowEditorShortcuts && !WaterLevel::gWaterEditMode){
 		if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('C')){
+			finishTransformPanelEdit();
 			int before = 0;
 			for(CPtrNode *p = selection.first; p; p = p->next) before++;
 			CopySelected();
@@ -7311,6 +7677,7 @@ gui(void)
 					min(before, MAX_BATCH_OBJECTS));
 		}
 		if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('X')){
+			finishTransformPanelEdit();
 			int before = 0;
 			for(CPtrNode *p = selection.first; p; p = p->next) before++;
 			CutSelected();
@@ -7318,6 +7685,7 @@ gui(void)
 				Toast(TOAST_COPY_PASTE, "Cut %d instance(s)", min(before, MAX_BATCH_OBJECTS));
 		}
 		if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('V')){
+			finishTransformPanelEdit();
 			bool pasteInPlace = CPad::IsShiftDown();
 			int pasted = pasteInPlace ? PasteClipboardInPlace() : PasteClipboard();
 			if(pasted > 0)
@@ -7339,13 +7707,15 @@ gui(void)
 	}
 
 	// Gizmo mode shortcuts (not in water edit mode — water gizmo is always translate)
-	if(!WaterLevel::gWaterEditMode){
+	if(allowEditorShortcuts && !WaterLevel::gWaterEditMode){
 		if(CPad::IsKeyJustDown('W')) gGizmoMode = GIZMO_TRANSLATE;
 		if(CPad::IsKeyJustDown('Q')) gGizmoMode = GIZMO_ROTATE;
+		if(allowEditorShortcuts && selection.first && CPad::IsKeyJustDown('L'))
+			gGizmoSpace = gGizmoSpace == GIZMO_LOCAL ? GIZMO_WORLD : GIZMO_LOCAL;
 	}
 
 	// Delete
-	if(CPad::IsKeyJustDown(KEY_DEL) || CPad::IsKeyJustDown(KEY_BACKSP)){
+	if(allowEditorShortcuts && (CPad::IsKeyJustDown(KEY_DEL) || CPad::IsKeyJustDown(KEY_BACKSP))){
 		if(WaterLevel::gWaterEditMode){
 			int count = WaterLevel::GetNumSelectedPolys();
 			if(count > 0){
@@ -7353,6 +7723,7 @@ gui(void)
 				Toast(TOAST_DELETE, "Deleted %d water polygon(s)", count);
 			}
 		}else{
+			finishTransformPanelEdit();
 			int count = 0;
 			for(CPtrNode *p = selection.first; p; p = p->next) count++;
 			if(count > 0){
@@ -7363,54 +7734,61 @@ gui(void)
 	}
 
 	// Undo/Redo
-	if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('Z')){
+	if(allowEditorShortcuts && CPad::IsCtrlDown() && CPad::IsKeyJustDown('Z')){
 		if(WaterLevel::gWaterEditMode){
 			if(WaterLevel::WaterCanUndo()){
 				WaterLevel::WaterUndo();
 				Toast(TOAST_UNDO_REDO, "Water Undo");
 			}
 		}else{
+			finishTransformPanelEdit();
 			Undo();
 			Toast(TOAST_UNDO_REDO, "Undo");
 		}
 	}
-	if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('Y')){
+	if(allowEditorShortcuts && CPad::IsCtrlDown() && CPad::IsKeyJustDown('Y')){
 		if(WaterLevel::gWaterEditMode){
 			if(WaterLevel::WaterCanRedo()){
 				WaterLevel::WaterRedo();
 				Toast(TOAST_UNDO_REDO, "Water Redo");
 			}
 		}else{
+			finishTransformPanelEdit();
 			Redo();
 			Toast(TOAST_UNDO_REDO, "Redo");
 		}
 	}
 
 	// Ctrl+S to save
-	if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('S')){
+	if(allowEditorShortcuts && CPad::IsCtrlDown() && CPad::IsKeyJustDown('S')){
 		if(WaterLevel::gWaterEditMode){
 			if(WaterLevel::gWaterDirty){
 				if(WaterLevel::SaveWater())
 					Toast(TOAST_SAVE, "Saved water.dat to %s", getSaveDestinationLabel());
 			}
 		}else{
+			finishTransformPanelEdit();
 			if(saveAllIpls())
 				Toast(TOAST_SAVE, "Saved all IPL files to %s", getSaveDestinationLabel());
 		}
 	}
 
 	// Ctrl+G to test in game
-	if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('G')){
+	if(allowEditorShortcuts && CPad::IsCtrlDown() && CPad::IsKeyJustDown('G')){
+		finishTransformPanelEdit();
 		testInGame();
 	}
 
 	// Ctrl+R to hot reload streaming IPLs in running game
-	if(CPad::IsCtrlDown() && CPad::IsKeyJustDown('R')){
+	if(allowEditorShortcuts && CPad::IsCtrlDown() && CPad::IsKeyJustDown('R')){
+		finishTransformPanelEdit();
 		hotReloadIpls();
 	}
 
-	if(!CPad::IsCtrlDown() && CPad::IsKeyJustDown('G'))
+	if(allowEditorShortcuts && !CPad::IsCtrlDown() && CPad::IsKeyJustDown('G')){
+		finishTransformPanelEdit();
 		SnapSelectedToGround(CPad::IsShiftDown());
+	}
 
 	if(CPad::IsKeyJustDown('T')) showTimeWeatherWindow ^= 1;
 	if(showTimeWeatherWindow){
@@ -7750,6 +8128,9 @@ gui(void)
 		}
 		ImGui::End();
 	}
+
+	if(gTransformPanel.editKind != TRANSFORM_PANEL_NONE && !gTransformPanelDrawnThisFrame)
+		finishTransformPanelEdit();
 
 	uiToasts();
 

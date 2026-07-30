@@ -7,8 +7,11 @@
 #include <cmath>
 #include <cstdarg>
 
-#if defined(GTASA)
+#if defined(GTASA) || defined(GTAVC)
 #include <CGame.h>
+#endif
+
+#if defined(GTASA)
 #include <CTimeCycle.h>
 #include <CColStore.h>
 #include <CFileLoader.h>
@@ -421,7 +424,10 @@ public:
 		Events::gameProcessEvent += [] {
 			CPlayerPed *player = FindPlayerPed();
 			if(!player) return;
+
+#if defined(GTASA)
 			LogTrackedAdds();
+#endif
 
 			// --- Phase 1: one-time teleport from editor ---
 			static bool teleportDone = false;
@@ -438,9 +444,13 @@ public:
 					RemoveArianeAndLegacyFiles("ariane_teleport.txt");
 
 					if(n >= 4){
-#if defined(GTASA)
+#if defined(GTASA) || defined(GTAVC)
+						// The game tracks the active interior separately from the
+						// player's position. Keep both values in sync with Ariane.
 						CGame::currArea = area;
 						player->m_nAreaCode = area;
+#endif
+#if defined(GTASA)
 						player->Teleport(CVector(x, y, z), false);
 						CVector loadPos(x, y, z);
 						CStreaming::LoadScene(&loadPos);
