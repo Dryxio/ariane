@@ -3,12 +3,13 @@
 #include "modloader.h"
 #include "imgui/imgui_internal.h"
 #include "object_categories.h"
-#include "telemetry.h"
 #include "updater.h"
 #include "icons.h"
 #include <cmath>
 #include <string>
+#include <unordered_set>
 #include <vector>
+#include <sys/stat.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -19,7 +20,6 @@
 #include <dirent.h>
 #endif
 
-static bool showDemoWindow;
 static bool showEditorWindow;
 static bool showInstanceWindow;
 static bool showLogWindow;
@@ -104,6 +104,7 @@ static int gSavedWindowHeight = 800;
 static bool gSavedWindowMaximized;
 static float gSettingsAutosaveSeconds;
 static bool gPersistentSettingsLoaded;
+static bool gConfirmReloadGame = true;
 static const int SAVE_SETTINGS_VERSION = 2;
 
 static void loadSaveSettings(void);
@@ -112,6 +113,8 @@ static void normalizePersistentSettings(void);
 static void finishTransformPanelEdit(void);
 static bool splitSettingLine(const char *line, char *key, size_t keySize, const char **value);
 static bool parseIntSetting(const char *value, int *out);
+static const char *pathFilename(const char *path);
+static const char *pathParentAndFilename(const char *path);
 
 static uint32
 sanitizeAASamples(uint32 samples, uint32 maxSamples = 0)
@@ -844,7 +847,7 @@ isCurrentGameRunning(void)
 #define TOAST_FADE_OUT 0.4f
 
 struct ToastEntry {
-	char text[128];
+	char text[256];
 	float timer;		// time remaining (counts down)
 	float totalTime;	// total lifetime
 	ToastCategory category;
@@ -1693,7 +1696,7 @@ removeLegacyWholeMapOverrides(void)
 }
 
 static bool
-saveAllIpls(void)
+saveAllIpls(const char *onlyScene = nil)
 {
 	if(warnStreamingBinarySaveBlockedByRunningGame("Save"))
 		return false;
@@ -1709,12 +1712,24 @@ saveAllIpls(void)
 	FileLoader::BinaryIplSaveResult binaryResult = {};
 	bool waterSaveOk = true;
 
-	if(gSaveDestination == SAVE_DESTINATION_MODLOADER)
+	if(onlyScene == nil && gSaveDestination == SAVE_DESTINATION_MODLOADER)
 		removeLegacyWholeMapOverrides();
+	if(onlyScene && sceneNeedsSave(onlyScene) && numSaved < 512){
+		FileLoader::BinaryIplSaveResult sceneResult = FileLoader::SaveScene(onlyScene);
+		mergeBinarySaveResult(&binaryResult, sceneResult);
+		if(sceneResult.numFailedFiles == 0 &&
+		   sceneResult.numFailedImages == 0 &&
+		   sceneResult.numBlockedEmptyDeletes == 0)
+			saved[numSaved++] = onlyScene;
+	}
 
 	for(p = instances.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
 		if(inst->m_file == nil)
+			continue;
+		if(onlyScene)
+			continue;
+		if(IsExternalIplMapLogicalPath(inst->m_file->name))
 			continue;
 		// Skip streaming IPL instances — those are saved via SaveBinaryIpls
 		if(inst->m_imageIndex >= 0)
@@ -1740,9 +1755,11 @@ saveAllIpls(void)
 		}
 	}
 
-	FileLoader::BinaryIplSaveResult standaloneBinaryResult =
-		FileLoader::SaveBinaryIpls(binaryResult.savedImages, binaryResult.numSavedImages);
-	mergeBinarySaveResult(&binaryResult, standaloneBinaryResult);
+	if(onlyScene == nil){
+		FileLoader::BinaryIplSaveResult standaloneBinaryResult =
+			FileLoader::SaveBinaryIpls(binaryResult.savedImages, binaryResult.numSavedImages);
+		mergeBinarySaveResult(&binaryResult, standaloneBinaryResult);
+	}
 
 	if(binaryResult.numBlockedEmptyDeletes)
 		Toast(TOAST_SAVE, "Blocked %d binary delete(s): can't empty a streaming IPL", binaryResult.numBlockedEmptyDeletes);
@@ -1751,7 +1768,7 @@ saveAllIpls(void)
 	else if(binaryResult.numFailedFiles)
 		Toast(TOAST_SAVE, "Failed to save %d file(s)", binaryResult.numFailedFiles);
 
-	if(params.water == GAME_SA && WaterLevel::gWaterDirty){
+	if(onlyScene == nil && params.water == GAME_SA && WaterLevel::gWaterDirty){
 		bool skippedEmptyModloaderWater =
 			gSaveDestination == SAVE_DESTINATION_MODLOADER &&
 			WaterLevel::GetNumQuads() == 0 &&
@@ -1833,9 +1850,47 @@ saveAllIpls(void)
 	       binaryResult.numFailedFiles == 0;
 }
 
+static bool
+saveCurrentMap(void)
+{
+	if(!IsIplMapDocumentOpen())
+		return saveAllIpls();
+
+	// An explicitly opened IPL behaves like a document: Ctrl+S writes back to
+	// that file even if the global whole-world save preference is modloader.
+	SaveDestination previousDestination = gSaveDestination;
+	gSaveDestination = SAVE_DESTINATION_ORIGINAL_FILES;
+	bool ok = saveAllIpls(GetIplMapDocumentLogicalPath());
+	gSaveDestination = previousDestination;
+	return ok;
+}
+
+static void
+toastCurrentMapSaved(void)
+{
+	if(!IsIplMapDocumentOpen()){
+		Toast(TOAST_SAVE, "Saved all IPL files to %s", getSaveDestinationLabel());
+		return;
+	}
+
+	const char *physicalPath = GetIplMapDocumentPhysicalPath();
+	const char *displayPath = pathParentAndFilename(physicalPath);
+	if(sceneHasRelatedStreamingFamily(GetIplMapDocumentLogicalPath()))
+		ToastFor(TOAST_SAVE, 6.0f,
+		         "Saved IPL family: %s\nRelated streamed data may have updated the source IMG.",
+		         displayPath);
+	else
+		ToastFor(TOAST_SAVE, 5.0f, "Saved directly to %s", displayPath);
+}
+
 static void
 testInGame(void)
 {
+	if(IsIplMapDocumentExternal()){
+		ToastFor(TOAST_SAVE, 6.0f,
+		         "Test in Game is unavailable: this external IPL is not registered in gta.dat or Mod Loader");
+		return;
+	}
 	// Only III/VC/SA supported
 	if(gameversion != GAME_III && gameversion != GAME_VC && gameversion != GAME_SA){
 		Toast(TOAST_SAVE, "Test in Game: unsupported game");
@@ -1844,10 +1899,10 @@ testInGame(void)
 	if(!warnMissingTeleportAsi("Test in Game"))
 		return;
 
-	// Save all IPLs first
-	if(!saveAllIpls())
+	// Save the active IPL document, or the whole world in the legacy workflow.
+	if(!saveCurrentMap())
 		return;
-	Toast(TOAST_SAVE, "Saved all IPL files to %s", getSaveDestinationLabel());
+	toastCurrentMapSaved();
 
 	// Camera position -> snap to ground
 	rw::V3d pos = TheCamera.m_position;
@@ -1948,6 +2003,11 @@ publishHotReloadOutput(FILE *f, const char *tempPath, const char *finalPath)
 static void
 hotReloadIpls(void)
 {
+	if(IsIplMapDocumentExternal()){
+		ToastFor(TOAST_SAVE, 6.0f,
+		         "Hot Reload is unavailable: this external IPL is not installed or registered in the game.");
+		return;
+	}
 	if(!isSA()){
 		Toast(TOAST_SAVE, "Hot Reload: only supported for SA");
 		return;
@@ -2075,6 +2135,8 @@ hotReloadIpls(void)
 	if(fe || legacyFe){
 		for(p = instances.first; p; p = p->next){
 			ObjectInst *inst = (ObjectInst*)p->item;
+			if(inst->m_file && IsExternalIplMapLogicalPath(inst->m_file->name))
+				continue;
 			if(inst->m_imageIndex >= 0 &&
 			   binaryImageWasSaved(binaryResult, inst->m_imageIndex))
 				continue;
@@ -2228,14 +2290,18 @@ static bool gOpenExportPrefab = false;
 static bool gOpenImportPrefab = false;
 static bool gOpenCustomImport = false;
 static bool gOpenDestroyMap = false;
+static bool gOpenReloadGame = false;
 static bool gShowExportPrefab = false;
 static bool gShowImportPrefab = false;
 static bool gShowDestroyMap = false;
+static bool gShowReloadGame = false;
 static bool gDestroyMapIncludeWater = true;
 static void uiExportPrefabPopup(void);
 static void uiImportPrefabPopup(void);
 static void uiCustomImportPopup(void);
 static void uiDestroyMapPopup(void);
+static void uiReloadGamePopup(void);
+static bool hasUnsavedEditorWork(void);
 static void trimLineEnding(char *line);
 static int findSuggestedCustomImportId(void);
 
@@ -2356,6 +2422,8 @@ static GameFile *gCustomImportIplFile = nil;
 static void
 destroyEntireMap(bool includeWater)
 {
+	if(IsIplMapDocumentOpen())
+		includeWater = false;
 	int numDeleted = DeleteAllInstances();
 	int numWaterPolys = 0;
 	if(includeWater && params.water == GAME_SA){
@@ -2387,9 +2455,14 @@ uiDestroyMapPopup(void)
 	if(!BeginEditorDialog("Destroy Entire Map", &gShowDestroyMap))
 		return;
 
-	ImGui::TextWrapped("This marks every loaded map instance as deleted in the editor.");
-	if(params.water == GAME_SA)
+	if(IsIplMapDocumentOpen())
+		ImGui::TextWrapped("This marks every instance in the opened IPL map as deleted. Reference IPLs stay locked and unchanged.");
+	else
+		ImGui::TextWrapped("This marks every loaded map instance as deleted in the editor.");
+	if(params.water == GAME_SA && !IsIplMapDocumentOpen())
 		ImGui::Checkbox("Also clear water.dat", &gDestroyMapIncludeWater);
+	else if(params.water == GAME_SA)
+		ImGui::TextDisabled("water.dat is outside the opened IPL document and stays unchanged.");
 	else
 		ImGui::TextDisabled("Water clearing is only available for SA maps.");
 
@@ -2401,13 +2474,63 @@ uiDestroyMapPopup(void)
 		ImGui::TextWrapped("This writes back to the file Ariane loaded. For modloader maps, that can be the active mod's IPL instead of a vanilla file.");
 
 	if(ImGui::Button("Destroy", ImVec2(140, 0))){
-		destroyEntireMap(gDestroyMapIncludeWater && params.water == GAME_SA);
+		destroyEntireMap(!IsIplMapDocumentOpen() && gDestroyMapIncludeWater && params.water == GAME_SA);
 		gShowDestroyMap = false;
 	}
 	ImGui::SameLine();
 	if(ImGui::Button("Cancel", ImVec2(140, 0)))
 		gShowDestroyMap = false;
 
+	EndEditorDialog();
+}
+
+static void
+restartArianeFromUi(void)
+{
+	if(!RestartAriane())
+		ToastFor(TOAST_SAVE, 6.0f, "Could not restart Ariane. No files or editor changes were modified.");
+}
+
+static void
+uiReloadGamePopup(void)
+{
+	if(gOpenReloadGame){
+		gShowReloadGame = true;
+		gOpenReloadGame = false;
+		ImGui::SetNextWindowFocus();
+	}
+
+	if(!BeginEditorDialog("Reload Game Files", &gShowReloadGame,
+	                      ImGuiWindowFlags_NoSavedSettings))
+		return;
+
+	bool unsaved = hasUnsavedEditorWork();
+	ImGui::TextWrapped("Ariane will close, start again, and reload the complete game setup from disk, including Mod Loader files.");
+	ImGui::Spacing();
+	if(unsaved){
+		ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.20f, 1.0f),
+		                   "Unsaved editor changes will be discarded.");
+		ImGui::TextWrapped("Save anything you want to keep before restarting.");
+	}else
+		ImGui::TextDisabled("No unsaved map, water, or SA path changes were detected.");
+
+	ImGui::Spacing();
+	bool dontShowAgain = !gConfirmReloadGame;
+	if(ImGui::Checkbox("Don't show again when there are no unsaved changes", &dontShowAgain)){
+		gConfirmReloadGame = !dontShowAgain;
+		saveSaveSettings();
+	}
+	ImGui::SetItemTooltip("Unsaved editor changes will always require confirmation.\nYou can re-enable this prompt in the Editor window under General.");
+
+	ImGui::Spacing();
+	const char *restartLabel = unsaved ? "Restart and Discard Changes" : "Restart Ariane";
+	if(ImGui::Button(restartLabel, ImVec2(220, 0))){
+		finishTransformPanelEdit();
+		restartArianeFromUi();
+	}
+	ImGui::SameLine();
+	if(ImGui::Button("Cancel", ImVec2(120, 0)))
+		gShowReloadGame = false;
 	EndEditorDialog();
 }
 
@@ -2426,6 +2549,21 @@ pathFilename(const char *path)
 	if(backslash && (slash == nil || backslash > slash))
 		slash = backslash;
 	return slash ? slash + 1 : path;
+}
+
+static const char*
+pathParentAndFilename(const char *path)
+{
+	if(path == nil)
+		return "";
+	const char *filename = pathFilename(path);
+	if(filename == path)
+		return path;
+	const char *parentEnd = filename - 1;
+	const char *parentStart = parentEnd;
+	while(parentStart > path && parentStart[-1] != '/' && parentStart[-1] != '\\')
+		parentStart--;
+	return parentStart;
 }
 
 static bool
@@ -2511,6 +2649,316 @@ pathHasExtensionCi(const char *path, const char *ext)
 	if(pathLen < extLen)
 		return false;
 	return rw::strncmp_ci(path + pathLen - extLen, ext, (int)extLen) == 0;
+}
+
+static bool
+pathsReferToSameFile(const char *a, const char *b)
+{
+	if(a == nil || b == nil || a[0] == '\0' || b[0] == '\0')
+		return false;
+	struct stat sa, sb;
+	if(stat(a, &sa) == 0 && stat(b, &sb) == 0)
+		return sa.st_dev == sb.st_dev && sa.st_ino == sb.st_ino;
+	return physicalPathsEqualCiNormalized(a, b);
+}
+
+static bool
+hasUnsavedEditorWork(void)
+{
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst == nil)
+			continue;
+		if(inst->m_imageIndex >= 0 ? binaryInstNeedsDiskSave(inst) : textInstNeedsSave(inst))
+			return true;
+	}
+	return (params.water == GAME_SA && WaterLevel::gWaterDirty) ||
+	       (gameversion == GAME_SA && SAPaths::HasDirtyAreas());
+}
+
+static bool
+isIplSectionMarker(const char *line, const char *section)
+{
+	while(*line && isspace((unsigned char)*line))
+		line++;
+	size_t len = strlen(section);
+	if(strncmp(line, section, len) != 0)
+		return false;
+	line += len;
+	while(*line && isspace((unsigned char)*line))
+		line++;
+	return *line == '\0' || *line == '#' || (line[0] == '/' && line[1] == '/');
+}
+
+static int
+countUnsafeIplInstances(FILE *file)
+{
+	char line[1024];
+	bool inInstSection = false;
+	int unsafe = 0;
+	rewind(file);
+	while(fgets(line, sizeof(line), file)){
+		// Match FileLoader::LoadLine before parsing both section markers and rows.
+		for(char *c = line; *c; c++)
+			if(*c == ',') *c = ' ';
+		if(!inInstSection){
+			if(isIplSectionMarker(line, "inst"))
+				inInstSection = true;
+			continue;
+		}
+		if(isIplSectionMarker(line, "end")){
+			inInstSection = false;
+			continue;
+		}
+
+		const char *s = line;
+		while(*s && isspace((unsigned char)*s))
+			s++;
+		if(*s == '\0' || *s == '#')
+			continue;
+
+		int objectId, area, lod;
+		char model[128];
+		float x, y, z, sx, sy, sz, qx, qy, qz, qw, areaFloat;
+		int fields;
+		if(isSA())
+			fields = sscanf(s, "%d %127s %d %f %f %f %f %f %f %f %d",
+			                &objectId, model, &area, &x, &y, &z, &qx, &qy, &qz, &qw, &lod);
+		else{
+			fields = sscanf(s, "%d %127s %f %f %f %f %f %f %f %f %f %f %f",
+			                &objectId, model, &areaFloat, &x, &y, &z, &sx, &sy, &sz,
+			                &qx, &qy, &qz, &qw);
+			if(fields != 13)
+				fields = sscanf(s, "%d %127s %f %f %f %f %f %f %f %f %f %f",
+				                &objectId, model, &x, &y, &z, &sx, &sy, &sz,
+				                &qx, &qy, &qz, &qw);
+		}
+
+		int expected = isSA() ? 11 : (fields == 13 ? 13 : 12);
+		if(fields != expected || GetObjectDef(objectId) == nil)
+			unsafe++;
+	}
+	return unsafe;
+}
+
+static bool
+buildGameFilePhysicalPath(GameFile *file, char *dst, size_t size)
+{
+	if(file == nil || file->name == nil || dst == nil || size == 0)
+		return false;
+	if(file->sourcePath && file->sourcePath[0]){
+		strncpy(dst, file->sourcePath, size - 1);
+		dst[size - 1] = '\0';
+		return true;
+	}
+
+	char logical[1024];
+	strncpy(logical, file->name, sizeof(logical) - 1);
+	logical[sizeof(logical) - 1] = '\0';
+#ifndef _WIN32
+	for(char *p = logical; *p; p++)
+		if(*p == '\\') *p = '/';
+#endif
+	char root[1024];
+	if(!GetGameRootDirectory(root, sizeof(root)) ||
+	   !BuildPath(dst, size, root, logical))
+		return false;
+	rw::makePath(dst);
+	return true;
+}
+
+static GameFile*
+findLoadedSceneFile(const char *physicalPath)
+{
+	std::unordered_set<GameFile*> checked;
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst == nil || inst->m_file == nil || inst->m_imageIndex >= 0 ||
+		   checked.find(inst->m_file) != checked.end())
+			continue;
+		checked.insert(inst->m_file);
+
+		char candidate[2048];
+		if(buildGameFilePhysicalPath(inst->m_file, candidate, sizeof(candidate)) &&
+		   pathsReferToSameFile(candidate, physicalPath))
+			return inst->m_file;
+	}
+
+	// A valid SA parent IPL can contain zero text instances while its related
+	// streamed IPLs live in IMG. Such a parent has no ObjectInst carrying its
+	// GameFile, so also check the scene paths recorded by FileLoader.
+	for(int i = 0; i < FileLoader::GetLoadedSceneCount(); i++){
+		const char *logicalPath = FileLoader::GetLoadedScenePath(i);
+		if(logicalPath == nil || logicalPath[0] == '\0')
+			continue;
+		GameFile candidateFile;
+		candidateFile.name = (char*)logicalPath;
+		candidateFile.sourcePath = (char*)ModloaderGetSourcePath(logicalPath);
+		char candidate[2048];
+		if(buildGameFilePhysicalPath(&candidateFile, candidate, sizeof(candidate)) &&
+		   pathsReferToSameFile(candidate, physicalPath))
+			return NewGameFile((char*)logicalPath);
+	}
+	return nil;
+}
+
+bool
+OpenIplMapDocumentFromPath(const char *physicalPath)
+{
+	if(physicalPath == nil || physicalPath[0] == '\0')
+		return false;
+	if(!pathHasExtensionCi(physicalPath, ".ipl")){
+		Toast(TOAST_SAVE, "Open External IPL supports text .ipl files in this version");
+		return false;
+	}
+	if(IsIplMapDocumentOpen() && pathsReferToSameFile(physicalPath, GetIplMapDocumentPhysicalPath())){
+		Toast(TOAST_SAVE, "This IPL map is already open");
+		return true;
+	}
+	GameFile *sceneFile = findLoadedSceneFile(physicalPath);
+	if(sceneFile && !IsExternalIplMapLogicalPath(sceneFile->name)){
+		if(IsIplMapDocumentOpen())
+			ToastFor(TOAST_SAVE, 6.0f,
+			         "This IPL is already part of your loaded game. Finish editing the external IPL to edit it normally.");
+		else
+			ToastFor(TOAST_SAVE, 5.0f,
+			         "This IPL is already loaded in Ariane. You can edit it directly without opening the file.");
+		return false;
+	}
+	if(hasUnsavedEditorWork()){
+		ToastFor(TOAST_SAVE, 5.0f,
+		         IsIplMapDocumentOpen() ?
+		         "Use Save Opened IPL before opening another map." :
+		         "Save all current editor changes before opening a map.");
+		return false;
+	}
+
+	FILE *probe = fopen(physicalPath, "rb");
+	if(probe == nil){
+		Toast(TOAST_SAVE, "Could not open IPL: %s", pathFilename(physicalPath));
+		return false;
+	}
+	char magic[4] = {};
+	size_t magicSize = fread(magic, 1, sizeof(magic), probe);
+	if(magicSize == sizeof(magic) && memcmp(magic, "bnry", sizeof(magic)) == 0){
+		fclose(probe);
+		ToastFor(TOAST_SAVE, 6.0f,
+		         "This is a streamed binary IPL. Open its main text IPL instead (for example, LAe2.ipl).");
+		return false;
+	}
+	int unsafeInstances = countUnsafeIplInstances(probe);
+	fclose(probe);
+	if(unsafeInstances > 0){
+		ToastFor(TOAST_SAVE, 7.0f,
+		         "This IPL uses %d model ID(s) that Ariane has not loaded. Open it with a game setup that includes the required IDE and model files.",
+		         unsafeInstances);
+		return false;
+	}
+
+	bool externalDocument = true;
+	std::unordered_set<ObjectInst*> existing;
+	for(CPtrNode *p = instances.first; p; p = p->next)
+		existing.insert((ObjectInst*)p->item);
+
+	if(sceneFile == nil){
+		// Keep an external text IPL logically separate from any native SA scene
+		// with the same basename. Otherwise opening a copy of LAe2.ipl would also
+		// claim and potentially rewrite the native LAe2_stream* IMG entries.
+		static uint32 openMapSequence;
+		char logicalPath[128];
+		snprintf(logicalPath, sizeof(logicalPath), "ariane\\open_map_%u.ipl", ++openMapSequence);
+		sceneFile = NewGameFile(logicalPath);
+		free(sceneFile->sourcePath);
+		sceneFile->sourcePath = strdup(physicalPath);
+		GameFile *previousFile = FileLoader::currentFile;
+		FileLoader::currentFile = sceneFile;
+		FileLoader::LoadScene(physicalPath, false);
+		FileLoader::currentFile = previousFile;
+
+		// LoadScene normally runs during startup, before the sector lists are
+		// built. A document opened at runtime must register its new instances.
+		for(CPtrNode *p = instances.first; p; p = p->next){
+			ObjectInst *inst = (ObjectInst*)p->item;
+			if(existing.find(inst) == existing.end())
+				InsertInstIntoSectors(inst);
+		}
+	}
+
+	SetIplMapDocument(sceneFile->name, physicalPath, externalDocument);
+	SetCustomPlacementIpl(sceneFile->name, physicalPath, false);
+	WaterLevel::CancelCreateMode();
+	WaterLevel::ClearWaterSelection();
+	WaterLevel::gWaterEditMode = false;
+	WaterLevel::gWaterSubMode = 0;
+	Path::selectedNode = nil;
+	SAPaths::selectedNode = nil;
+	Effects::selectedEffect = nil;
+	ClearSelection();
+	ResetUndoHistory();
+	RefreshIplVisibilityEntries();
+
+	int numInstances = 0;
+	ObjectInst *first = nil;
+	ObjectInst *firstStreamed = nil;
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(!IsInstInIplMapDocument(inst) || inst->m_isDeleted)
+			continue;
+		numInstances++;
+		if(first == nil && inst->m_imageIndex < 0)
+			first = inst;
+		else if(firstStreamed == nil && inst->m_imageIndex >= 0)
+			firstStreamed = inst;
+	}
+	if(first == nil)
+		first = firstStreamed;
+	if(first){
+		first->Select();
+		first->JumpTo();
+	}
+
+	if(IsIplMapDocumentExternal())
+		ToastFor(TOAST_SAVE, 8.0f,
+		         "External IPL opened: %s (%d objects).\nCtrl+S saves directly; not installed in game. Other IPLs locked.",
+		         pathParentAndFilename(physicalPath), numInstances);
+	else if(sceneHasRelatedStreamingFamily(GetIplMapDocumentLogicalPath()))
+		ToastFor(TOAST_SAVE, 8.0f,
+		         "Loaded IPL family opened: %s (%d objects).\nCtrl+S may update the text IPL and its source IMG. Other IPLs locked.",
+		         pathParentAndFilename(physicalPath), numInstances);
+	else
+		ToastFor(TOAST_SAVE, 7.0f,
+		         "Loaded IPL opened: %s (%d objects).\nCtrl+S saves directly to its source file. Other IPLs locked.",
+		         pathParentAndFilename(physicalPath), numInstances);
+	return true;
+}
+
+static void
+openIplMapDialog(void)
+{
+	char path[2048];
+	if(pickFileDialog(path, sizeof(path), ".ipl"))
+		OpenIplMapDocumentFromPath(path);
+}
+
+static void
+closeIplMapDocumentFocus(void)
+{
+	if(!IsIplMapDocumentOpen())
+		return;
+	if(hasUnsavedEditorWork()){
+		ToastFor(TOAST_SAVE, 5.0f, "Save the opened IPL before leaving this editing mode.");
+		return;
+	}
+	bool externalMap = IsIplMapDocumentExternal();
+	ClearSelection();
+	ResetUndoHistory();
+	CloseIplMapDocument();
+	SetCustomPlacementIpl("data\\maps\\custom.ipl", nil, true);
+	if(externalMap)
+		ToastFor(TOAST_SAVE, 5.0f,
+		         "Finished editing external IPL. It remains visible as a locked reference.");
+	else
+		Toast(TOAST_SAVE, "Exited Opened Map mode; whole-world editing restored");
 }
 
 static void
@@ -3259,7 +3707,9 @@ spawnCustomImportedObject(int objectId)
 		return false;
 
 	rw::V3d position = GetPlacementPosition();
-	GameFile *file = getOrCreateCustomImportGameFile(&gCustomImportIplFile, CUSTOM_IMPORT_IPL_LOGICAL_PATH);
+	GameFile *file = IsIplMapDocumentOpen() ?
+		GetOrCreateCurrentPlacementIplFile() :
+		getOrCreateCustomImportGameFile(&gCustomImportIplFile, CUSTOM_IMPORT_IPL_LOGICAL_PATH);
 	int maxIplIndex = -1;
 	for(CPtrNode *p = instances.first; p; p = p->next){
 		ObjectInst *other = (ObjectInst*)p->item;
@@ -3332,19 +3782,59 @@ uiMainmenu(void)
 {
 	if(ImGui::BeginMainMenuBar()){
 		if(ImGui::BeginMenu(ICON_FA_FOLDER_OPEN " File")){
-			if(ImGui::MenuItem(ICON_FA_FLOPPY_DISK " Save All IPLs", "Ctrl+S")){
-				finishTransformPanelEdit();
-				if(saveAllIpls())
-					Toast(TOAST_SAVE, "Saved all IPL files to %s", getSaveDestinationLabel());
+			if(ImGui::MenuItem(ICON_FA_FOLDER_OPEN " Open External IPL...", "Ctrl+O"))
+				openIplMapDialog();
+			ImGui::SetItemTooltip("Open an IPL that is not part of your current game setup.\n"
+			                      "It is loaded only in Ariane and is not added to your game.\n"
+			                      "Ctrl+S updates the file you selected.\n"
+			                      "The map must use models already loaded by Ariane.");
+			if(IsIplMapDocumentOpen()){
+				const char *exitMapLabel = IsIplMapDocumentExternal() ?
+					ICON_FA_RIGHT_FROM_BRACKET " Finish Editing External IPL" :
+					ICON_FA_RIGHT_FROM_BRACKET " Exit Opened Map Mode";
+				if(ImGui::MenuItem(exitMapLabel))
+					closeIplMapDocumentFocus();
+				if(IsIplMapDocumentExternal())
+					ImGui::SetItemTooltip("Stop editing this external IPL.\nIt stays visible as a locked reference and is excluded from Save All, Test in Game and Hot Reload.\nUse Open External IPL to edit it again.");
+				else
+					ImGui::SetItemTooltip("Return to whole-world editing.\nThe opened IPL stays visible in the current session.");
 			}
-			ImGui::SetItemTooltip("Saves all modified objects in their respective placement files (.ipl).\nCurrent target: %s.", getSaveDestinationLabel());
+			ImGui::Separator();
+			const char *saveLabel = IsIplMapDocumentOpen() ?
+				(sceneHasRelatedStreamingFamily(GetIplMapDocumentLogicalPath()) ?
+				 ICON_FA_FLOPPY_DISK " Save Opened IPL + Streams" :
+				 ICON_FA_FLOPPY_DISK " Save Opened IPL") :
+				ICON_FA_FLOPPY_DISK " Save All IPLs";
+			if(ImGui::MenuItem(saveLabel, "Ctrl+S")){
+				finishTransformPanelEdit();
+				if(saveCurrentMap())
+					toastCurrentMapSaved();
+			}
+			if(IsIplMapDocumentOpen())
+				ImGui::SetItemTooltip(sceneHasRelatedStreamingFamily(GetIplMapDocumentLogicalPath()) ?
+					"Saves the opened text IPL and its related streamed IPL entries.\nThis may update the source IMG archive.\n%s" :
+					"Saves only the opened IPL map back to its source file.\n%s",
+					GetIplMapDocumentPhysicalPath());
+			else
+				ImGui::SetItemTooltip("Saves all modified objects in their respective placement files (.ipl).\nCurrent target: %s.", getSaveDestinationLabel());
+			ImGui::BeginDisabled(IsIplMapDocumentExternal());
 			if(ImGui::MenuItem(ICON_FA_GAMEPAD " Test in Game", "Ctrl+G")){
 				finishTransformPanelEdit();
 				testInGame();
 			}
-			ImGui::SetItemTooltip("Launches your game and spawns you to the current camera position.\nRequires ariane.asi installed in your game folder.");
+			ImGui::EndDisabled();
+			if(IsIplMapDocumentExternal() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip("Unavailable because this external IPL is not registered in gta.dat or Mod Loader.");
+			else
+				ImGui::SetItemTooltip("Launches your game and spawns you to the current camera position.\nRequires ariane.asi installed in your game folder.");
 			char saveTargetMenuLabel[128];
-			snprintf(saveTargetMenuLabel, sizeof(saveTargetMenuLabel), "Save Target: %s", getSaveDestinationLabel());
+			if(IsIplMapDocumentOpen() && sceneHasRelatedStreamingFamily(GetIplMapDocumentLogicalPath()))
+				snprintf(saveTargetMenuLabel, sizeof(saveTargetMenuLabel), "Save Target: Opened IPL + source IMG");
+			else if(IsIplMapDocumentOpen())
+				snprintf(saveTargetMenuLabel, sizeof(saveTargetMenuLabel), "Save Target: Opened file (direct)");
+			else
+				snprintf(saveTargetMenuLabel, sizeof(saveTargetMenuLabel), "Save Target: %s", getSaveDestinationLabel());
+			ImGui::BeginDisabled(IsIplMapDocumentOpen());
 			if(ImGui::BeginMenu(saveTargetMenuLabel)){
 				if(ImGui::MenuItem("Loaded source files", nil,
 				                   gSaveDestination == SAVE_DESTINATION_ORIGINAL_FILES)){
@@ -3360,12 +3850,24 @@ uiMainmenu(void)
 				ImGui::SetItemTooltip("Write copies to modloader/Ariane/.\nThis does not necessarily edit the modloader mod currently used by the game.");
 				ImGui::EndMenu();
 			}
-			ImGui::SetItemTooltip("Choose whether Save writes back to loaded files or exports an override copy to modloader/Ariane.");
+			ImGui::EndDisabled();
+			if(IsIplMapDocumentOpen() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip(sceneHasRelatedStreamingFamily(GetIplMapDocumentLogicalPath()) ?
+					"Save writes directly to the opened text IPL and may update related streamed entries in its source IMG." :
+					"Save writes directly to the opened file:\n%s",
+					GetIplMapDocumentPhysicalPath());
+			else
+				ImGui::SetItemTooltip("Choose whether Save writes back to loaded files or exports an override copy to modloader/Ariane.");
+			ImGui::BeginDisabled(IsIplMapDocumentExternal());
 			if(ImGui::MenuItem(ICON_FA_BOLT " Hot Reload", "Ctrl+R")){
 				finishTransformPanelEdit();
 				hotReloadIpls();
 			}
-			ImGui::SetItemTooltip("Instantly apply your changes in a running SA game without restarting.\nRequires ariane.asi.");
+			ImGui::EndDisabled();
+			if(IsIplMapDocumentExternal() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+				ImGui::SetTooltip("Unavailable because this external IPL is not installed or registered in the game.");
+			else
+				ImGui::SetItemTooltip("Instantly apply your changes in a running SA game without restarting.\nRequires ariane.asi.");
 			ImGui::Separator();
 			if(ImGui::MenuItem(ICON_FA_FILE_EXPORT " Export Prefab...", "Ctrl+Shift+E", false, selection.first != nil)){
 				gOpenExportPrefab = true;
@@ -3379,7 +3881,15 @@ uiMainmenu(void)
 				beginEmptyCustomImport();
 			}
 			ImGui::SetItemTooltip("Import a custom DFF/TXD into the editor as a new placeable object.\nAutomatically registers it in your game files, ready to use in game.");
-			// TODO: restore once whole-map export is safe for runtime use.
+			ImGui::Separator();
+			if(ImGui::MenuItem(ICON_FA_ROTATE " Reload Game Files...")){
+				finishTransformPanelEdit();
+				if(!gConfirmReloadGame && !hasUnsavedEditorWork())
+					restartArianeFromUi();
+				else
+					gOpenReloadGame = true;
+			}
+			ImGui::SetItemTooltip("Restarts Ariane and reloads the complete game setup from disk.\nUse this after changing game or Mod Loader files outside Ariane.");
 			if(ImGui::MenuItem(ICON_FA_RIGHT_FROM_BRACKET " Exit", "Alt+F4")) sk::globals.quit = 1;
 			ImGui::EndMenu();
 		}
@@ -3393,7 +3903,6 @@ uiMainmenu(void)
 			if(ImGui::MenuItem(ICON_FA_MAGNIFYING_GLASS " Object Browser", "B", showBrowserWindow)) { showBrowserWindow ^= 1; }
 				if(ImGui::MenuItem(ICON_FA_CODE_COMPARE " Changes", "F", showDiffWindow)) { showDiffWindow ^= 1; }
 				if(ImGui::MenuItem(ICON_FA_LIST " Log ", nil, showLogWindow)) { showLogWindow ^= 1; }
-				if(ImGui::MenuItem("Demo ", nil, showDemoWindow)) { showDemoWindow ^= 1; }
 				if(ImGui::MenuItem(ICON_FA_LIST " Keyboard Shortcuts", nil, showShortcutsWindow)) { showShortcutsWindow ^= 1; }
 				if(ImGui::MenuItem(ICON_FA_CIRCLE_QUESTION " Help", nil, showHelpWindow)) { showHelpWindow ^= 1; }
 				ImGui::Separator();
@@ -3402,6 +3911,27 @@ uiMainmenu(void)
 				ImGui::EndMenu();
 			}
 			ImGui::EndMenu();
+		}
+
+		if(IsIplMapDocumentOpen()){
+			ImGui::Separator();
+			bool externalMap = IsIplMapDocumentExternal();
+			bool streamedFamily = sceneHasRelatedStreamingFamily(GetIplMapDocumentLogicalPath());
+			const char *mapKind = externalMap ? "External IPL (direct save)" :
+			                      streamedFamily ? "Loaded IPL family (IPL + IMG)" :
+			                      "Loaded IPL (direct save)";
+			ImGui::TextColored(ImVec4(0.45f, 0.80f, 1.0f, 1.0f), "%s: %s",
+			                   mapKind, pathParentAndFilename(GetIplMapDocumentPhysicalPath()));
+			if(externalMap)
+				ImGui::SetItemTooltip("Active external map\n%s\nCtrl+S saves directly to this file. It is not installed into the game.\nOther IPLs are visible reference and locked for editing.",
+				                      GetIplMapDocumentPhysicalPath());
+			else if(streamedFamily)
+				ImGui::SetItemTooltip("Active loaded map family\n%s\nCtrl+S saves the text IPL and may update related streamed entries in its source IMG.\nOther IPLs are visible reference and locked for editing.",
+				                      GetIplMapDocumentPhysicalPath());
+			else
+				ImGui::SetItemTooltip("Active loaded map\n%s\nCtrl+S saves directly to this source file.\nOther IPLs are visible reference and locked for editing.",
+				                      GetIplMapDocumentPhysicalPath());
+			ImGui::Separator();
 		}
 
 		if(ImGui::ArrowButton("##intdec", ImGuiDir_Left) && currentArea > 0)
@@ -3441,6 +3971,7 @@ uiMainmenu(void)
 	uiExportPrefabPopup();
 	uiImportPrefabPopup();
 	uiCustomImportPopup();
+	uiReloadGamePopup();
 }
 
 static void
@@ -4085,7 +4616,8 @@ uiKeyboardShortcutsWindow(void)
 	};
 
 	static const ShortcutEntry shortcuts[] = {
-		{ "File", "Ctrl+S", "Save all modified IPL files", "Global" },
+		{ "File", "Ctrl+O", "Open an external IPL without adding it to the game", "Global" },
+		{ "File", "Ctrl+S", "Save the opened IPL, or all modified IPLs", "Global" },
 		{ "File", "Ctrl+G", "Test in game at current camera position", "Global" },
 		{ "File", "Ctrl+R", "Hot reload streaming IPLs in running game", "Global" },
 		{ "File", "Ctrl+Shift+E", "Export selected objects as prefab", "Global" },
@@ -4104,6 +4636,7 @@ uiKeyboardShortcutsWindow(void)
 		{ "Camera", "LMB drag", "First-person look around", "Viewport" },
 		{ "Camera", "Ctrl+Alt+LMB drag", "Dolly camera along view direction", "Viewport" },
 		{ "Camera", "MMB drag", "Pan camera", "Viewport" },
+		{ "Camera", "Alt+MMB click", "Reset FOV to 70°", "Viewport" },
 		{ "Camera", "Alt+MMB drag", "Arc rotate around camera target", "Viewport" },
 		{ "Camera", "Ctrl+Alt+MMB drag", "Zoom camera toward target", "Viewport" },
 		{ "Camera", "Mouse wheel", "Adjust FOV zoom", "Viewport" },
@@ -4228,61 +4761,19 @@ uiKeyboardShortcutsWindow(void)
 static void
 uiHelpWindow(void)
 {
+	ImGui::SetNextWindowSize(ImVec2(460.0f, 0.0f), ImGuiCond_FirstUseEver);
 	ImGui::Begin(ICON_FA_CIRCLE_QUESTION " Help", &showHelpWindow);
 
-	ImGui::BulletText("Camera controls:\n"
-		"LMB: first person look around\n"
-		"Ctrl+Alt+LMB; W/S: move forward/backward\n"
-		"Shift+WASD: fast fly, Alt+WASD: slow fly (speeds set in Editor > Camera)\n"
-		"Mouse wheel (over viewport): FOV zoom\n"
-		"MMB: pan\n"
-		"Alt+MMB: arc rotate around target\n"
-		"Ctrl+Alt+MMB: zoom into target\n"
-		"C: toggle viewer camera (longer far clip)"
-		);
-	ImGui::Separator();
-	ImGui::BulletText("Selection: click on an object to select it,\n"
-		"Shift+click to add to the selection,\n"
-		"Alt+click to remove from the selection,\n"
-		"Ctrl+click to toggle selection.\n"
-		"Shift+LMB drag: marquee (rectangle) select.\n"
-		"  +Ctrl: add to selection, +Alt: remove.");
-	ImGui::BulletText("In the editor window, double click an instance to jump there,\n"
-		"Right click a selection to deselect it.\n"
-		"Right click a deleted instance to undelete it.");
-	ImGui::BulletText("Use the filter in the instance list to find instances by name.");
-	ImGui::Separator();
-	ImGui::BulletText("Gizmo: W = Translate, Q = Rotate\n"
-		"Hold Shift while dragging to use the selected snap increment.\n"
-		"Select an object or SA path node to manipulate it.\n"
-		"SA path nodes use translate only.");
-	ImGui::BulletText("Delete/Backspace: delete selected building(s)\n"
-		"Deleting also removes linked LOD instances.");
-	ImGui::BulletText("Ctrl+C: Copy selected building(s)\n"
-		"Ctrl+X: Cut selected building(s)\n"
-		"Ctrl+V: Paste copy at camera target, restore cut at original position\n"
-		"Ctrl+Shift+V: Paste copy at original position");
-	ImGui::BulletText("G: snap selection to ground\n"
-		"Shift+G: align selection to ground normal and preserve facing.");
-	ImGui::BulletText("Ctrl+S: Save all modified IPL files\n"
-		"Deleted instances are commented out with #.");
-	ImGui::BulletText("B: Toggle Object Browser\n"
-		"Click in 3D view to place selected object.\n"
-		"Up/Down in the browser list changes selected object.\n"
-		"RMB or Escape to exit place mode.");
-	ImGui::Separator();
-	if(ImGui::CollapsingHeader("Privacy & Telemetry")){
-		bool telemetryEnabled = TelemetryIsEnabled();
-		if(ImGui::Checkbox("Anonymous telemetry", &telemetryEnabled)){
-			TelemetrySetEnabled(telemetryEnabled);
-			if(telemetryEnabled){
-				TelemetrySendPing();
-				Toast(TOAST_SAVE, "Anonymous telemetry enabled");
-			}else
-				Toast(TOAST_SAVE, "Anonymous telemetry disabled");
-		}
-		ImGui::TextDisabled("Enabled by default. Disable if you do not want usage pings.");
-	}
+	ImGui::SeparatorText("Controls");
+	ImGui::TextWrapped("Looking for a command? Open the complete, searchable list of Ariane controls and keyboard shortcuts.");
+	if(ImGui::Button(ICON_FA_LIST " View Keyboard Shortcuts"))
+		showShortcutsWindow = true;
+
+	ImGui::Spacing();
+	ImGui::SeparatorText("Community & Support");
+	ImGui::TextWrapped("Need help, want to report a problem, or follow Ariane updates? Join the community on Discord.");
+	ImGui::TextLinkOpenURL("Join the Ariane Discord", "https://discord.gg/eE9s9H4e24");
+	ImGui::SetItemTooltip("Opens the Ariane Discord invite in your browser.");
 
 	ImGui::End();
 }
@@ -4468,6 +4959,7 @@ uiView(void)
 	ImGui::Checkbox("Draw Water", &gRenderWater);
 	if(params.water == GAME_SA){
 		ImGui::SameLine();
+		ImGui::BeginDisabled(IsIplMapDocumentOpen());
 		if(ImGui::Button("Edit Water (H)")){
 			if(!WaterLevel::gWaterEditMode){
 				WaterLevel::gWaterEditMode = true;
@@ -4476,6 +4968,9 @@ uiView(void)
 					SpawnExitPlaceMode();
 			}
 		}
+		ImGui::EndDisabled();
+		if(IsIplMapDocumentOpen() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("Water editing is outside the opened IPL document.");
 	}
 	if(gameversion == GAME_SA)
 		ImGui::Checkbox("Play Animations", &gPlayAnimations);
@@ -5552,6 +6047,9 @@ loadSaveSettings(void)
 				gSaveDestination = SAVE_DESTINATION_MODLOADER;
 			else
 				gSaveDestination = SAVE_DESTINATION_ORIGINAL_FILES;
+		}else if(strcmp(key, "confirm_reload_game") == 0){
+			if(parseBoolSetting(value, &boolValue))
+				gConfirmReloadGame = boolValue;
 		}else if(strcmp(key, "automatic_backups") == 0){
 			if(parseBoolSetting(value, &boolValue))
 				gAutomaticBackupsEnabled = boolValue;
@@ -5561,8 +6059,6 @@ loadSaveSettings(void)
 			parseIntSetting(value, &gAutomaticBackupKeepCount);
 		}else if(strcmp(key, "custom_import_start_id") == 0){
 			parseIntSetting(value, &gCustomImportPreferredStartId);
-		}else if(strcmp(key, "show_demo_window") == 0){
-			if(parseBoolSetting(value, &boolValue)) showDemoWindow = boolValue;
 		}else if(strcmp(key, "show_editor_window") == 0){
 			if(parseBoolSetting(value, &boolValue)) showEditorWindow = boolValue;
 		}else if(strcmp(key, "show_instance_window") == 0){
@@ -5905,11 +6401,11 @@ saveSaveSettings(void)
 	}
 	fprintf(f, "window_maximized %d\n", gSavedWindowMaximized ? 1 : 0);
 	fprintf(f, "save_destination %d\n", (int)gSaveDestination);
+	fprintf(f, "confirm_reload_game %d\n", gConfirmReloadGame ? 1 : 0);
 	fprintf(f, "automatic_backups %d\n", gAutomaticBackupsEnabled ? 1 : 0);
 	fprintf(f, "automatic_backup_interval %d\n", gAutomaticBackupIntervalSeconds);
 	fprintf(f, "automatic_backup_keep %d\n", gAutomaticBackupKeepCount);
 	fprintf(f, "custom_import_start_id %d\n", gCustomImportPreferredStartId);
-	fprintf(f, "show_demo_window %d\n", showDemoWindow ? 1 : 0);
 	fprintf(f, "show_editor_window %d\n", showEditorWindow ? 1 : 0);
 	fprintf(f, "show_instance_window %d\n", showInstanceWindow ? 1 : 0);
 	fprintf(f, "show_log_window %d\n", showLogWindow ? 1 : 0);
@@ -6068,6 +6564,13 @@ uiEditorWindow(void)
 
 	ImGui::Begin(ICON_FA_PEN " Editor", &showEditorWindow);
 
+	if(ImGui::TreeNode("General")){
+		if(ImGui::Checkbox("Confirm before reloading game files", &gConfirmReloadGame))
+			saveSaveSettings();
+		ImGui::SetItemTooltip("When disabled, Reload Game Files restarts immediately if there are no unsaved changes.\nUnsaved editor changes will always require confirmation.");
+		ImGui::TreePop();
+	}
+
 	if(ImGui::TreeNode("Camera")){
 		ImGui::InputFloat3("Cam position", (float*)&TheCamera.m_position);
 		ImGui::InputFloat3("Cam target", (float*)&TheCamera.m_target);
@@ -6077,6 +6580,7 @@ uiEditorWindow(void)
 		ImGui::SameLine();
 		if(ImGui::Button("Reset##fov"))
 			TheCamera.m_fov = 70.0f;
+		ImGui::SetItemTooltip("Restore the default camera FOV (70°).");
 		ImGui::SliderFloat("FOV wheel step", &gFovWheelStep, 0.1f, 15.0f, "%.2f deg");
 		ImGui::Checkbox("Accelerate fly movement", &gFlyAcceleration);
 		ImGui::SetItemTooltip("When disabled, WASD moves at the constant fly speed below.");
@@ -7759,17 +8263,21 @@ gui(void)
 		}
 	}
 
+	// Ctrl+O to open an IPL map
+	if(allowEditorShortcuts && CPad::IsCtrlDown() && CPad::IsKeyJustDown('O'))
+		openIplMapDialog();
+
 	// Ctrl+S to save
 	if(allowEditorShortcuts && CPad::IsCtrlDown() && CPad::IsKeyJustDown('S')){
-		if(WaterLevel::gWaterEditMode){
+		if(WaterLevel::gWaterEditMode && !IsIplMapDocumentOpen()){
 			if(WaterLevel::gWaterDirty){
 				if(WaterLevel::SaveWater())
 					Toast(TOAST_SAVE, "Saved water.dat to %s", getSaveDestinationLabel());
 			}
 		}else{
 			finishTransformPanelEdit();
-			if(saveAllIpls())
-				Toast(TOAST_SAVE, "Saved all IPL files to %s", getSaveDestinationLabel());
+			if(saveCurrentMap())
+				toastCurrentMapSaved();
 		}
 	}
 
@@ -7866,7 +8374,8 @@ gui(void)
 	}
 
 	// H toggles water edit mode (SA only)
-	if(params.water == GAME_SA && CPad::IsKeyJustDown('H') && !CPad::IsCtrlDown()){
+	if(params.water == GAME_SA && !IsIplMapDocumentOpen() &&
+	   CPad::IsKeyJustDown('H') && !CPad::IsCtrlDown()){
 		WaterLevel::gWaterEditMode = !WaterLevel::gWaterEditMode;
 		if(WaterLevel::gWaterEditMode){
 			ClearSelection();
@@ -7903,11 +8412,6 @@ gui(void)
 
 		if(showHelpWindow) uiHelpWindow();
 		if(showShortcutsWindow) uiKeyboardShortcutsWindow();
-		if(showDemoWindow){
-		ImGui::SetNextWindowPos(ImVec2(650, 20), ImGuiCond_FirstUseEver);
-		ImGui::ShowDemoWindow(&showDemoWindow);
-	}
-
 	if(showLogWindow) logwindow.Draw("Log", &showLogWindow);
 
 	// Place mode overlay

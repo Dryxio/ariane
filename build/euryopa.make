@@ -124,6 +124,7 @@ GENERATED += $(OBJDIR)/imgui_tables.o
 GENERATED += $(OBJDIR)/imgui_widgets.o
 GENERATED += $(OBJDIR)/iplstore.o
 GENERATED += $(OBJDIR)/main.o
+GENERATED += $(OBJDIR)/mapdocument.o
 GENERATED += $(OBJDIR)/minilzo.o
 GENERATED += $(OBJDIR)/modloader.o
 GENERATED += $(OBJDIR)/neoWorld_d3d9.o
@@ -172,6 +173,7 @@ OBJECTS += $(OBJDIR)/imgui_tables.o
 OBJECTS += $(OBJDIR)/imgui_widgets.o
 OBJECTS += $(OBJDIR)/iplstore.o
 OBJECTS += $(OBJDIR)/main.o
+OBJECTS += $(OBJDIR)/mapdocument.o
 OBJECTS += $(OBJDIR)/minilzo.o
 OBJECTS += $(OBJDIR)/modloader.o
 OBJECTS += $(OBJDIR)/neoWorld_d3d9.o
@@ -349,6 +351,9 @@ $(OBJDIR)/iplstore.o: ../tools/euryopa/iplstore.cpp
 	@echo "$(notdir $<)"
 	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
 $(OBJDIR)/main.o: ../tools/euryopa/main.cpp
+	@echo "$(notdir $<)"
+	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
+$(OBJDIR)/mapdocument.o: ../tools/euryopa/mapdocument.cpp
 	@echo "$(notdir $<)"
 	$(SILENT) $(CXX) $(ALL_CXXFLAGS) $(FORCE_INCLUDE) -o "$@" -MF "$(@:%.o=%.d)" -c "$<"
 $(OBJDIR)/minilzo.o: ../tools/euryopa/minilzo/minilzo.c

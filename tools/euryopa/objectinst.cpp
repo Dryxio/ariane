@@ -970,6 +970,22 @@ ObjectInst::JumpTo(void)
 void
 ObjectInst::Select(void)
 {
+	if(!IsInstInIplMapDocument(this)){
+		// Direct clicks and rectangle/list selection all converge here. Rate-limit
+		// the explanation so a drag across many reference objects yields one toast.
+		static double lastLockedReferenceToast = -100.0;
+		double now = ImGui::GetTime();
+		if(now - lastLockedReferenceToast >= 1.0){
+			if(IsIplMapDocumentOpen())
+				ToastFor(TOAST_SELECTION, 3.0f,
+				         "Reference object — only the opened IPL is editable.");
+			else if(m_file && IsExternalIplMapLogicalPath(m_file->name))
+				ToastFor(TOAST_SELECTION, 4.0f,
+				         "Locked external reference — reopen its source IPL to edit it.");
+			lastLockedReferenceToast = now;
+		}
+		return;
+	}
 	if(m_selected) return;
 	m_selected = true;
 	selection.InsertItem(this);
@@ -1002,6 +1018,7 @@ ClearSelection(void)
 void
 ObjectInst::Delete(void)
 {
+	if(!IsInstInIplMapDocument(this)) return;
 	if(m_isDeleted) return;
 	m_isDeleted = true;
 	StampChangeSeq(this);
@@ -1025,6 +1042,7 @@ ObjectInst::Delete(void)
 void
 ObjectInst::Undelete(void)
 {
+	if(!IsInstInIplMapDocument(this)) return;
 	if(!m_isDeleted) return;
 	m_isDeleted = false;
 	StampChangeSeq(this);
@@ -1108,7 +1126,7 @@ DeleteAllInstances(void)
 
 	for(CPtrNode *p = instances.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
-		if(inst == nil || inst->m_isDeleted)
+		if(inst == nil || inst->m_isDeleted || !IsInstInIplMapDocument(inst))
 			continue;
 		// Whole-map delete intentionally skips per-instance LOD cascade work.
 		// Every instance is being deleted in the same pass, so the recursive
@@ -1161,6 +1179,9 @@ SetCustomPlacementIpl(const char *logicalPath, const char *sourcePath, bool addT
 {
 	char normalizedLogical[256];
 	char resolvedSource[1024];
+	if(IsIplMapDocumentOpen() &&
+	   (logicalPath == nil || !LogicalPathEquals(logicalPath, GetIplMapDocumentLogicalPath())))
+		return;
 
 	if(logicalPath == nil || logicalPath[0] == '\0')
 		logicalPath = DEFAULT_CUSTOM_IPL_PATH;
@@ -1195,6 +1216,11 @@ void
 SetSpawnObjectId(int id)
 {
 	spawnObjectId = id;
+	// Open Map owns the placement target for the duration of the document.
+	// Choosing a model in the Browser must not silently send new objects back
+	// to the legacy custom.ipl file.
+	if(IsIplMapDocumentOpen())
+		return;
 	ObjectDef *obj = GetObjectDef(id);
 	if(obj && obj->m_file && LogicalPathEquals(obj->m_file->name, CUSTOM_IMPORT_IDE_PATH))
 		SetCustomPlacementIpl(CUSTOM_IMPORT_IPL_PATH, nil, false);
@@ -1217,8 +1243,8 @@ GetLodForObject(int id)
 	}
 }
 
-static GameFile*
-GetOrCreateCustomIplFile(void)
+GameFile*
+GetOrCreateCurrentPlacementIplFile(void)
 {
 	if(customIplFile)
 		return customIplFile;
@@ -1343,7 +1369,7 @@ SpawnPlaceObjectNoUndo(rw::V3d position, const rw::Quat *orientation,
 	if(obj == nil) return 0;
 	if(outInsts == nil || outCapacity <= 0) return 0;
 
-	GameFile *file = GetOrCreateCustomIplFile();
+	GameFile *file = GetOrCreateCurrentPlacementIplFile();
 	int maxIdx = GetMaxIplIndexForFile(file);
 
 	int lodObjId = -1;
@@ -2344,6 +2370,15 @@ static UndoAction undoStack[MAX_UNDO];
 static int undoCount;	// number of actions in stack
 static int undoPos;	// current position (next undo)
 
+void
+ResetUndoHistory(void)
+{
+	for(int i = 0; i < undoCount; i++)
+		undoStack[i] = UndoAction();
+	undoCount = 0;
+	undoPos = 0;
+}
+
 static void
 updateRwFrameForInst(ObjectInst *inst)
 {
@@ -2673,7 +2708,7 @@ findPasteDestinationFile(ObjectInst *src)
 	// A paste creates a new placement. Keep it out of the source map IPL so
 	// copying one original-map object does not force a full replacement export
 	// of that area's IPL.
-	return GetOrCreateCustomIplFile();
+	return GetOrCreateCurrentPlacementIplFile();
 }
 
 static float
@@ -3105,7 +3140,7 @@ ImportPrefabAt(const char *path, rw::V3d spawnPos)
 	if(!ReadPrefabEntries(path, entries, 256, &numEntries, true))
 		return 0;
 
-	GameFile *file = GetOrCreateCustomIplFile();
+	GameFile *file = GetOrCreateCurrentPlacementIplFile();
 	int maxIdx = GetMaxIplIndexForFile(file);
 
 	// Pass 1: create all instances
