@@ -6,7 +6,7 @@
 
 Ariane is a map viewer and editor for Grand Theft Auto III, Vice City and San Andreas, built on [librw](https://github.com/Southland-FR/librw) and based on aap's euryopa.
 
-[Download the latest release](https://github.com/Dryxio/ariane/releases/latest) · [Join the Discord](https://discord.gg/8NS59AbQtN)
+[Download the latest release](https://github.com/Dryxio/ariane/releases/latest) · **[Join the Discord for integrations, updates and support](https://discord.gg/eE9s9H4e24)**
 
 ## Features
 
@@ -14,6 +14,7 @@ Ariane is a map viewer and editor for Grand Theft Auto III, Vice City and San An
 
 - Place, move, rotate and delete map objects, with brush placement for repeated objects
 - Select individual objects or whole areas, then translate and rotate them with 3D gizmos
+- Enter exact absolute transforms or relative deltas, switch between world and local axes, and copy or paste complete transforms
 - Use grid and angle snapping, align objects to the ground, and snap them to nearby surfaces
 - Copy, cut and paste selections—including paste in place—with undo and redo support
 
@@ -29,7 +30,7 @@ Ariane is a map viewer and editor for Grand Theft Auto III, Vice City and San An
 - Save to original game files or keep edits isolated in a modloader/Ariane destination
 - Write text or binary IPL data and update IMG archives
 - Review changes made since the last save and recover work from automatic backups
-- Test San Andreas maps in game and hot-reload supported changes with `ariane.asi`
+- Test GTA III, Vice City and San Andreas maps in game, and hot-reload supported San Andreas changes with `ariane.asi`
 
 ### World tools
 
@@ -41,9 +42,11 @@ Ariane is a map viewer and editor for Grand Theft Auto III, Vice City and San An
 
 Download a current build from [GitHub Releases](https://github.com/Dryxio/ariane/releases/latest), place it in a supported GTA game directory and run it. Ariane automatically detects GTA III, Vice City or San Andreas.
 
-The San Andreas test-in-game and hot-reload workflows require `ariane.asi`. Hot reload has limitations for streamed binary maps; see the in-app guidance for the current behavior.
+The universal `ariane.asi` enables Test in Game for GTA III, Vice City and San Andreas, plus Hot Reload for San Andreas. Hot Reload has limitations for streamed binary maps; see the in-app guidance for the current behavior.
 
-For development updates, support and community downloads, [join the Ariane Discord](https://discord.gg/8NS59AbQtN).
+The optional integration ZIP on Discord also includes `III.VC.SA.SaveLoader`, which skips intros and loading screens for faster startup across all three games. Both plugins require a working ASI loader.
+
+Get the optional integration ZIP, development updates and support in the [Ariane Discord](https://discord.gg/eE9s9H4e24).
 
 ### Release channels
 

@@ -63,6 +63,7 @@ void ApplyInitialEditorWindowState(void);
 void UpdateEditorWindowState(void);
 void OnEditorWindowResized(int width, int height);
 void SaveEditorSettingsNow(void);
+bool RestartAriane(void);
 
 char *getPath(const char *path);
 FILE *fopen_ci(const char *path, const char *mode);
@@ -447,6 +448,7 @@ void UndoRecordPaste(ObjectInst **insts, int num);
 void UndoRecordTransformBatch(UndoTransform *transforms, int num);
 void Undo(void);
 void Redo(void);
+void ResetUndoHistory(void);
 
 rw::V3d GetObjectRotationDegrees(const rw::Quat &rotation);
 rw::Quat MakeObjectRotationDegrees(const rw::V3d &degrees);
@@ -515,6 +517,7 @@ void SpawnExitPlaceMode(void);
 int GetSpawnObjectId(void);
 void SetSpawnObjectId(int id);
 void SetCustomPlacementIpl(const char *logicalPath, const char *sourcePath, bool addToDat);
+GameFile *GetOrCreateCurrentPlacementIplFile(void);
 int GetLodForObject(int id);
 int SnapSelectedToGround(bool alignRotation);
 bool GetGroundPlacementSurface(rw::V3d pos, rw::V3d *hitPos, rw::V3d *hitNormal = nil, bool ignoreSelection = false);
@@ -772,6 +775,18 @@ void ClearSelection(void);
 void DeleteSelected(void);
 int DeleteAllInstances(void);
 void RemoveInstFromSectors(ObjectInst *inst);
+
+// Optional single-IPL document focus. The whole GTA world remains loaded as
+// visual context, but only the selected IPL family is editable and saved.
+bool IsIplMapDocumentOpen(void);
+bool IsIplMapDocumentExternal(void);
+bool IsExternalIplMapLogicalPath(const char *logicalPath);
+const char *GetIplMapDocumentLogicalPath(void);
+const char *GetIplMapDocumentPhysicalPath(void);
+bool IsInstInIplMapDocument(const ObjectInst *inst);
+void SetIplMapDocument(const char *logicalPath, const char *physicalPath, bool external);
+void CloseIplMapDocument(void);
+bool OpenIplMapDocumentFromPath(const char *physicalPath);
 
 
 
@@ -1055,7 +1070,9 @@ struct DatDesc
 char *LoadLine(FILE *f);
 void LoadLevel(const char *filename);
 void LoadObjectTypes(const char *filename);
-void LoadScene(const char *filename);
+void LoadScene(const char *filename, bool loadRelatedStreaming = true);
+int GetLoadedSceneCount(void);
+const char *GetLoadedScenePath(int index);
 void LoadCollisionFile(const char *path);
 rw::TexDictionary *LoadTexDictionary(const char *path);
 BinaryIplSaveResult SaveScene(const char *filename);

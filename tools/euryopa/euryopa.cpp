@@ -300,7 +300,8 @@ SelectIplVisibilityEntryInstances(int i)
 		if(rw::strcmp_ci(instKey, key) != 0)
 			continue;
 		inst->Select();
-		selected++;
+		if(inst->m_selected)
+			selected++;
 	}
 	gIplVisibilityEntries[i].visible = true;
 	return selected;
@@ -1199,11 +1200,14 @@ FindOrAddLinkedTransformGroup(std::vector<UndoTransform> &transforms, ObjectInst
 	const std::unordered_set<ObjectInst*> &eligibleLods)
 {
 	size_t before = transforms.size();
+	if(!IsInstInIplMapDocument(inst))
+		return false;
 	if(FindOrAddTransform(transforms, inst) < 0)
 		return false;
 
 	if(inst->m_lod && !inst->m_lod->m_isDeleted){
-		if(eligibleLods.find(inst->m_lod) != eligibleLods.end() &&
+		if(IsInstInIplMapDocument(inst->m_lod) &&
+		   eligibleLods.find(inst->m_lod) != eligibleLods.end() &&
 		   FindOrAddTransform(transforms, inst->m_lod) < 0){
 			transforms.resize(before);
 			return false;
@@ -1211,7 +1215,8 @@ FindOrAddLinkedTransformGroup(std::vector<UndoTransform> &transforms, ObjectInst
 	}else{
 		for(CPtrNode *q = instances.first; q; q = q->next){
 			ObjectInst *child = (ObjectInst*)q->item;
-			if(child != inst && child->m_lod == inst && !child->m_isDeleted){
+			if(child != inst && child->m_lod == inst && !child->m_isDeleted &&
+			   IsInstInIplMapDocument(child)){
 				if(FindOrAddTransform(transforms, child) < 0){
 					transforms.resize(before);
 					return false;
@@ -1282,7 +1287,7 @@ CaptureObjectTransformTargets(ObjectInst *leader, bool includeSelection,
 	transforms.clear();
 	if(capped)
 		*capped = false;
-	if(leader == nil || leader->m_isDeleted)
+	if(leader == nil || leader->m_isDeleted || !IsInstInIplMapDocument(leader))
 		return false;
 
 	std::vector<ObjectInst*> directTargets;
@@ -1304,7 +1309,8 @@ CaptureObjectTransformTargets(ObjectInst *leader, bool includeSelection,
 	std::unordered_map<ObjectInst*, std::pair<int, int> > lodChildCounts;
 	for(CPtrNode *p = instances.first; p; p = p->next){
 		ObjectInst *child = (ObjectInst*)p->item;
-		if(child->m_isDeleted || child->m_lod == nil || child->m_lod->m_isDeleted)
+		if(child->m_isDeleted || child->m_lod == nil || child->m_lod->m_isDeleted ||
+		   !IsInstInIplMapDocument(child) || !IsInstInIplMapDocument(child->m_lod))
 			continue;
 		std::pair<int, int> &counts = lodChildCounts[child->m_lod];
 		counts.first++;
@@ -2080,7 +2086,8 @@ handleTool(void)
 
 	// select
 	if(CPad::IsMButtonClicked(1)){
-		if(Path::hoveredNode || SAPaths::hoveredNode || Effects::hoveredEffect){
+		if(!IsIplMapDocumentOpen() &&
+		   (Path::hoveredNode || SAPaths::hoveredNode || Effects::hoveredEffect)){
 			ClearSelection();
 			Path::selectedNode = Path::hoveredNode;
 			SAPaths::selectedNode = SAPaths::hoveredNode;
@@ -2112,12 +2119,19 @@ handleTool(void)
 			Effects::selectedEffect = nil;
 		}
 	}else if(CPad::IsMButtonClicked(2)){
-		if(CPad::IsCtrlDown()){
+		// Alt + short middle click resets wheel zoom while preserving plain
+		// middle-click selection and middle-button drag camera controls.
+		if(CPad::IsAltDown() && !CPad::IsCtrlDown()){
+			TheCamera.m_fov = 70.0f;
+			Toast(TOAST_SELECTION, "FOV reset to 70°");
+			return;
+		}else if(!IsIplMapDocumentOpen() && CPad::IsCtrlDown()){
 			Path::selectedNode = Path::hoveredNode;
 			SAPaths::selectedNode = SAPaths::hoveredNode;
 			Effects::selectedEffect = Effects::hoveredEffect;
 		}else{
-			if(Path::hoveredNode || SAPaths::hoveredNode || Effects::hoveredEffect){
+			if(!IsIplMapDocumentOpen() &&
+			   (Path::hoveredNode || SAPaths::hoveredNode || Effects::hoveredEffect)){
 				ClearSelection();
 				Path::selectedNode = Path::hoveredNode;
 				SAPaths::selectedNode = SAPaths::hoveredNode;

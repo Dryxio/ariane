@@ -61,6 +61,20 @@ SceneWasAlreadyLoaded(const char *filename)
 	return false;
 }
 
+int
+GetLoadedSceneCount(void)
+{
+	return (int)loadedScenePaths.size();
+}
+
+const char*
+GetLoadedScenePath(int index)
+{
+	if(index < 0 || index >= (int)loadedScenePaths.size())
+		return nil;
+	return loadedScenePaths[index].c_str();
+}
+
 void*
 DatDesc::get(DatDesc *desc, const char *name)
 {
@@ -153,18 +167,17 @@ LoadObject(char *line)
 	int flags = 0;
 	int n;
 
-	// SA format
+	// SA first tries its native five-field format, then falls back to the
+	// III/VC multi-atomic form when the apparent draw distance is below 4.
+	// Stories Map Converter output relies on this compatibility behavior.
 	n = sscanf(line, "%d %s %s %f %d", &id, model, txd, dist, &flags);
-	if(gameversion == GAME_SA){
+	if(gameversion == GAME_SA && n >= 4 && dist[0] >= 4.0f){
 		if(n == 4){
 			// Some mods leave editor notes where the flags field should be.
 			flags = 0;
-		}else if(n != 5){
-			log("warning: invalid SA object definition ignored: %s\n", line);
-			return;
 		}
 	}else{
-		// III and VC format
+		// III/VC format, also accepted by SA as a compatibility fallback.
 		n = sscanf(line, "%d %s %s %d", &id, model, txd, &numAtomics);
 		if(n != 4 || numAtomics < 1 || numAtomics > 3){
 			log("warning: invalid object definition ignored: %s\n", line);
@@ -756,7 +769,7 @@ SetupBigBuildings(void)
 }
 
 void
-LoadScene(const char *filename)
+LoadScene(const char *filename, bool loadRelatedStreaming)
 {
 	// A mod can expose the same IPL through gta.dat and a readme-style
 	// Mod Loader addition. Loading it twice duplicates both its text instances
@@ -783,7 +796,8 @@ LoadScene(const char *filename)
 			memcpy(ia, tmpInsts.data(), tmpInsts.size()*sizeof(ObjectInst*));
 		}
 
-		SetupRelatedIPLs(filename, i);
+		if(loadRelatedStreaming)
+			SetupRelatedIPLs(filename, i);
 		SetupBigBuildings();
 	}
 }
@@ -1634,7 +1648,8 @@ BuildSceneFileContents(const char *filename, ObjectInst **insts, int numInsts, b
 			line += sectionLen;
 			while(*line && isspace((unsigned char)*line))
 				line++;
-			return *line == '\0';
+			return *line == '\0' || *line == '#' ||
+			       (line[0] == '/' && line[1] == '/');
 		};
 
 		while(fgets(linebuf, sizeof(linebuf), fin)){
@@ -1874,7 +1889,10 @@ SaveScene(const char *filename)
 			fileInsts[numInsts++] = inst;
 	}
 
-	if(numInsts == 0){
+	int32 relatedImages[256];
+	int numRelatedImages = CollectRelatedStreamingImages(filename, relatedImages, 256);
+
+	if(numInsts == 0 && numRelatedImages == 0){
 		log("SaveScene: no instances found for %s\n", filename);
 		return result;
 	}
@@ -1887,9 +1905,6 @@ SaveScene(const char *filename)
 				fileInsts[i] = fileInsts[j];
 				fileInsts[j] = tmp;
 			}
-
-	int32 relatedImages[256];
-	int numRelatedImages = CollectRelatedStreamingImages(filename, relatedImages, 256);
 
 	if(numRelatedImages > 0){
 		log("SaveScene: family save begin for %s with %d related streaming IPL(s)\n",
@@ -2041,7 +2056,11 @@ SaveScene(const char *filename)
 
 		if(!binarySaveFailed){
 			if(gSaveDestination == SAVE_DESTINATION_MODLOADER){
-				if(!QueueSceneFileSave(filename, fileInsts, numInsts, true, pendingFiles) ||
+				// A streamed-only family has no text payload to rewrite. In
+				// particular, there may be no text ObjectInst from which to recover
+				// the selected Mod Loader source path.
+				if((numInsts > 0 &&
+				    !QueueSceneFileSave(filename, fileInsts, numInsts, true, pendingFiles)) ||
 				   !CommitPendingSaveFiles(pendingFiles)){
 					binarySaveFailed = true;
 					result.numFailedFiles++;
@@ -2064,7 +2083,8 @@ SaveScene(const char *filename)
 					}
 					ModloaderInit();
 				}
-			}else if(!WriteSceneFileInternal(filename, fileInsts, numInsts, true))
+			}else if(numInsts > 0 &&
+			         !WriteSceneFileInternal(filename, fileInsts, numInsts, true))
 			{
 				binarySaveFailed = true;
 				result.numFailedFiles++;

@@ -30,6 +30,106 @@ rw::Texture *whiteTex;
 static char gHotReloadTracePath[1024];
 static char gImGuiIniPath[1024];
 
+#ifdef _WIN32
+static const char *RESTART_PARENT_PID_ARG = "--ariane-restart-parent-pid";
+#endif
+
+static bool
+GetEditorExecutablePath(char *path, size_t size)
+{
+	if(path == nil || size == 0)
+		return false;
+
+#ifdef _WIN32
+	DWORD len = GetModuleFileNameA(nil, path, (DWORD)size);
+	return len > 0 && len < size;
+#elif defined(__APPLE__)
+	uint32_t pathSize = (uint32_t)size;
+	if(_NSGetExecutablePath(path, &pathSize) != 0)
+		return false;
+	char resolved[1024];
+	if(realpath(path, resolved)){
+		strncpy(path, resolved, size - 1);
+		path[size - 1] = '\0';
+	}
+	return true;
+#else
+	ssize_t len = readlink("/proc/self/exe", path, size - 1);
+	if(len <= 0 || (size_t)len >= size)
+		return false;
+	path[len] = '\0';
+	return true;
+#endif
+}
+
+#ifdef _WIN32
+static void
+WaitForRestartParentIfRequested(void)
+{
+	for(int i = 1; i + 1 < sk::args.argc; i++){
+		if(strcmp(sk::args.argv[i], RESTART_PARENT_PID_ARG) != 0)
+			continue;
+
+		char *end = nil;
+		unsigned long pid = strtoul(sk::args.argv[i + 1], &end, 10);
+		if(end == sk::args.argv[i + 1] || *end != '\0' || pid == 0)
+			return;
+
+		HANDLE parent = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+		if(parent){
+			WaitForSingleObject(parent, INFINITE);
+			CloseHandle(parent);
+		}
+		return;
+	}
+}
+#endif
+
+bool
+RestartAriane(void)
+{
+	char exePath[1024];
+	char gameRoot[1024];
+	if(!GetEditorExecutablePath(exePath, sizeof(exePath)) ||
+	   !GetGameRootDirectory(gameRoot, sizeof(gameRoot)))
+		return false;
+
+#ifdef _WIN32
+	char commandLine[2300];
+	if(snprintf(commandLine, sizeof(commandLine), "\"%s\" %s %lu",
+	            exePath, RESTART_PARENT_PID_ARG, (unsigned long)GetCurrentProcessId()) >= (int)sizeof(commandLine))
+		return false;
+
+	STARTUPINFOA startupInfo = {};
+	PROCESS_INFORMATION processInfo = {};
+	startupInfo.cb = sizeof(startupInfo);
+	if(!CreateProcessA(exePath, commandLine, nil, nil, FALSE, 0, nil, gameRoot,
+	                   &startupInfo, &processInfo))
+		return false;
+
+	CloseHandle(processInfo.hThread);
+	CloseHandle(processInfo.hProcess);
+#else
+	pid_t parentPid = getpid();
+	pid_t childPid = fork();
+	if(childPid < 0)
+		return false;
+	if(childPid == 0){
+		// Only async-signal-safe operations are used between fork and exec. The
+		// child stays invisible until the old Ariane process has fully exited.
+		while(getppid() == parentPid)
+			usleep(50000);
+		if(chdir(gameRoot) != 0)
+			_exit(127);
+		execl(exePath, exePath, (char*)nil);
+		_exit(127);
+	}
+#endif
+
+	sk::globals.quit = 1;
+	return true;
+}
+
 static bool
 EnsureDirectoryTree(const char *path)
 {
@@ -525,6 +625,12 @@ plUpdatePad(CControllerState *state)
 void
 Init(void)
 {
+#ifdef _WIN32
+	// A restarted copy is created before the current process exits, but waits
+	// here before any window or RenderWare resources are initialized.
+	WaitForRestartParentIfRequested();
+#endif
+
 	static char windowTitle[256];
 	static bool saveHookRegistered;
 	snprintf(windowTitle, sizeof(windowTitle),
@@ -683,7 +789,8 @@ InitRW(void)
 	TheCamera.m_rwcam_viewer->setNearPlane(0.1f);
 
 	Scene.camera = TheCamera.m_rwcam;
-	TheCamera.m_aspectRatio = 640.0f/480.0f;
+	TheCamera.m_aspectRatio = sk::globals.height > 0 ?
+		(float)sk::globals.width/sk::globals.height : 4.0f/3.0f;
 
 	TheCamera.m_LODmult = 1.0f;
 
@@ -778,7 +885,9 @@ AppEventHandler(sk::Event e, void *param)
 	case FILEDROP: {
 		const char *path = (const char*)param;
 		size_t len = strlen(path);
-		if(len > 7 && strcmp(path + len - 7, ".ariane") == 0){
+		if(len > 4 && rw::strcmp_ci(path + len - 4, ".ipl") == 0){
+			OpenIplMapDocumentFromPath(path);
+		}else if(len > 7 && strcmp(path + len - 7, ".ariane") == 0){
 			int imported = ImportPrefab(path);
 			if(imported > 0)
 				Toast(TOAST_SPAWN, "Imported %d instance(s) from prefab", imported);
