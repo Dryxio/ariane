@@ -3,6 +3,10 @@
 #include "modloader.h"
 #include "object_categories.h"
 #include <cmath>
+#include <ctime>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -3090,6 +3094,355 @@ ExportSelectedDffs(const char *dir, int *numFailed)
 	if(numFailed)
 		*numFailed = failed;
 	return exported;
+}
+
+// ── Blender bridge (INU_Tools) ────────────────────────────────────
+#define BRIDGE_PROTO_VER 2	// bump when the job format changes; both sides check "#v N"
+
+// set true when a reverse batch moved instance(s); gui() auto-saves the map
+bool gBridgeAutoSaveRequest = false;
+// Shared inbox %LOCALAPPDATA%\INU_ariane_bridge\inbox: each selected model's
+// .dff (its .txd too when autoTxd, and its LOD when one exists) + a .job file:
+// a "#flags" header + one TAB-separated line per DFF carrying IDE/IPL metadata
+// (id, instance id, draw dist, txd name, world translation + rotation quat).
+static void
+AppendBlenderMetaLine(char *body, int *blen, int cap, ObjectDef *obj, TxdDef *txd, ObjectInst *inst, bool ownInstance)
+{
+	if(*blen >= cap-1) return;
+	// Always send the transform (so Blender places the object at its world spot).
+	// ownInstance: HD sends its real iid → the reverse moves that instance. The LOD
+	// sends iid=-1 → placed in Blender, but the reverse never moves an instance from
+	// it (so it can't revert the HD's move).
+	*blen += snprintf(body+*blen, cap-*blen,
+		"%s.dff\tid=%d\tiid=%d\tdd=%.3f\ttxd=%s\tx=%.4f\ty=%.4f\tz=%.4f\tqx=%.6f\tqy=%.6f\tqz=%.6f\tqw=%.6f\n",
+		obj->m_name, obj->m_id, ownInstance ? inst->m_id : -1, obj->GetLargestDrawDist(),
+		(txd && txd->name[0]) ? txd->name : "",
+		inst->m_translation.x, inst->m_translation.y, inst->m_translation.z,
+		inst->m_rotation.x, inst->m_rotation.y, inst->m_rotation.z, inst->m_rotation.w);
+}
+
+int
+ExportSelectedToBlender(bool autoTxd, bool vanilla, bool ide, bool ipl, bool lodToo, bool colToo, int *numFailed)
+{
+	int exported = 0, failed = 0;
+	char inbox[1024];
+	if(!GetArianeDataPath(inbox, sizeof(inbox), "bridge\\inbox")){	// <game>\ariane\bridge\inbox
+		if(numFailed) *numFailed = 1;
+		return 0;
+	}
+
+	static char body[262144];	// static: too big for the stack, single-threaded UI call
+	int blen = 0;
+	blen += snprintf(body+blen, sizeof(body)-blen, "#v %d\n", BRIDGE_PROTO_VER);
+	blen += snprintf(body+blen, sizeof(body)-blen,
+		"#flags auto_txd=%d vanilla=%d ide=%d ipl=%d\n",
+		autoTxd?1:0, vanilla?1:0, ide?1:0, ipl?1:0);
+
+	for(CPtrNode *p = selection.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst == nil || inst->m_isDeleted)
+			continue;
+		ObjectDef *obj = GetObjectDef(inst->m_objectId);
+		if(obj == nil || obj->m_name[0] == '\0'){ failed++; continue; }
+		if(HasEarlierSelectedModel(p, obj->m_name))
+			continue;
+
+		char path[1024];
+		if(!BuildAssetExportPath(inbox, obj->m_name, "dff", path, sizeof(path)) ||
+		   !ExportEffectiveAsset(obj->m_name, "dff", obj->m_imageIndex, path)){
+			log("ExportSelectedToBlender: failed to export %s\n", obj->m_name);
+			failed++;
+			continue;
+		}
+		exported++;
+
+		// texture dictionary named after the model → INU auto-TXD (same-name) matches
+		TxdDef *txd = GetTxdDef(obj->m_txdSlot);
+		if(autoTxd && txd && txd->name[0] &&
+		   BuildAssetExportPath(inbox, obj->m_name, "txd", path, sizeof(path)))
+			ExportEffectiveAsset(txd->name, "txd", txd->imageIndex, path);
+
+		// collision (rebuilt from the model's live CColModel) → INU imports the .col
+		if(colToo && BuildAssetExportPath(inbox, obj->m_name, "col", path, sizeof(path)))
+			ExportColForModel(obj, path);
+
+		AppendBlenderMetaLine(body, &blen, (int)sizeof(body), obj, txd, inst, true);
+
+		// LOD — only if requested and the model actually has one (LOD<name> defined)
+		char lodName[MODELNAMELEN+8];
+		snprintf(lodName, sizeof(lodName), "LOD%s", obj->m_name);
+		int lodId = -1;
+		ObjectDef *lod = nil;
+		if(lodToo && GetObjectDef(lodName, &lodId))
+			lod = GetObjectDef(lodId);
+		if(lod && lod->m_name[0]){
+			if(BuildAssetExportPath(inbox, lod->m_name, "dff", path, sizeof(path)) &&
+			   ExportEffectiveAsset(lod->m_name, "dff", lod->m_imageIndex, path)){
+				TxdDef *ltxd = GetTxdDef(lod->m_txdSlot);
+				if(autoTxd && ltxd && ltxd->name[0] &&
+				   BuildAssetExportPath(inbox, lod->m_name, "txd", path, sizeof(path)))
+					ExportEffectiveAsset(ltxd->name, "txd", ltxd->imageIndex, path);
+				AppendBlenderMetaLine(body, &blen, (int)sizeof(body), lod, ltxd, inst, false);
+			}
+		}
+	}
+
+	if(exported > 0){
+		static int jobCounter = 0;
+		char jobPath[1024];
+		snprintf(jobPath, sizeof(jobPath), "%s\\job_%u_%d.job", inbox,
+			(unsigned)time(nil), jobCounter++);
+		if(!WriteBufferToPath(jobPath, (const uint8*)body, (int)strlen(body)))
+			log("ExportSelectedToBlender: failed to write job file\n");
+		// poke file: Blender's watcher stats this (cheap) and only scans the inbox
+		// when its timestamp changes — no blind directory polling every tick.
+		char pokePath[1024];
+		snprintf(pokePath, sizeof(pokePath), "%s\\poke", inbox);
+		char pokeBuf[32];
+		int pn = snprintf(pokeBuf, sizeof(pokeBuf), "%u\n", (unsigned)time(nil));
+		WriteBufferToPath(pokePath, (const uint8*)pokeBuf, pn);
+	}
+
+	if(numFailed)
+		*numFailed = failed;
+	return exported;
+}
+
+static ObjectInst*
+FindInstByPickId(int id)
+{
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *in = (ObjectInst*)p->item;
+		if(in && in->m_id == id)
+			return in;
+	}
+	return nil;
+}
+
+// Copy outbox\<name>.<ext> into ariane's persistent overrides store and delete
+// the outbox transient, so the hot outbox folder never accumulates. `dst` gets
+// the path to register the override against (the persistent copy, or the outbox
+// file itself as a fallback if the copy failed).
+static bool
+StashBridgeOverride(const char *outbox, const char *ovDir, const char *name, const char *ext, char *dst, size_t dstsz)
+{
+	char src[1024];
+	snprintf(src, sizeof(src), "%s\\%s.%s", outbox, name, ext);
+	snprintf(dst, dstsz, "%s\\%s.%s", ovDir, name, ext);
+	int sz = 0;
+	uint8 *buf = ReadLooseFile(src, &sz);
+	if(buf == nil || sz <= 0){
+		if(buf) free(buf);
+		strncpy(dst, src, dstsz-1); dst[dstsz-1] = '\0';	// fallback: keep the outbox path
+		return false;
+	}
+	bool ok = WriteBufferToPath(dst, buf, sz);
+	free(buf);
+	if(ok)
+		remove(src);					// outbox transient no longer needed
+	else { strncpy(dst, src, dstsz-1); dst[dstsz-1] = '\0'; }
+	return ok;
+}
+
+// Reverse bridge state — a whole reload.job is read once (dynamically, no size
+// limit) into gReversePending, then drained a few models per frame so a big
+// batch doesn't truncate or stall a single frame.
+static std::vector<std::string> gReversePending;
+static size_t gReverseIdx = 0;
+static int gReverseOk = 0, gReverseErr = 0, gReverseMoved = 0;
+static std::string gReverseFailed;
+static char gReverseOutbox[1024];
+static char gReverseOvDir[1024];
+
+// process one reload.job line (a model to hot-reload, or a #header)
+static void
+ProcessReverseLine(const char *rawline)
+{
+	if(rawline[0] == '#'){		// header line (#v N, #flags ...)
+		if(strncmp(rawline, "#v ", 3) == 0){
+			int v = atoi(rawline+3);
+			if(v != BRIDGE_PROTO_VER)
+				log("BlenderBridge: reload.job protocol v%d (ariane expects %d) — update one side\n",
+					v, BRIDGE_PROTO_VER);
+		}
+		return;
+	}
+
+	char line[512];
+	strncpy(line, rawline, sizeof(line)-1); line[sizeof(line)-1] = '\0';
+
+	char name[64] = "";
+	int iid = -1, hasTxd = 0, hasX = 0, posOnly = 0, wantDff = 1, hasCol = 0;
+	float x=0, y=0, z=0, qx=0, qy=0, qz=0, qw=1;
+
+	char *tab = strchr(line, '\t');
+	int nl = tab ? (int)(tab-line) : (int)strlen(line);
+	if(nl > 63) nl = 63;
+	strncpy(name, line, nl); name[nl] = '\0';
+
+	for(char *p = tab; p; ){
+		p++;
+		char *nxt = strchr(p, '\t');
+		char kv[128];
+		int kl = nxt ? (int)(nxt-p) : (int)strlen(p);
+		if(kl > 127) kl = 127;
+		strncpy(kv, p, kl); kv[kl] = '\0';
+		char *eq = strchr(kv, '=');
+		if(eq){
+			*eq = '\0';
+			const char *k = kv, *v = eq+1;
+			if(strcmp(k,"iid")==0) iid = atoi(v);
+			else if(strcmp(k,"pos")==0) posOnly = atoi(v);
+			else if(strcmp(k,"dff")==0) wantDff = atoi(v);
+			else if(strcmp(k,"col")==0) hasCol = atoi(v);
+			else if(strcmp(k,"txd")==0) hasTxd = atoi(v);
+			else if(strcmp(k,"x")==0){ x=(float)atof(v); hasX=1; }
+			else if(strcmp(k,"y")==0) y=(float)atof(v);
+			else if(strcmp(k,"z")==0) z=(float)atof(v);
+			else if(strcmp(k,"qx")==0) qx=(float)atof(v);
+			else if(strcmp(k,"qy")==0) qy=(float)atof(v);
+			else if(strcmp(k,"qz")==0) qz=(float)atof(v);
+			else if(strcmp(k,"qw")==0) qw=(float)atof(v);
+		}
+		p = nxt;
+	}
+	if(name[0] == '\0')
+		return;
+
+	int id = -1;
+	if(!GetObjectDef(name, &id)){
+		log("BlenderBridge: unknown model %s\n", name);
+		gReverseErr++;
+		if(gReverseFailed.size() < 400){
+			if(!gReverseFailed.empty()) gReverseFailed += ",";
+			gReverseFailed += name;
+		}
+		return;
+	}
+	ObjectDef *obj = GetObjectDef(id);
+	if(obj == nil)
+		return;
+
+	// Flag-driven: Blender says per line which parts it sent (dff/txd/col), so we
+	// only override + reload those. "Обновить позицию" sends dff=0/txd=0/col=0 (or
+	// pos=1) → nothing here runs, just the move below.
+	if(posOnly){ wantDff = 0; hasTxd = 0; hasCol = 0; }
+
+	if(wantDff){
+		char ov[1024];
+		StashBridgeOverride(gReverseOutbox, gReverseOvDir, name, "dff", ov, sizeof(ov));
+		RegisterRuntimeOverride(name, "dff", ov);
+		obj->Reload();		// free old geometry + reload from the override
+	}
+
+	if(hasTxd){
+		TxdDef *td = GetTxdDef(obj->m_txdSlot);
+		if(td && td->name[0]){
+			char tov[1024];
+			StashBridgeOverride(gReverseOutbox, gReverseOvDir, name, "txd", tov, sizeof(tov));
+			RegisterRuntimeOverride(td->name, "txd", tov);
+			ForceTxdReload(obj->m_txdSlot);
+		}
+	}
+
+	if(hasCol){
+		char cov[1024];
+		StashBridgeOverride(gReverseOutbox, gReverseOvDir, name, "col", cov, sizeof(cov));
+		RegisterRuntimeOverride(name, "col", cov);
+		ForceColReloadFromFile(cov);
+	}
+
+	if(hasX && iid >= 0){
+		ObjectInst *in = FindInstByPickId(iid);
+		if(in){
+			// Mirror the editor's own move (applyUndoTransform): without the sector
+			// refresh + rwObject-frame update the pivot moves but the mesh stays put
+			// until the user nudges it. Do the full sequence so it snaps live.
+			RemoveInstFromSectors(in);
+			in->m_translation.x = x; in->m_translation.y = y; in->m_translation.z = z;
+			in->m_rotation.x = qx; in->m_rotation.y = qy; in->m_rotation.z = qz; in->m_rotation.w = qw;
+			StampChangeSeq(in);
+			in->m_isDirty = true;
+			in->UpdateMatrix();
+			updateRwFrameForInst(in);
+			InsertInstIntoSectors(in);
+			gReverseMoved++;
+		}
+	}
+	gReverseOk++;
+	log("BlenderBridge: %s (id %d)%s%s%s%s\n", name, id,
+		wantDff ? " +dff" : "", hasTxd ? " +txd" : "", hasCol ? " +col" : "",
+		(hasX && iid>=0) ? " +pos" : "");
+}
+
+// Reverse bridge: Blender's "-> Ariane" writes edited DFF(+TXD) to the outbox and
+// a reload.job. We register the edits as runtime overrides and hot-reload the
+// models — a slice per frame so a large batch never truncates or hitches. When
+// the batch finishes we ack back with reload.done.
+void
+PollBlenderOutbox(void)
+{
+	if(gReversePending.empty()){			// idle: probe for a new job
+		static int tick = 0;
+		if(++tick < 20)
+			return;
+		tick = 0;
+
+		if(!GetArianeDataPath(gReverseOutbox, sizeof(gReverseOutbox), "bridge\\outbox"))
+			return;
+		char jobPath[1024];
+		snprintf(jobPath, sizeof(jobPath), "%s\\reload.job", gReverseOutbox);
+		FILE *f = fopen(jobPath, "rb");
+		if(f == nil)
+			return;
+		fseek(f, 0, SEEK_END);
+		long sz = ftell(f);
+		fseek(f, 0, SEEK_SET);
+		std::string content;
+		if(sz > 0){
+			content.resize((size_t)sz);
+			size_t rd = fread(&content[0], 1, (size_t)sz, f);
+			content.resize(rd);
+		}
+		fclose(f);
+		remove(jobPath);
+		if(content.empty())
+			return;
+
+		GetArianeDataPath(gReverseOvDir, sizeof(gReverseOvDir), "bridge\\overrides");
+		gReversePending.clear(); gReverseIdx = 0;
+		gReverseOk = 0; gReverseErr = 0; gReverseMoved = 0; gReverseFailed.clear();
+		for(size_t start = 0; start < content.size(); ){
+			size_t e = content.find_first_of("\r\n", start);
+			size_t len = (e == std::string::npos ? content.size() : e) - start;
+			if(len > 0)
+				gReversePending.push_back(content.substr(start, len));
+			if(e == std::string::npos)
+				break;
+			start = e + 1;
+		}
+		if(gReversePending.empty())
+			return;
+	}
+
+	// drain a bounded slice this frame
+	int budget = 8;
+	while(gReverseIdx < gReversePending.size() && budget-- > 0)
+		ProcessReverseLine(gReversePending[gReverseIdx++].c_str());
+
+	if(gReverseIdx >= gReversePending.size()){	// batch done → ack + reset
+		char donePath[1024];
+		snprintf(donePath, sizeof(donePath), "%s\\reload.done", gReverseOutbox);
+		char ack[700];
+		int al = snprintf(ack, sizeof(ack), "v=%d ok=%d err=%d\n", BRIDGE_PROTO_VER, gReverseOk, gReverseErr);
+		if(!gReverseFailed.empty() && al < (int)sizeof(ack)-1)
+			al += snprintf(ack+al, sizeof(ack)-al, "failed=%s\n", gReverseFailed.c_str());
+		WriteBufferToPath(donePath, (const uint8*)ack, (int)strlen(ack));
+		if(gReverseMoved > 0)
+			gBridgeAutoSaveRequest = true;	// persist moved instances to IPL (gui saves)
+		gReversePending.clear();
+		gReverseIdx = 0;
+	}
 }
 
 int

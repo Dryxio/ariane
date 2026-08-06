@@ -15,6 +15,10 @@ CColModel::CColModel(void)
 	this->flags = 0;
 	this->allocFlag = 0;	// SA does something strange here
 	this->rawdata = nil;
+
+	this->colHeaderSize = 0;
+	this->colVersion = 0;
+	this->rawdataSize = 0;
 }
 
 CColModel::~CColModel(void)
@@ -149,6 +153,10 @@ ReadColModelVer2(CColModel *colmodel, uint8 *buf, int32 size)
 		return;
 	colmodel->rawdata = rwNewT(uint8, datasize, 0);
 	memcpy(colmodel->rawdata, buf+COLHEADERSIZE, datasize);
+	memcpy(colmodel->colHeader, buf, COLHEADERSIZE);	// Blender bridge: keep header for re-export
+	colmodel->colHeaderSize = COLHEADERSIZE;
+	colmodel->colVersion = 2;
+	colmodel->rawdataSize = datasize;
 	colmodel->numSpheres = header->numSpheres;
 	colmodel->numBoxes = header->numBoxes;
 	colmodel->numLines = header->numLines;
@@ -193,6 +201,10 @@ ReadColModelVer3(CColModel *colmodel, uint8 *buf, int32 size)
 		return;
 	colmodel->rawdata = rwNewT(uint8, datasize, 0);
 	memcpy(colmodel->rawdata, buf+COLHEADERSIZE, datasize);
+	memcpy(colmodel->colHeader, buf, COLHEADERSIZE);	// Blender bridge: keep header for re-export
+	colmodel->colHeaderSize = COLHEADERSIZE;
+	colmodel->colVersion = 3;
+	colmodel->rawdataSize = datasize;
 	colmodel->numSpheres = header->numSpheres;
 	colmodel->numBoxes = header->numBoxes;
 	colmodel->numLines = header->numLines;
@@ -239,6 +251,10 @@ ReadColModelVer4(CColModel *colmodel, uint8 *buf, int32 size)
 		return;
 	colmodel->rawdata = rwNewT(uint8, datasize, 0);
 	memcpy(colmodel->rawdata, buf+COLHEADERSIZE, datasize);
+	memcpy(colmodel->colHeader, buf, COLHEADERSIZE);	// Blender bridge: keep header for re-export
+	colmodel->colHeaderSize = COLHEADERSIZE;
+	colmodel->colVersion = 4;
+	colmodel->rawdataSize = datasize;
 	colmodel->numSpheres = header->numSpheres;
 	colmodel->numBoxes = header->numBoxes;
 	colmodel->numLines = header->numLines;

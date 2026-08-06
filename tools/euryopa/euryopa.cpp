@@ -2668,6 +2668,7 @@ Draw(void)
 		}
 	}
 
+	PollBlenderOutbox();		// pick up edits sent back from Blender (hot-reload)
 	LoadAllRequestedObjects();
 	BuildRenderList();
 

@@ -1,0 +1,93 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="librw-southland">
+      <UniqueIdentifier>{243651B4-90C1-BE78-99D2-416D05DD1A79}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="librw-southland\skeleton">
+      <UniqueIdentifier>{F8DF0190-E404-5110-0D50-36A0F9D34F2E}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="librw-southland\skeleton\imgui">
+      <UniqueIdentifier>{620764CF-4E2D-2E36-3773-B30123385302}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="src">
+      <UniqueIdentifier>{2DAB880B-99B4-887C-2230-9F7C8E38947C}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="..\..\librw-southland\skeleton\imgui\ImGuizmo.h">
+      <Filter>librw-southland\skeleton\imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\librw-southland\skeleton\imgui\imconfig.h">
+      <Filter>librw-southland\skeleton\imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\librw-southland\skeleton\imgui\imgui.h">
+      <Filter>librw-southland\skeleton\imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\librw-southland\skeleton\imgui\imgui_impl_rw.h">
+      <Filter>librw-southland\skeleton\imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\librw-southland\skeleton\imgui\imgui_internal.h">
+      <Filter>librw-southland\skeleton\imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\librw-southland\skeleton\imgui\imstb_rectpack.h">
+      <Filter>librw-southland\skeleton\imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\librw-southland\skeleton\imgui\imstb_textedit.h">
+      <Filter>librw-southland\skeleton\imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\librw-southland\skeleton\imgui\imstb_truetype.h">
+      <Filter>librw-southland\skeleton\imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\librw-southland\skeleton\skeleton.h">
+      <Filter>librw-southland\skeleton</Filter>
+    </ClInclude>
+    <ClInclude Include="..\tools\gtaclumpview\camera.h">
+      <Filter>src</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\..\librw-southland\skeleton\glfw.cpp">
+      <Filter>librw-southland\skeleton</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\librw-southland\skeleton\imgui\ImGuizmo.cpp">
+      <Filter>librw-southland\skeleton\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\librw-southland\skeleton\imgui\imgui.cpp">
+      <Filter>librw-southland\skeleton\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\librw-southland\skeleton\imgui\imgui_demo.cpp">
+      <Filter>librw-southland\skeleton\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\librw-southland\skeleton\imgui\imgui_draw.cpp">
+      <Filter>librw-southland\skeleton\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\librw-southland\skeleton\imgui\imgui_impl_rw.cpp">
+      <Filter>librw-southland\skeleton\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\librw-southland\skeleton\imgui\imgui_tables.cpp">
+      <Filter>librw-southland\skeleton\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\librw-southland\skeleton\imgui\imgui_widgets.cpp">
+      <Filter>librw-southland\skeleton\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\librw-southland\skeleton\sdl2.cpp">
+      <Filter>librw-southland\skeleton</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\librw-southland\skeleton\sdl3.cpp">
+      <Filter>librw-southland\skeleton</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\librw-southland\skeleton\skeleton.cpp">
+      <Filter>librw-southland\skeleton</Filter>
+    </ClCompile>
+    <ClCompile Include="..\..\librw-southland\skeleton\win.cpp">
+      <Filter>librw-southland\skeleton</Filter>
+    </ClCompile>
+    <ClCompile Include="..\tools\gtaclumpview\camera.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\tools\gtaclumpview\main.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>

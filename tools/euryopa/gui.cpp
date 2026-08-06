@@ -7284,6 +7284,26 @@ uiInstWindow(void)
 					Toast(TOAST_SAVE, "Failed to export TXD(s)");
 			}
 		}
+		ImGui::SameLine();
+		static bool blAutoTxd = true, blVanilla = true, blIde = true, blIpl = true, blLod = true, blCol = false;
+		if(ImGui::Button("Export to Blender")){
+			int failed = 0;
+			int exported = ExportSelectedToBlender(blAutoTxd, blVanilla, blIde, blIpl, blLod, blCol, &failed);
+			if(exported > 0)
+				Toast(TOAST_SAVE, "Sent %d model(s) to Blender%s", exported,
+				      failed > 0 ? " (some skipped)" : "");
+			else
+				Toast(TOAST_SAVE, "Failed to send to Blender");
+		}
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("DFF (+LOD, +TXD) -> INU_ariane_bridge inbox; INU_Tools watcher imports it into the running Blender");
+		ImGui::TextDisabled("Blender:"); ImGui::SameLine();
+		ImGui::Checkbox("Auto TXD", &blAutoTxd); ImGui::SameLine();
+		ImGui::Checkbox("Vanilla", &blVanilla); ImGui::SameLine();
+		ImGui::Checkbox("IDE", &blIde); ImGui::SameLine();
+		ImGui::Checkbox("IPL", &blIpl); ImGui::SameLine();
+		ImGui::Checkbox("LOD", &blLod); ImGui::SameLine();
+		ImGui::Checkbox("COL", &blCol);
 		if(haveExportDir)
 			ImGui::TextDisabled("%s", exportDir);
 		ImGui::Separator();
@@ -8274,6 +8294,14 @@ gui(void)
 			if(saveCurrentMap())
 				toastCurrentMapSaved();
 		}
+	}
+
+	// Blender bridge: auto-save the map after a reverse import moved instances
+	if(gBridgeAutoSaveRequest && allowEditorShortcuts){
+		gBridgeAutoSaveRequest = false;
+		finishTransformPanelEdit();
+		if(saveCurrentMap())
+			toastCurrentMapSaved();
 	}
 
 	// Ctrl+G to test in game

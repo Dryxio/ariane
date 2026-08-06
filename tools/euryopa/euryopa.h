@@ -478,6 +478,9 @@ const char *GetPrefabPlacePath(void);
 void RenderPrefabPlacementGhost(const char *path, rw::V3d spawnPos);
 int ExportSelectedDffs(const char *dir, int *numFailed);
 int ExportSelectedTxds(const char *dir, int *numFailed);
+int ExportSelectedToBlender(bool autoTxd, bool vanilla, bool ide, bool ipl, bool lodToo, bool colToo, int *numFailed);	// -> INU_ariane_bridge\inbox
+void PollBlenderOutbox(void);	// <- Blender edits: hot-reload DFF/TXD + move instance
+extern bool gBridgeAutoSaveRequest;	// set by the reverse bridge; gui() auto-saves the map
 
 // Toast notifications
 enum ToastCategory {
@@ -580,6 +583,7 @@ void TxdPop(void);
 bool IsTxdLoaded(int i);
 void CreateTxd(int i);
 void LoadTxd(int i);
+void ForceTxdReload(int i);	// free a slot's dict so Load() re-reads it (Blender live-reload)
 void LoadTxd(int i, const char *path);
 void TxdMakeCurrent(int i);
 void TxdSetParent(const char *child, const char *parent);
@@ -602,6 +606,7 @@ ColDef *GetColDef(int i);
 int AddColSlot(const char *name);
 void LoadCol(int slot);
 void LoadAllCollisions(void);
+void ForceColReloadFromFile(const char *path);	// Blender bridge: reload collision from a loose .col
 
 // One class for all map objects
 struct ObjectDef
@@ -680,6 +685,7 @@ struct ObjectDef
 	void LoadAtomic(void);
 	void LoadClump(void);
 	void Load(void);
+	void Reload(void);	// free current geometry + Load() again (Blender live-reload)
 	void SetAtomic(int n, rw::Atomic *atomic);
 	void SetClump(rw::Clump *clump);
 	void CantLoad(void);
@@ -691,6 +697,7 @@ void RemoveObjectDef(int id);
 ObjectDef *GetObjectDef(int id);
 ObjectDef *GetObjectDef(const char *name, int *id);
 bool CreateObjectPreviewRwObject(int id, rw::Atomic **atomicOut, rw::Clump **clumpOut);
+bool ExportColForModel(ObjectDef *obj, const char *path);	// Blender bridge: model's collision -> loose .col
 
 
 struct FileObjectInstance
