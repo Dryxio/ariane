@@ -480,7 +480,20 @@ int ExportSelectedDffs(const char *dir, int *numFailed);
 int ExportSelectedTxds(const char *dir, int *numFailed);
 int ExportSelectedToBlender(bool autoTxd, bool vanilla, bool ide, bool ipl, bool lodToo, bool colToo, int *numFailed);	// -> INU_ariane_bridge\inbox
 void PollBlenderOutbox(void);	// <- Blender edits: hot-reload DFF/TXD + move instance
-extern bool gBridgeAutoSaveRequest;	// set by the reverse bridge; gui() auto-saves the map
+void WriteArianeLiveState(void);	// -> live position sync (selected instances) for Blender
+void PollBlenderLiveIn(void);		// <- live moves from Blender (when not dragging here)
+void PollBlenderCamIn(void);		// <- live camera from Blender (when not navigating here)
+void PollBlenderSelIn(void);		// <- live selection from Blender (when not selecting here)
+void PollBlenderCreate(void);		// <- create.job: new instances of existing models
+void PollBlenderCreateModel(void);	// <- createmodel.job: brand-new models (E-2)
+void PollBlenderDeletes(void);		// <- del_blender.txt: soft-delete/restore instances
+bool CreateBridgeInstance(const char *name, rw::V3d pos, rw::Quat rot, char *guidOut, int guidSz);
+bool CreateBridgeModel(const char *name, const char *dffPath, const char *txdPath, const char *colPath,
+	const char *lodName, const char *lodDffPath, const char *lodTxdPath,
+	float drawDist, rw::V3d pos, rw::Quat rot, char *guidOut, int guidSz, char *errOut, int errSz);
+void MoveInstanceTo(ObjectInst *inst, rw::V3d pos, rw::Quat rot);
+void GetInstGuid(ObjectInst *inst, char *buf, int sz);	// stable cross-session instance id for the bridge
+ObjectInst *FindInstByGuid(const char *guid);
 
 // Toast notifications
 enum ToastCategory {

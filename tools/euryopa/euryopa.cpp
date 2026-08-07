@@ -2619,6 +2619,18 @@ Draw(void)
 
 	updateFPS();
 
+	// Finalize the camera BEFORE the timecycle so the whole frame uses ONE camera
+	// position. Timecycle::UpdateSA() reads TheCamera.m_position to pick the zone boxes
+	// that drive the sky colours / far plane. The Blender-driven snap used to land later
+	// in the frame (down in the poller block), so during a fast move the sky colours were
+	// computed for the previous position while the geometry rendered at the new one — the
+	// top of the screen flashed. Order now: ariane input → Blender snap → update → cycle.
+	CPad::UpdatePads();
+	updateRectSelectEarly();
+	TheCamera.Process();		// ariane's own camera input
+	PollBlenderCamIn();		// apply live camera from Blender (overrides if it drives)
+	TheCamera.update();
+
 	Weather::Update();
 	Timecycle::Update();
 	Timecycle::SetLights();
@@ -2630,10 +2642,6 @@ Draw(void)
 	TheCamera.m_rwcam_viewer->setFarPlane(5000.0f);
 	TheCamera.m_rwcam_viewer->fogPlane = Timecycle::currentColours.fogSt;
 
-	CPad::UpdatePads();
-	updateRectSelectEarly();
-	TheCamera.Process();
-	TheCamera.update();
 	if(gUseViewerCam)
 		Scene.camera = TheCamera.m_rwcam_viewer;
 	else
@@ -2669,6 +2677,13 @@ Draw(void)
 	}
 
 	PollBlenderOutbox();		// pick up edits sent back from Blender (hot-reload)
+	PollBlenderLiveIn();		// apply live moves from Blender (unless dragging here)
+	// PollBlenderCamIn() runs earlier (before Timecycle) so the sky uses the final camera
+	PollBlenderSelIn();		// apply live selection from Blender (unless selecting here)
+	PollBlenderCreate();		// create.job: new instances of existing models
+	PollBlenderCreateModel();	// createmodel.job: brand-new models (E-2)
+	PollBlenderDeletes();		// del_blender.txt: soft-delete/restore instances
+	WriteArianeLiveState();		// stream selected instance transforms to Blender (live)
 	LoadAllRequestedObjects();
 	BuildRenderList();
 

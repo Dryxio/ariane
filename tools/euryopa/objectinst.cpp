@@ -12,6 +12,19 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <sys/stat.h>
+
+// Blender bridge: a live-input file counts only if a running Blender wrote it
+// within the last couple of seconds. Otherwise a stale file (Blender closed, or a
+// leftover from a previous session) would re-hijack the camera/instances on launch.
+static bool
+bridgeFileIsFresh(const char *path, int maxAgeSec)
+{
+	struct stat st;
+	if(stat(path, &st) != 0)
+		return false;
+	return (long)(time(nil) - st.st_mtime) <= maxAgeSec;
+}
 
 bool ReadCdImageEntryByLogicalPath(const char *logicalPath, std::vector<uint8> &data,
                                    char *outSourcePath, size_t outSourcePathSize);
@@ -3100,7 +3113,6 @@ ExportSelectedDffs(const char *dir, int *numFailed)
 #define BRIDGE_PROTO_VER 2	// bump when the job format changes; both sides check "#v N"
 
 // set true when a reverse batch moved instance(s); gui() auto-saves the map
-bool gBridgeAutoSaveRequest = false;
 // Shared inbox %LOCALAPPDATA%\INU_ariane_bridge\inbox: each selected model's
 // .dff (its .txd too when autoTxd, and its LOD when one exists) + a .job file:
 // a "#flags" header + one TAB-separated line per DFF carrying IDE/IPL metadata
@@ -3110,12 +3122,14 @@ AppendBlenderMetaLine(char *body, int *blen, int cap, ObjectDef *obj, TxdDef *tx
 {
 	if(*blen >= cap-1) return;
 	// Always send the transform (so Blender places the object at its world spot).
-	// ownInstance: HD sends its real iid → the reverse moves that instance. The LOD
-	// sends iid=-1 → placed in Blender, but the reverse never moves an instance from
-	// it (so it can't revert the HD's move).
+	// ownInstance: HD sends its real iid + stable guid → the reverse moves that
+	// instance. The LOD sends iid=-1 / empty guid → placed in Blender, but the
+	// reverse never moves an instance from it (so it can't revert the HD's move).
+	char guid[300] = "";
+	if(ownInstance) GetInstGuid(inst, guid, sizeof(guid));
 	*blen += snprintf(body+*blen, cap-*blen,
-		"%s.dff\tid=%d\tiid=%d\tdd=%.3f\ttxd=%s\tx=%.4f\ty=%.4f\tz=%.4f\tqx=%.6f\tqy=%.6f\tqz=%.6f\tqw=%.6f\n",
-		obj->m_name, obj->m_id, ownInstance ? inst->m_id : -1, obj->GetLargestDrawDist(),
+		"%s.dff\tid=%d\tiid=%d\tguid=%s\tdd=%.3f\ttxd=%s\tx=%.4f\ty=%.4f\tz=%.4f\tqx=%.6f\tqy=%.6f\tqz=%.6f\tqw=%.6f\n",
+		obj->m_name, obj->m_id, ownInstance ? inst->m_id : -1, guid, obj->GetLargestDrawDist(),
 		(txd && txd->name[0]) ? txd->name : "",
 		inst->m_translation.x, inst->m_translation.y, inst->m_translation.z,
 		inst->m_rotation.x, inst->m_rotation.y, inst->m_rotation.z, inst->m_rotation.w);
@@ -3219,6 +3233,603 @@ FindInstByPickId(int id)
 	return nil;
 }
 
+// Stable per-instance GUID for the Blender bridge: "<iplname>#<indexInIpl>". Unlike
+// the session-local pick-id (m_id), this survives save→reload — text-IPL deletions
+// only comment the line out (index preserved) and new instances append, so the IPL
+// name + m_iplIndex re-map to the same instance next session.
+void
+GetInstGuid(ObjectInst *inst, char *buf, int sz)
+{
+	if(buf == nil || sz <= 0) return;
+	if(inst == nil){ buf[0] = '\0'; return; }
+	if(inst->m_iplFilterKey[0])
+		snprintf(buf, sz, "%s#%d", inst->m_iplFilterKey, inst->m_iplIndex);
+	else	// never saved / no IPL yet — fall back to the session id (not cross-session)
+		snprintf(buf, sz, "@%d", inst->m_id);
+}
+
+ObjectInst*
+FindInstByGuid(const char *guid)
+{
+	if(guid == nil || guid[0] == '\0') return nil;
+	char buf[300];
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *in = (ObjectInst*)p->item;
+		if(in == nil) continue;
+		GetInstGuid(in, buf, sizeof(buf));
+		if(buf[0] && strcmp(buf, guid) == 0)
+			return in;
+	}
+	return nil;
+}
+
+// Move an instance and keep its render + spatial state in sync (mirrors the reverse
+// bridge move / the editor's own move). Used by E-2 to place a freshly created model.
+void
+MoveInstanceTo(ObjectInst *inst, rw::V3d pos, rw::Quat rot)
+{
+	if(inst == nil) return;
+	RemoveInstFromSectors(inst);
+	inst->m_translation = pos;
+	inst->m_rotation = rot;
+	StampChangeSeq(inst);
+	inst->m_isDirty = true;
+	inst->UpdateMatrix();
+	updateRwFrameForInst(inst);
+	InsertInstIntoSectors(inst);
+}
+
+// Phase D live sync (ariane → Blender): stream the selected instances' transforms
+// to a small live file the addon watches, so dragging in ariane moves the matching
+// Blender objects live. Only writes when the content actually changed — an idle
+// selection produces no disk churn and never clobbers a Blender-side edit. The
+// reverse (Blender → ariane) stays button-triggered, so there's no feedback loop.
+// Focus guard: each side only DRIVES (writes live files) while its own window is the
+// OS foreground. The other side's freshness gate then stops applying (files go stale),
+// so whoever you're working in is never disturbed by the background app — this fixes
+// the camera getting knocked around and the "actions jump to ariane" lag.
+static bool
+bridgeArianeFocused(void)
+{
+	HWND fg = GetForegroundWindow();
+	if(fg == nil) return false;
+	DWORD pid = 0;
+	GetWindowThreadProcessId(fg, &pid);
+	return pid == GetCurrentProcessId();
+}
+
+void
+WriteArianeLiveState(void)
+{
+	static int tick = 0;
+	if(++tick < 2)		// ~30 Hz at 60 fps (smoother live sync)
+		return;
+	tick = 0;
+
+	if(!bridgeArianeFocused())	// not the active window → don't drive Blender
+		return;
+
+	// camera → its own file (high-frequency, decoupled from the moves/selection
+	// file so navigating in ariane doesn't churn the moves file)
+	{
+		char cbuf[256];
+		int cn = snprintf(cbuf, sizeof(cbuf),
+			"cam\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.4f\t%.4f\t%.4f\n",
+			TheCamera.m_position.x, TheCamera.m_position.y, TheCamera.m_position.z,
+			TheCamera.m_target.x, TheCamera.m_target.y, TheCamera.m_target.z,
+			// up vector so Blender can rebuild the exact orientation (no roll guessing)
+			TheCamera.m_up.x, TheCamera.m_up.y, TheCamera.m_up.z);
+		static std::string lastCam;
+		if(std::string(cbuf) != lastCam){
+			lastCam = cbuf;
+			char cpath[1024], ctmp[1024];
+			if(GetArianeDataPath(cpath, sizeof(cpath), "bridge\\live\\cam_ariane.txt")){
+				EnsureParentDirectoriesForPath(cpath);
+				snprintf(ctmp, sizeof(ctmp), "%s.tmp", cpath);
+				FILE *cf = fopen(ctmp, "wb");
+				if(cf){ fwrite(cbuf, 1, cn, cf); fclose(cf); remove(cpath); rename(ctmp, cpath); }
+			}
+		}
+	}
+
+	std::string body = "#live 1\n";
+	std::string sel = "sel";	// selected guids, one line, for selection sync
+	char lb[512], guid[300];
+	for(CPtrNode *p = selection.first; p; p = p->next){
+		ObjectInst *inst = (ObjectInst*)p->item;
+		if(inst == nil || inst->m_isDeleted)
+			continue;
+		GetInstGuid(inst, guid, sizeof(guid));
+		if(guid[0] == '\0')
+			continue;
+		sel += '\t'; sel += guid;
+		snprintf(lb, sizeof(lb),
+			"mov\t%s\t%.4f\t%.4f\t%.4f\t%.6f\t%.6f\t%.6f\t%.6f\n",
+			guid, inst->m_translation.x, inst->m_translation.y, inst->m_translation.z,
+			inst->m_rotation.x, inst->m_rotation.y, inst->m_rotation.z, inst->m_rotation.w);
+		body += lb;
+	}
+	body += sel; body += '\n';
+
+	static std::string lastBody;
+	if(body == lastBody)		// nothing moved/selected since last write
+		return;
+	lastBody = body;
+
+	char path[1024], tmp[1024];
+	if(!GetArianeDataPath(path, sizeof(path), "bridge\\live\\from_ariane.txt"))
+		return;
+	EnsureParentDirectoriesForPath(path);
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+	FILE *f = fopen(tmp, "wb");
+	if(f == nil)
+		return;
+	fwrite(body.data(), 1, body.size(), f);
+	fclose(f);
+	remove(path);
+	rename(tmp, path);		// atomic-ish replace
+}
+
+// Phase D live sync (Blender → ariane): apply the addon's live moves to instances
+// by guid — but ONLY while the user is NOT dragging a gizmo here (gGizmoUsing). So
+// dragging in ariane makes ariane master; dragging in Blender makes Blender master.
+void
+PollBlenderLiveIn(void)
+{
+	if(bridgeArianeFocused())	// ariane is the active window → it drives, don't follow
+		return;
+	if(gGizmoUsing)			// user is transforming in ariane → ignore Blender's stream
+		return;
+	static int tick = 0;
+	if(++tick < 2)			// ~30 Hz
+		return;
+	tick = 0;
+
+	char path[1024];
+	if(!GetArianeDataPath(path, sizeof(path), "bridge\\live\\from_blender.txt"))
+		return;
+	if(!bridgeFileIsFresh(path, 2))		// stale / Blender not live → ignore
+		return;
+	FILE *f = fopen(path, "rb");
+	if(f == nil)
+		return;
+	fseek(f, 0, SEEK_END);
+	long sz = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	if(sz <= 0 || sz > (1<<20)){ fclose(f); return; }
+	std::string data;
+	data.resize((size_t)sz);
+	fread(&data[0], 1, (size_t)sz, f);
+	fclose(f);
+
+	static std::string lastData;
+	if(data == lastData)		// unchanged since last apply
+		return;
+	lastData = data;
+
+	size_t pos = 0;
+	while(pos < data.size()){
+		size_t eol = data.find('\n', pos);
+		std::string ln = data.substr(pos, eol == std::string::npos ? std::string::npos : eol - pos);
+		pos = (eol == std::string::npos) ? data.size() : eol + 1;
+		if(ln.empty() || ln[0] == '#')
+			continue;
+		char buf[600];
+		strncpy(buf, ln.c_str(), sizeof(buf)-1); buf[sizeof(buf)-1] = '\0';
+		char *tok = strtok(buf, "\t");
+		if(tok == nil || strcmp(tok, "mov") != 0) continue;
+		char *g   = strtok(nil, "\t");
+		char *sx  = strtok(nil, "\t"), *sy  = strtok(nil, "\t"), *sz2 = strtok(nil, "\t");
+		char *sqx = strtok(nil, "\t"), *sqy = strtok(nil, "\t");
+		char *sqz = strtok(nil, "\t"), *sqw = strtok(nil, "\t");
+		if(!g || !sx || !sy || !sz2 || !sqx || !sqy || !sqz || !sqw) continue;
+		ObjectInst *in = FindInstByGuid(g);
+		if(in == nil) continue;
+		RemoveInstFromSectors(in);
+		in->m_translation.x = (float)atof(sx);
+		in->m_translation.y = (float)atof(sy);
+		in->m_translation.z = (float)atof(sz2);
+		in->m_rotation.x = (float)atof(sqx);
+		in->m_rotation.y = (float)atof(sqy);
+		in->m_rotation.z = (float)atof(sqz);
+		in->m_rotation.w = (float)atof(sqw);
+		StampChangeSeq(in);
+		in->m_isDirty = true;
+		in->UpdateMatrix();
+		updateRwFrameForInst(in);
+		InsertInstIntoSectors(in);
+	}
+}
+
+static bool
+camClose(const rw::V3d &a, const rw::V3d &b)
+{
+	return std::fabs(a.x-b.x) < 0.01f && std::fabs(a.y-b.y) < 0.01f && std::fabs(a.z-b.z) < 0.01f;
+}
+
+// Phase D live camera (Blender → ariane): drive ariane's camera from Blender's
+// viewport, with the same "who's moving wins" arbitration. We detect ariane-side
+// navigation by the camera changing since we last left it (ariane's own input runs
+// earlier in Draw), and while that's happening we ignore Blender's stream.
+void
+PollBlenderCamIn(void)
+{
+	if(bridgeArianeFocused())		// ariane is the active window → it drives, don't follow
+		return;
+
+	static int tick = 0;
+	if(++tick < 3)				// ~20 Hz read
+		return;
+	tick = 0;
+
+	char path[1024];
+	if(!GetArianeDataPath(path, sizeof(path), "bridge\\live\\cam_blender.txt") ||
+	   !bridgeFileIsFresh(path, 2))		// stale / Blender not live → ignore
+		return;
+	FILE *f = fopen(path, "rb");
+	if(f == nil)
+		return;
+	char buf[256];
+	size_t n = fread(buf, 1, sizeof(buf)-1, f);
+	fclose(f);
+	buf[n] = '\0';
+
+	static std::string lastData;
+	if(lastData == buf)
+		return;
+	lastData = buf;
+
+	char *tok = strtok(buf, "\t \n");
+	if(tok == nil || strcmp(tok, "cam") != 0) return;
+	char *sx = strtok(nil,"\t \n"), *sy = strtok(nil,"\t \n"), *sz = strtok(nil,"\t \n");
+	char *tx = strtok(nil,"\t \n"), *ty = strtok(nil,"\t \n"), *tz = strtok(nil,"\t \n");
+	if(!sx || !sy || !sz || !tx || !ty || !tz) return;
+	// up vector (optional for back-compat; Blender always sends it now)
+	char *ux = strtok(nil,"\t \n"), *uy = strtok(nil,"\t \n"), *uz = strtok(nil,"\t \n");
+
+	// SNAP straight to Blender's camera. Interpolating eye/target flips near the
+	// vertical poles ("looks like the camera is swinging to the other side") and
+	// can't keep up with a fast rotation — so match Blender exactly instead.
+	TheCamera.m_position.x = (float)atof(sx);
+	TheCamera.m_position.y = (float)atof(sy);
+	TheCamera.m_position.z = (float)atof(sz);
+	TheCamera.m_target.x = (float)atof(tx);
+	TheCamera.m_target.y = (float)atof(ty);
+	TheCamera.m_target.z = (float)atof(tz);
+
+	// ariane's camera is roll-free by design: m_up must stay (0,0,±1) — turn()/orbit()
+	// only ever fix m_up.z, so any x/y we put here would tilt the horizon forever.
+	// Take just the SIGN of Blender's up (upright vs. flipped past the pole) and rebuild
+	// a clean, roll-free up in the vertical plane of the view direction. This matches
+	// Blender's own turntable orbit (also roll-free) and can't corrupt ariane's state.
+	float sgn = 1.0f;
+	if(ux && uy && uz && (float)atof(uz) < 0.0f)
+		sgn = -1.0f;
+	TheCamera.m_up.set(0.0f, 0.0f, sgn);
+	rw::V3d dir = rw::sub(TheCamera.m_target, TheCamera.m_position);
+	if(rw::length(dir) > 1e-4f){
+		rw::V3d worldz = { 0.0f, 0.0f, sgn };
+		rw::V3d right = rw::cross(rw::normalize(dir), worldz);
+		if(rw::length(right) > 1e-4f)			// not looking straight up/down
+			TheCamera.m_localup = rw::normalize(rw::cross(rw::normalize(right), rw::normalize(dir)));
+		else
+			TheCamera.m_localup = worldz;
+	}
+	TheCamera.update();
+}
+
+static std::string
+selectionSignature(void)
+{
+	std::string s;
+	char guid[300];
+	for(CPtrNode *p = selection.first; p; p = p->next){
+		ObjectInst *in = (ObjectInst*)p->item;
+		if(in == nil) continue;
+		GetInstGuid(in, guid, sizeof(guid));
+		s += guid; s += '|';
+	}
+	return s;
+}
+
+// Phase D live selection (Blender → ariane): mirror Blender's selection onto ariane
+// instances, with the same arbitration — skip while dragging (gGizmoUsing) or while
+// ariane's own selection just changed (the user clicked here).
+void
+PollBlenderSelIn(void)
+{
+	if(bridgeArianeFocused())	// ariane is the active window → it drives, don't follow
+		return;
+	if(gGizmoUsing)
+		return;
+	static int own = 0;
+	static std::string last;
+	static bool have = false;
+
+	std::string cur = selectionSignature();
+	if(have && cur != last)
+		own = 20;			// ariane's selection changed by the user → ariane wins
+	if(own > 0){
+		own--;
+		last = cur; have = true;
+		return;
+	}
+
+	static int tick = 0;
+	if(++tick < 3)
+		return;
+	tick = 0;
+
+	char path[1024];
+	if(!GetArianeDataPath(path, sizeof(path), "bridge\\live\\sel_blender.txt"))
+		return;
+	if(!bridgeFileIsFresh(path, 2))		// stale / Blender not live → ignore
+		return;
+	FILE *f = fopen(path, "rb");
+	if(f == nil)
+		return;
+	fseek(f, 0, SEEK_END);
+	long sz = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	if(sz < 0 || sz > (1<<20)){ fclose(f); return; }
+	std::string data;
+	data.resize((size_t)sz);
+	if(sz > 0) fread(&data[0], 1, (size_t)sz, f);
+	fclose(f);
+
+	static std::string lastData;
+	if(lastData == data)
+		return;
+	lastData = data;
+
+	std::vector<char> mut(data.begin(), data.end());
+	mut.push_back('\0');
+	char *tok = strtok(mut.data(), "\t \r\n");
+	if(tok && strcmp(tok, "sel") == 0){
+		ClearSelection();
+		for(char *g = strtok(nil, "\t \r\n"); g; g = strtok(nil, "\t \r\n")){
+			ObjectInst *in = FindInstByGuid(g);
+			if(in) in->Select();
+		}
+	}
+	last = selectionSignature(); have = true;
+}
+
+// Phase E-1 (Blender → ariane): create new instances of existing models. Blender
+// writes create.job (one line per object: key + model name + transform); we create
+// each via CreateBridgeInstance and write create.done mapping key → new guid so the
+// addon can tag the object. Persists to the IPL only on the user's next save.
+void
+PollBlenderCreate(void)
+{
+	static int tick = 0;
+	if(++tick < 10)			// creates are rare — poll gently
+		return;
+	tick = 0;
+
+	char path[1024];
+	if(!GetArianeDataPath(path, sizeof(path), "bridge\\outbox\\create.job"))
+		return;
+	FILE *f = fopen(path, "rb");
+	if(f == nil)
+		return;
+	fseek(f, 0, SEEK_END);
+	long sz = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	if(sz <= 0 || sz > (1<<20)){ fclose(f); return; }
+	std::string data;
+	data.resize((size_t)sz);
+	fread(&data[0], 1, (size_t)sz, f);
+	fclose(f);
+	remove(path);			// consume the request
+
+	std::string done;
+	size_t pos = 0;
+	while(pos < data.size()){
+		size_t eol = data.find('\n', pos);
+		std::string ln = data.substr(pos, eol == std::string::npos ? std::string::npos : eol - pos);
+		pos = (eol == std::string::npos) ? data.size() : eol + 1;
+		if(ln.empty() || ln[0] == '#')
+			continue;
+		char lb[512];
+		strncpy(lb, ln.c_str(), sizeof(lb)-1); lb[sizeof(lb)-1] = '\0';
+
+		char key[128] = "", name[64] = "";
+		float x=0, y=0, z=0, qx=0, qy=0, qz=0, qw=1;
+		for(char *t = strtok(lb, "\t"); t; t = strtok(nil, "\t")){
+			char *eq = strchr(t, '=');
+			if(!eq) continue;
+			*eq = '\0';
+			const char *k = t, *v = eq+1;
+			if(strcmp(k,"key")==0) strncpy(key, v, sizeof(key)-1);
+			else if(strcmp(k,"name")==0) strncpy(name, v, sizeof(name)-1);
+			else if(strcmp(k,"x")==0) x=(float)atof(v);
+			else if(strcmp(k,"y")==0) y=(float)atof(v);
+			else if(strcmp(k,"z")==0) z=(float)atof(v);
+			else if(strcmp(k,"qx")==0) qx=(float)atof(v);
+			else if(strcmp(k,"qy")==0) qy=(float)atof(v);
+			else if(strcmp(k,"qz")==0) qz=(float)atof(v);
+			else if(strcmp(k,"qw")==0) qw=(float)atof(v);
+		}
+		if(name[0] == '\0')
+			continue;
+		rw::V3d pos3 = { x, y, z };
+		rw::Quat rot; rot.x = qx; rot.y = qy; rot.z = qz; rot.w = qw;
+		char guid[300] = "";
+		bool ok = CreateBridgeInstance(name, pos3, rot, guid, sizeof(guid));
+		done += key; done += '\t';
+		done += (ok && guid[0]) ? guid : "ERR";
+		done += '\n';
+		log("BlenderBridge: create %s → %s\n", name, (ok && guid[0]) ? guid : "FAILED");
+	}
+
+	if(!done.empty()){
+		char donePath[1024];
+		if(GetArianeDataPath(donePath, sizeof(donePath), "bridge\\outbox\\create.done")){
+			FILE *df = fopen(donePath, "wb");
+			if(df){ fwrite(done.data(), 1, done.size(), df); fclose(df); }
+		}
+	}
+}
+
+// Phase E-2 (Blender → ariane): register BRAND-NEW models. Blender exports the DFF/
+// TXD(/COL) into the outbox and writes createmodel.job (key + name + drawdist + col
+// flag + transform). We drive ariane's custom-import via CreateBridgeModel and reply
+// in createmodel.done with key → guid+name (or ERR:msg). Persists on the user's save.
+void
+PollBlenderCreateModel(void)
+{
+	static int tick = 0;
+	if(++tick < 10)
+		return;
+	tick = 0;
+
+	char path[1024];
+	if(!GetArianeDataPath(path, sizeof(path), "bridge\\outbox\\createmodel.job"))
+		return;
+	FILE *f = fopen(path, "rb");
+	if(f == nil)
+		return;
+	fseek(f, 0, SEEK_END);
+	long sz = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	if(sz <= 0 || sz > (1<<20)){ fclose(f); return; }
+	std::string data;
+	data.resize((size_t)sz);
+	fread(&data[0], 1, (size_t)sz, f);
+	fclose(f);
+	remove(path);
+
+	char outbox[1024];
+	if(!GetArianeDataPath(outbox, sizeof(outbox), "bridge\\outbox"))
+		return;
+
+	std::string done;
+	size_t pos = 0;
+	while(pos < data.size()){
+		size_t eol = data.find('\n', pos);
+		std::string ln = data.substr(pos, eol == std::string::npos ? std::string::npos : eol - pos);
+		pos = (eol == std::string::npos) ? data.size() : eol + 1;
+		if(ln.empty() || ln[0] == '#')
+			continue;
+		char lb[512];
+		strncpy(lb, ln.c_str(), sizeof(lb)-1); lb[sizeof(lb)-1] = '\0';
+
+		char key[128] = "", name[64] = "", lodName[64] = "";
+		float dd = 300.0f, x=0, y=0, z=0, qx=0, qy=0, qz=0, qw=1;
+		int hasCol = 0, hasLod = 0;
+		for(char *t = strtok(lb, "\t"); t; t = strtok(nil, "\t")){
+			char *eq = strchr(t, '=');
+			if(!eq) continue;
+			*eq = '\0';
+			const char *k = t, *v = eq+1;
+			if(strcmp(k,"key")==0) strncpy(key, v, sizeof(key)-1);
+			else if(strcmp(k,"name")==0) strncpy(name, v, sizeof(name)-1);
+			else if(strcmp(k,"dd")==0) dd=(float)atof(v);
+			else if(strcmp(k,"col")==0) hasCol=atoi(v);
+			else if(strcmp(k,"lod")==0) hasLod=atoi(v);
+			else if(strcmp(k,"lodname")==0) strncpy(lodName, v, sizeof(lodName)-1);
+			else if(strcmp(k,"x")==0) x=(float)atof(v);
+			else if(strcmp(k,"y")==0) y=(float)atof(v);
+			else if(strcmp(k,"z")==0) z=(float)atof(v);
+			else if(strcmp(k,"qx")==0) qx=(float)atof(v);
+			else if(strcmp(k,"qy")==0) qy=(float)atof(v);
+			else if(strcmp(k,"qz")==0) qz=(float)atof(v);
+			else if(strcmp(k,"qw")==0) qw=(float)atof(v);
+		}
+		if(name[0] == '\0')
+			continue;
+		char dffP[1200], txdP[1200], colP[1200], lodDffP[1200], lodTxdP[1200];
+		snprintf(dffP, sizeof(dffP), "%s\\%s.dff", outbox, name);
+		snprintf(txdP, sizeof(txdP), "%s\\%s.txd", outbox, name);
+		snprintf(colP, sizeof(colP), "%s\\%s.col", outbox, name);
+		bool lodOk = hasLod && lodName[0];
+		if(lodOk){
+			snprintf(lodDffP, sizeof(lodDffP), "%s\\%s.dff", outbox, lodName);
+			snprintf(lodTxdP, sizeof(lodTxdP), "%s\\%s.txd", outbox, lodName);
+		}
+		rw::V3d p3 = { x, y, z };
+		rw::Quat r; r.x = qx; r.y = qy; r.z = qz; r.w = qw;
+		char guid[300] = "", err[256] = "";
+		bool ok = CreateBridgeModel(name, dffP, txdP, hasCol ? colP : nil,
+			lodOk ? lodName : nil, lodOk ? lodDffP : nil, lodOk ? lodTxdP : nil,
+			dd, p3, r, guid, sizeof(guid), err, sizeof(err));
+		done += key; done += '\t';
+		if(ok && guid[0]){ done += guid; done += '\t'; done += name; }
+		else { done += "ERR:"; done += (err[0] ? err : "failed"); }
+		done += '\n';
+		log("BlenderBridge: create model %s → %s\n", name, (ok && guid[0]) ? guid : err);
+	}
+
+	if(!done.empty()){
+		char donePath[1024];
+		if(GetArianeDataPath(donePath, sizeof(donePath), "bridge\\outbox\\createmodel.done")){
+			FILE *df = fopen(donePath, "wb");
+			if(df){ fwrite(done.data(), 1, done.size(), df); fclose(df); }
+		}
+	}
+}
+
+// Phase F (Blender → ariane): reconcile SOFT deletions. Blender writes del_blender.txt
+// = the set of guids currently deleted in Blender (an object vanished). We diff it
+// against what the bridge has deleted so far: newly-listed guids → inst->Delete()
+// (soft, restorable, commented out on save); guids that dropped off the list (Ctrl+Z
+// in Blender) → inst->Undelete(). Freshness-gated so a closed Blender never touches
+// anything, and Blender's own mass-vanish guard keeps a file reload from wiping.
+static std::unordered_set<std::string> gBridgeDeleted;
+
+void
+PollBlenderDeletes(void)
+{
+	static int tick = 0;
+	if(++tick < 6)
+		return;
+	tick = 0;
+
+	char path[1024];
+	if(!GetArianeDataPath(path, sizeof(path), "bridge\\live\\del_blender.txt"))
+		return;
+	if(!bridgeFileIsFresh(path, 3))		// Blender not live → leave state as-is
+		return;
+	FILE *f = fopen(path, "rb");
+	if(f == nil)
+		return;
+	fseek(f, 0, SEEK_END);
+	long sz = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	if(sz < 0 || sz > (1<<20)){ fclose(f); return; }
+	std::string data;
+	if(sz > 0){ data.resize((size_t)sz); fread(&data[0], 1, (size_t)sz, f); }
+	fclose(f);
+
+	static std::string lastData;
+	if(lastData == data)
+		return;
+	lastData = data;
+
+	std::unordered_set<std::string> target;		// guids Blender says are deleted
+	std::vector<char> mut(data.begin(), data.end());
+	mut.push_back('\0');
+	for(char *t = strtok(mut.data(), "\t \r\n"); t; t = strtok(nil, "\t \r\n")){
+		if(strcmp(t, "del") == 0) continue;
+		target.insert(t);
+	}
+
+	// newly deleted → soft-delete in ariane
+	for(std::unordered_set<std::string>::iterator it = target.begin(); it != target.end(); ++it){
+		if(gBridgeDeleted.count(*it)) continue;
+		ObjectInst *in = FindInstByGuid(it->c_str());
+		if(in){ in->Delete(); gBridgeDeleted.insert(*it); }
+	}
+	// dropped off the list (undo) → restore
+	for(std::unordered_set<std::string>::iterator it = gBridgeDeleted.begin(); it != gBridgeDeleted.end(); ){
+		if(target.count(*it)){ ++it; continue; }
+		ObjectInst *in = FindInstByGuid(it->c_str());
+		if(in) in->Undelete();
+		it = gBridgeDeleted.erase(it);
+	}
+}
+
 // Copy outbox\<name>.<ext> into ariane's persistent overrides store and delete
 // the outbox transient, so the hot outbox folder never accumulates. `dst` gets
 // the path to register the override against (the persistent copy, or the outbox
@@ -3268,10 +3879,11 @@ ProcessReverseLine(const char *rawline)
 		return;
 	}
 
-	char line[512];
+	char line[1024];
 	strncpy(line, rawline, sizeof(line)-1); line[sizeof(line)-1] = '\0';
 
 	char name[64] = "";
+	char guid[300] = "";
 	int iid = -1, hasTxd = 0, hasX = 0, posOnly = 0, wantDff = 1, hasCol = 0;
 	float x=0, y=0, z=0, qx=0, qy=0, qz=0, qw=1;
 
@@ -3283,15 +3895,16 @@ ProcessReverseLine(const char *rawline)
 	for(char *p = tab; p; ){
 		p++;
 		char *nxt = strchr(p, '\t');
-		char kv[128];
+		char kv[320];
 		int kl = nxt ? (int)(nxt-p) : (int)strlen(p);
-		if(kl > 127) kl = 127;
+		if(kl > 319) kl = 319;
 		strncpy(kv, p, kl); kv[kl] = '\0';
 		char *eq = strchr(kv, '=');
 		if(eq){
 			*eq = '\0';
 			const char *k = kv, *v = eq+1;
 			if(strcmp(k,"iid")==0) iid = atoi(v);
+			else if(strcmp(k,"guid")==0){ strncpy(guid, v, sizeof(guid)-1); guid[sizeof(guid)-1]='\0'; }
 			else if(strcmp(k,"pos")==0) posOnly = atoi(v);
 			else if(strcmp(k,"dff")==0) wantDff = atoi(v);
 			else if(strcmp(k,"col")==0) hasCol = atoi(v);
@@ -3352,8 +3965,12 @@ ProcessReverseLine(const char *rawline)
 		ForceColReloadFromFile(cov);
 	}
 
-	if(hasX && iid >= 0){
-		ObjectInst *in = FindInstByPickId(iid);
+	bool moved = false;
+	if(hasX && (guid[0] || iid >= 0)){
+		// Prefer the stable GUID (survives ariane restart); fall back to the
+		// session pick-id for older jobs that didn't carry one.
+		ObjectInst *in = guid[0] ? FindInstByGuid(guid) : nil;
+		if(in == nil && iid >= 0) in = FindInstByPickId(iid);
 		if(in){
 			// Mirror the editor's own move (applyUndoTransform): without the sector
 			// refresh + rwObject-frame update the pivot moves but the mesh stays put
@@ -3367,12 +3984,13 @@ ProcessReverseLine(const char *rawline)
 			updateRwFrameForInst(in);
 			InsertInstIntoSectors(in);
 			gReverseMoved++;
+			moved = true;
 		}
 	}
 	gReverseOk++;
 	log("BlenderBridge: %s (id %d)%s%s%s%s\n", name, id,
 		wantDff ? " +dff" : "", hasTxd ? " +txd" : "", hasCol ? " +col" : "",
-		(hasX && iid>=0) ? " +pos" : "");
+		moved ? " +pos" : "");
 }
 
 // Reverse bridge: Blender's "-> Ariane" writes edited DFF(+TXD) to the outbox and
@@ -3438,8 +4056,9 @@ PollBlenderOutbox(void)
 		if(!gReverseFailed.empty() && al < (int)sizeof(ack)-1)
 			al += snprintf(ack+al, sizeof(ack)-al, "failed=%s\n", gReverseFailed.c_str());
 		WriteBufferToPath(donePath, (const uint8*)ack, (int)strlen(ack));
-		if(gReverseMoved > 0)
-			gBridgeAutoSaveRequest = true;	// persist moved instances to IPL (gui saves)
+			// Reverse position is VISUAL ONLY: instances move and are marked
+			// dirty (m_isDirty), but the IPL is NOT auto-saved — the user saves
+			// in ariane when they choose to persist.
 		gReversePending.clear();
 		gReverseIdx = 0;
 	}
