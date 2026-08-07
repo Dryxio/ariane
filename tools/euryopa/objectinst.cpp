@@ -3298,6 +3298,40 @@ bridgeArianeFocused(void)
 	return pid == GetCurrentProcessId();
 }
 
+// A model/LOD name arriving from Blender gets joined into filesystem paths — both the
+// bridge outbox we read and the game install we write (models/gta3.img, cols/…). Refuse
+// anything that could escape a directory or is otherwise not a plain asset name, rather
+// than silently rewriting it (which would desync from the file Blender actually wrote).
+// Legit GTA model names are a short [A-Za-z0-9_-] token, so this rejects nothing real.
+static bool
+isSafeBridgeName(const char *s)
+{
+	if(s == nil || s[0] == '\0')
+		return false;
+	size_t n = 0;
+	for(const char *p = s; *p; p++, n++){
+		char c = *p;
+		bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+		          (c >= '0' && c <= '9') || c == '_' || c == '-';
+		if(!ok)			// blocks '.', '/', '\\', ':', spaces, NUL-adjacent tricks, etc.
+			return false;
+	}
+	return n <= 63;			// fits the name[64] buffers (with room for the terminator)
+}
+
+// Replace dst with tmp in one step. Windows rename() fails when dst already exists, so
+// the bridge used remove()+rename(), which leaves a window where dst is missing and a
+// reader can momentarily get "file not found". MoveFileEx(REPLACE_EXISTING) swaps in a
+// single atomic operation; fall back to the old two-step only if that ever fails.
+static bool
+atomicReplaceFile(const char *tmp, const char *dst)
+{
+	if(MoveFileExA(tmp, dst, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+		return true;
+	remove(dst);
+	return rename(tmp, dst) == 0;
+}
+
 void
 WriteArianeLiveState(void)
 {
@@ -3327,7 +3361,7 @@ WriteArianeLiveState(void)
 				EnsureParentDirectoriesForPath(cpath);
 				snprintf(ctmp, sizeof(ctmp), "%s.tmp", cpath);
 				FILE *cf = fopen(ctmp, "wb");
-				if(cf){ fwrite(cbuf, 1, cn, cf); fclose(cf); remove(cpath); rename(ctmp, cpath); }
+				if(cf){ fwrite(cbuf, 1, cn, cf); fclose(cf); atomicReplaceFile(ctmp, cpath); }
 			}
 		}
 	}
@@ -3366,8 +3400,7 @@ WriteArianeLiveState(void)
 		return;
 	fwrite(body.data(), 1, body.size(), f);
 	fclose(f);
-	remove(path);
-	rename(tmp, path);		// atomic-ish replace
+	atomicReplaceFile(tmp, path);		// single-step replace (no missing-file window)
 }
 
 // Phase D live sync (Blender → ariane): apply the addon's live moves to instances
@@ -3653,6 +3686,11 @@ PollBlenderCreate(void)
 		}
 		if(name[0] == '\0')
 			continue;
+		if(!isSafeBridgeName(name)){		// untrusted name → don't let it reach any path/lookup
+			done += key; done += "\tERR\n";
+			log("BlenderBridge: rejected unsafe create name \"%s\"\n", name);
+			continue;
+		}
 		rw::V3d pos3 = { x, y, z };
 		rw::Quat rot; rot.x = qx; rot.y = qy; rot.z = qz; rot.w = qw;
 		char guid[300] = "";
@@ -3739,6 +3777,13 @@ PollBlenderCreateModel(void)
 		}
 		if(name[0] == '\0')
 			continue;
+		// name/lodName are joined into outbox reads AND game-install writes below — refuse
+		// anything that could escape a directory instead of trusting Blender's string.
+		if(!isSafeBridgeName(name) || (hasLod && lodName[0] && !isSafeBridgeName(lodName))){
+			done += key; done += "\tERR:invalid model name\n";
+			log("BlenderBridge: rejected unsafe createmodel name \"%s\" / lod \"%s\"\n", name, lodName);
+			continue;
+		}
 		char dffP[1200], txdP[1200], colP[1200], lodDffP[1200], lodTxdP[1200];
 		snprintf(dffP, sizeof(dffP), "%s\\%s.dff", outbox, name);
 		snprintf(txdP, sizeof(txdP), "%s\\%s.txd", outbox, name);
@@ -3921,6 +3966,11 @@ ProcessReverseLine(const char *rawline)
 	}
 	if(name[0] == '\0')
 		return;
+	if(!isSafeBridgeName(name)){		// name feeds StashBridgeOverride's paths below
+		log("BlenderBridge: rejected unsafe reload name \"%s\"\n", name);
+		gReverseErr++;
+		return;
+	}
 
 	int id = -1;
 	if(!GetObjectDef(name, &id)){
