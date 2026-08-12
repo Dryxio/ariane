@@ -3628,12 +3628,37 @@ PollBlenderCamIn(void)
 	// SNAP straight to Blender's camera. Interpolating eye/target flips near the
 	// vertical poles ("looks like the camera is swinging to the other side") and
 	// can't keep up with a fast rotation — so match Blender exactly instead.
-	TheCamera.m_position.x = (float)atof(sx);
-	TheCamera.m_position.y = (float)atof(sy);
-	TheCamera.m_position.z = (float)atof(sz);
-	TheCamera.m_target.x = (float)atof(tx);
-	TheCamera.m_target.y = (float)atof(ty);
-	TheCamera.m_target.z = (float)atof(tz);
+	rw::V3d pos, tgt;
+	pos.x = (float)atof(sx); pos.y = (float)atof(sy); pos.z = (float)atof(sz);
+	tgt.x = (float)atof(tx); tgt.y = (float)atof(ty); tgt.z = (float)atof(tz);
+	if(!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(pos.z) ||
+	   !std::isfinite(tgt.x) || !std::isfinite(tgt.y) || !std::isfinite(tgt.z))
+		return;					// garbage/partial read → never feed NaN to the matrix
+
+	// Never let the view sit EXACTLY vertical. lookAt(dir, (0,0,±1)) is degenerate when
+	// dir ∥ up: right = dir×up = 0 → normalize(0) = NaN → NaN view matrix → CRASH on the
+	// next render. Blender's Ctrl+wheel snap to top/bottom lands exactly there, so nudge
+	// the target ~0.36° off the pole (imperceptible; ariane's own camera never lands there).
+	{
+		rw::V3d d = rw::sub(tgt, pos);
+		float len = rw::length(d);
+		if(len > 1e-4f){
+			float nz = d.z/len;
+			const float LIM = 0.99998f;			// cos(~0.36°)
+			if(nz > LIM || nz < -LIM){
+				float horiz = sqrtf(1.0f - LIM*LIM);	// ~0.0063
+				float hl = sqrtf(d.x*d.x + d.y*d.y);
+				float hx = 1.0f, hy = 0.0f;
+				if(hl > 1e-6f){ hx = d.x/hl; hy = d.y/hl; }	// keep the azimuth
+				d.x = hx*horiz*len;
+				d.y = hy*horiz*len;
+				d.z = (nz > 0.0f ? LIM : -LIM)*len;
+				tgt = rw::add(pos, d);
+			}
+		}
+	}
+	TheCamera.m_position = pos;
+	TheCamera.m_target = tgt;
 
 	// ariane's camera is roll-free by design: m_up must stay (0,0,±1) — turn()/orbit()
 	// only ever fix m_up.z, so any x/y we put here would tilt the horizon forever.
