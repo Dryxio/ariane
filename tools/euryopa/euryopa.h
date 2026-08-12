@@ -478,7 +478,7 @@ const char *GetPrefabPlacePath(void);
 void RenderPrefabPlacementGhost(const char *path, rw::V3d spawnPos);
 int ExportSelectedDffs(const char *dir, int *numFailed);
 int ExportSelectedTxds(const char *dir, int *numFailed);
-int ExportSelectedToBlender(bool autoTxd, bool vanilla, bool ide, bool ipl, bool lodToo, bool colToo, int *numFailed);	// -> INU_ariane_bridge\inbox
+int ExportSelectedToBlender(bool autoTxd, bool vanilla, bool ide, bool ipl, bool lodToo, bool colToo, bool hdToo, int *numFailed);	// -> INU_ariane_bridge\inbox
 void PollBlenderOutbox(void);	// <- Blender edits: hot-reload DFF/TXD + move instance
 void WriteArianeLiveState(void);	// -> live position sync (selected instances) for Blender
 void PollBlenderLiveIn(void);		// <- live moves from Blender (when not dragging here)

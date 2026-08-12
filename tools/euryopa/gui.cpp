@@ -7428,25 +7428,50 @@ uiInstWindow(void)
 			}
 		}
 		ImGui::SameLine();
-		static bool blAutoTxd = true, blVanilla = true, blIde = true, blIpl = true, blLod = true, blCol = false;
+		static bool blAutoTxd = true, blVanilla = true, blIde = true, blIpl = true, blLod = true, blCol = false, blHd = true;
 		if(ImGui::Button("Export to Blender")){
 			int failed = 0;
-			int exported = ExportSelectedToBlender(blAutoTxd, blVanilla, blIde, blIpl, blLod, blCol, &failed);
-			if(exported > 0)
-				Toast(TOAST_SAVE, "Sent %d model(s) to Blender%s", exported,
-				      failed > 0 ? " (some skipped)" : "");
+			int placed = ExportSelectedToBlender(blAutoTxd, blVanilla, blIde, blIpl, blLod, blCol, blHd, &failed);
+			if(placed > 0)
+				Toast(TOAST_SAVE, "Sent %d object(s) to Blender%s", placed,
+				      failed > 0 ? " (some failed — see log)" : "");
 			else
 				Toast(TOAST_SAVE, "Failed to send to Blender");
 		}
 		if(ImGui::IsItemHovered())
-			ImGui::SetTooltip("DFF (+LOD, +TXD) -> INU_ariane_bridge inbox; INU_Tools watcher imports it into the running Blender");
+			ImGui::SetTooltip("Send the selected instance(s) to a running Blender (INU_Tools).\n"
+				"Writes the DFF (+ the options below) into the bridge inbox; the addon's\n"
+				"watcher auto-imports and places them. Re-exporting the same instance\n"
+				"won't create a duplicate.");
 		ImGui::TextDisabled("Blender:"); ImGui::SameLine();
-		ImGui::Checkbox("Auto TXD", &blAutoTxd); ImGui::SameLine();
-		ImGui::Checkbox("Vanilla", &blVanilla); ImGui::SameLine();
-		ImGui::Checkbox("IDE", &blIde); ImGui::SameLine();
-		ImGui::Checkbox("IPL", &blIpl); ImGui::SameLine();
-		ImGui::Checkbox("LOD", &blLod); ImGui::SameLine();
+		ImGui::Checkbox("Auto TXD", &blAutoTxd);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Also send the model's textures (TXD) so it isn't untextured/grey in Blender.");
+		ImGui::SameLine();
+		ImGui::Checkbox("Vanilla", &blVanilla);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Vanilla import (no alpha/fence linking).\nOff = keep custom alpha materials / fences on import.");
+		ImGui::SameLine();
+		ImGui::Checkbox("IDE", &blIde);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Send the IDE data (model id, draw distance, TXD name) so Blender\nknows the object's setup.");
+		ImGui::SameLine();
+		ImGui::Checkbox("IPL", &blIpl);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Place each object at its world position/rotation (from the IPL).\nOff = import everything at the origin.");
+		ImGui::SameLine();
+		ImGui::Checkbox("HD", &blHd);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("If a selected model is a LOD (LOD<name>), also send its high-detail\n"
+				"model — so exporting a distant LOD brings the real one along too.");
+		ImGui::SameLine();
+		ImGui::Checkbox("LOD", &blLod);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Also send the low-detail LOD model (LOD<name>) when the object has one.");
+		ImGui::SameLine();
 		ImGui::Checkbox("COL", &blCol);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Also send the collision mesh (.col) next to the model.");
 		if(haveExportDir)
 			ImGui::TextDisabled("%s", exportDir);
 		ImGui::Separator();

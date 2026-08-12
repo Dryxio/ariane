@@ -3136,7 +3136,7 @@ AppendBlenderMetaLine(char *body, int *blen, int cap, ObjectDef *obj, TxdDef *tx
 }
 
 int
-ExportSelectedToBlender(bool autoTxd, bool vanilla, bool ide, bool ipl, bool lodToo, bool colToo, int *numFailed)
+ExportSelectedToBlender(bool autoTxd, bool vanilla, bool ide, bool ipl, bool lodToo, bool colToo, bool hdToo, int *numFailed)
 {
 	int exported = 0, failed = 0;
 	char inbox[1024];
@@ -3152,56 +3152,161 @@ ExportSelectedToBlender(bool autoTxd, bool vanilla, bool ide, bool ipl, bool lod
 		"#flags auto_txd=%d vanilla=%d ide=%d ipl=%d\n",
 		autoTxd?1:0, vanilla?1:0, ide?1:0, ipl?1:0);
 
+	// Export each model's .dff/.txd/.col ONCE, but emit a placement (meta) line for EVERY
+	// selected instance — GTA3 land/roads reuse the same model many times, and the old
+	// dedup skipped the whole instance (so only the first placement reached Blender).
+	std::unordered_set<std::string> exportedModels;
+	int placed = 0;
 	for(CPtrNode *p = selection.first; p; p = p->next){
 		ObjectInst *inst = (ObjectInst*)p->item;
 		if(inst == nil || inst->m_isDeleted)
 			continue;
 		ObjectDef *obj = GetObjectDef(inst->m_objectId);
 		if(obj == nil || obj->m_name[0] == '\0'){ failed++; continue; }
-		if(HasEarlierSelectedModel(p, obj->m_name))
-			continue;
 
-		char path[1024];
-		if(!BuildAssetExportPath(inbox, obj->m_name, "dff", path, sizeof(path)) ||
-		   !ExportEffectiveAsset(obj->m_name, "dff", obj->m_imageIndex, path)){
-			log("ExportSelectedToBlender: failed to export %s\n", obj->m_name);
-			failed++;
-			continue;
-		}
-		exported++;
-
-		// texture dictionary named after the model → INU auto-TXD (same-name) matches
 		TxdDef *txd = GetTxdDef(obj->m_txdSlot);
-		if(autoTxd && txd && txd->name[0] &&
-		   BuildAssetExportPath(inbox, obj->m_name, "txd", path, sizeof(path)))
-			ExportEffectiveAsset(txd->name, "txd", txd->imageIndex, path);
+		char path[1024];
 
-		// collision (rebuilt from the model's live CColModel) → INU imports the .col
-		if(colToo && BuildAssetExportPath(inbox, obj->m_name, "col", path, sizeof(path)))
-			ExportColForModel(obj, path);
+		if(exportedModels.find(obj->m_name) == exportedModels.end()){
+			if(!BuildAssetExportPath(inbox, obj->m_name, "dff", path, sizeof(path)) ||
+			   !ExportEffectiveAsset(obj->m_name, "dff", obj->m_imageIndex, path)){
+				log("ExportSelectedToBlender: failed to export %s\n", obj->m_name);
+				failed++;
+				continue;			// model file unavailable → can't place it
+			}
+			exportedModels.insert(obj->m_name);
+			exported++;
 
+			// texture dictionary named after the model → INU auto-TXD (same-name) matches
+			if(autoTxd && txd && txd->name[0] &&
+			   BuildAssetExportPath(inbox, obj->m_name, "txd", path, sizeof(path)))
+				ExportEffectiveAsset(txd->name, "txd", txd->imageIndex, path);
+
+			// collision (rebuilt from the model's live CColModel) → INU imports the .col
+			if(colToo && BuildAssetExportPath(inbox, obj->m_name, "col", path, sizeof(path)))
+				ExportColForModel(obj, path);
+		}
+
+		// placement for THIS instance (always — that's what was missing before)
 		AppendBlenderMetaLine(body, &blen, (int)sizeof(body), obj, txd, inst, true);
+		placed++;
 
-		// LOD — only if requested and the model actually has one (LOD<name> defined)
-		char lodName[MODELNAMELEN+8];
-		snprintf(lodName, sizeof(lodName), "LOD%s", obj->m_name);
-		int lodId = -1;
+		// LOD — this model's low-detail companion. SA: inst->m_lod (per-instance IPL link).
+		// III/VC: obj->m_relatedModel, the HD↔LOD pairing euryopa builds at load (drawDist
+		// > LODDISTANCE marks the LOD a big building; FindRelatedObject links it to the HD
+		// by matching the name past the 3-char prefix, e.g. doc_shedbig13 ↔ LOD_shedbig13).
 		ObjectDef *lod = nil;
-		if(lodToo && GetObjectDef(lodName, &lodId))
-			lod = GetObjectDef(lodId);
-		if(lod && lod->m_name[0]){
-			if(BuildAssetExportPath(inbox, lod->m_name, "dff", path, sizeof(path)) &&
+		if(lodToo){
+			if(inst->m_lod && !inst->m_lod->m_isDeleted)		// SA lod link
+				lod = GetObjectDef(inst->m_lod->m_objectId);
+			if(lod == nil && obj->m_relatedModel && obj->m_relatedModel->m_isBigBuilding)
+				lod = obj->m_relatedModel;			// III/VC: related big-building = LOD
+		}
+		if(lod && lod->m_name[0] && lod != obj){
+			TxdDef *ltxd = GetTxdDef(lod->m_txdSlot);
+			bool haveLod = exportedModels.find(lod->m_name) != exportedModels.end();
+			if(!haveLod &&
+			   BuildAssetExportPath(inbox, lod->m_name, "dff", path, sizeof(path)) &&
 			   ExportEffectiveAsset(lod->m_name, "dff", lod->m_imageIndex, path)){
-				TxdDef *ltxd = GetTxdDef(lod->m_txdSlot);
+				exportedModels.insert(lod->m_name);
 				if(autoTxd && ltxd && ltxd->name[0] &&
 				   BuildAssetExportPath(inbox, lod->m_name, "txd", path, sizeof(path)))
 					ExportEffectiveAsset(ltxd->name, "txd", ltxd->imageIndex, path);
+				haveLod = true;
+			}
+			if(haveLod)
 				AppendBlenderMetaLine(body, &blen, (int)sizeof(body), lod, ltxd, inst, false);
+		}
+
+		// HD companion — if requested, also pull the high-detail model this LOD stands in
+		// for. SA: HD instances whose m_lod points here (one LOD can serve many, each sent
+		// at its own transform+guid). III/VC: obj->m_relatedModel (the HD↔LOD pairing built
+		// at load), placed at this LOD instance's transform (they share a spot).
+		if(hdToo){
+			int linked = 0;
+			for(CPtrNode *q = instances.first; q; q = q->next){		// SA: instances using this LOD
+				ObjectInst *hi = (ObjectInst*)q->item;
+				if(hi == nil || hi->m_isDeleted || hi->m_lod != inst)
+					continue;
+				ObjectDef *hd = GetObjectDef(hi->m_objectId);
+				if(hd == nil || hd->m_name[0] == '\0')
+					continue;
+				linked++;
+				TxdDef *htxd = GetTxdDef(hd->m_txdSlot);
+				if(exportedModels.find(hd->m_name) == exportedModels.end()){
+					if(!BuildAssetExportPath(inbox, hd->m_name, "dff", path, sizeof(path)) ||
+					   !ExportEffectiveAsset(hd->m_name, "dff", hd->m_imageIndex, path)){
+						log("ExportSelectedToBlender: failed to export HD %s\n", hd->m_name);
+						failed++;
+						continue;
+					}
+					exportedModels.insert(hd->m_name);
+					exported++;
+					if(autoTxd && htxd && htxd->name[0] &&
+					   BuildAssetExportPath(inbox, hd->m_name, "txd", path, sizeof(path)))
+						ExportEffectiveAsset(htxd->name, "txd", htxd->imageIndex, path);
+					if(colToo && BuildAssetExportPath(inbox, hd->m_name, "col", path, sizeof(path)))
+						ExportColForModel(hd, path);
+				}
+				AppendBlenderMetaLine(body, &blen, (int)sizeof(body), hd, htxd, hi, true);
+				placed++;
+			}
+			// III/VC: this (big-building) LOD's related HD model, at this instance's spot
+			if(linked == 0 && obj->m_isBigBuilding && obj->m_relatedModel &&
+			   obj->m_relatedModel != obj){
+				ObjectDef *hd = obj->m_relatedModel;
+				if(hd->m_name[0]){
+					TxdDef *htxd = GetTxdDef(hd->m_txdSlot);
+					bool haveHd = exportedModels.find(hd->m_name) != exportedModels.end();
+					if(!haveHd &&
+					   BuildAssetExportPath(inbox, hd->m_name, "dff", path, sizeof(path)) &&
+					   ExportEffectiveAsset(hd->m_name, "dff", hd->m_imageIndex, path)){
+						exportedModels.insert(hd->m_name);
+						if(autoTxd && htxd && htxd->name[0] &&
+						   BuildAssetExportPath(inbox, hd->m_name, "txd", path, sizeof(path)))
+							ExportEffectiveAsset(htxd->name, "txd", htxd->imageIndex, path);
+						if(colToo && BuildAssetExportPath(inbox, hd->m_name, "col", path, sizeof(path)))
+							ExportColForModel(hd, path);
+						haveHd = true;
+					}
+					if(haveHd){
+						AppendBlenderMetaLine(body, &blen, (int)sizeof(body), hd, htxd, inst, false);
+						placed++;
+					}
+				}
 			}
 		}
 	}
 
-	if(exported > 0){
+	(void)exported;
+
+	// DEBUG dump (persistent, outside the inbox so the addon never eats it): what was
+	// selected (name / lodId / m_lod link) + the job body. Read <game>\ariane\bridge\lastexport.txt
+	{
+		std::string dbg = "hdToo="; dbg += (hdToo?"1":"0"); dbg += "  selection:\n";
+		char lb[300];
+		for(CPtrNode *p = selection.first; p; p = p->next){
+			ObjectInst *si = (ObjectInst*)p->item;
+			if(si == nil) continue;
+			ObjectDef *so = GetObjectDef(si->m_objectId);
+			// count HD instances that point to this one as their LOD
+			int hdlinks = 0;
+			for(CPtrNode *q = instances.first; q; q = q->next){
+				ObjectInst *hi = (ObjectInst*)q->item;
+				if(hi && hi->m_lod == si) hdlinks++;
+			}
+			snprintf(lb, sizeof(lb), "  name=%s objId=%d lodId=%d hasLod=%d bigBld=%d related=%s HDsHere=%d\n",
+				so?so->m_name:"?", si->m_objectId, si->m_lodId, si->m_lod?1:0,
+				so?so->m_isBigBuilding:0, (so&&so->m_relatedModel)?so->m_relatedModel->m_name:"-", hdlinks);
+			dbg += lb;
+		}
+		dbg += "----- job body -----\n"; dbg += body;
+		char dp[1024];
+		if(GetArianeDataPath(dp, sizeof(dp), "bridge\\lastexport.txt"))
+			WriteBufferToPath(dp, (const uint8*)dbg.data(), (int)dbg.size());
+	}
+
+	if(placed > 0){
 		static int jobCounter = 0;
 		char jobPath[1024];
 		snprintf(jobPath, sizeof(jobPath), "%s\\job_%u_%d.job", inbox,
@@ -3219,7 +3324,7 @@ ExportSelectedToBlender(bool autoTxd, bool vanilla, bool ide, bool ipl, bool lod
 
 	if(numFailed)
 		*numFailed = failed;
-	return exported;
+	return placed;
 }
 
 static ObjectInst*
