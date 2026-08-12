@@ -443,7 +443,12 @@ LoadTXDParent(char *line)
 
 
 static std::vector<ObjectInst*> tmpInsts;
-static int iplInstCounter;  // tracks instance index within current IPL file
+static int iplInstCounter;  // tracks instance index within current IPL file (+ its streams)
+
+// One running index across a map's text IPL AND all its streamed binary sections, so the
+// bridge guid (<ipl>#<index>) stays unique — the streamed loader (iplstore.cpp) shares the
+// same filter key, so a per-section index collided (LAw2_stream0#60 == LAw2_stream1#60).
+int NextIplInstIndex(void) { return iplInstCounter++; }
 
 void
 LoadObjectInstance(char *line)

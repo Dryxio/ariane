@@ -1091,6 +1091,7 @@ char *LoadLine(FILE *f);
 void LoadLevel(const char *filename);
 void LoadObjectTypes(const char *filename);
 void LoadScene(const char *filename, bool loadRelatedStreaming = true);
+int NextIplInstIndex(void);	// running instance index across a map's text IPL + its streams
 int GetLoadedSceneCount(void);
 const char *GetLoadedScenePath(int index);
 void LoadCollisionFile(const char *path);
