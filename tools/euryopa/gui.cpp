@@ -2611,12 +2611,23 @@ pickFileDialog(char *dst, size_t size, const char *expectedExt)
 
 #ifdef _WIN32
 	char filename[MAX_PATH] = "";
+	char previousDirectory[2048];
+	DWORD previousDirectoryLen = GetCurrentDirectoryA(
+		(DWORD)sizeof(previousDirectory), previousDirectory);
+	bool restoreDirectory = previousDirectoryLen > 0 &&
+		previousDirectoryLen < sizeof(previousDirectory);
 	OPENFILENAMEA ofn = {};
 	ofn.lStructSize = sizeof(ofn);
 	ofn.lpstrFile = filename;
 	ofn.nMaxFile = sizeof(filename);
-	ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
-	if(!GetOpenFileNameA(&ofn))
+	ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+	BOOL picked = GetOpenFileNameA(&ofn);
+	// Keep the process environment stable even on dialog implementations that
+	// ignore OFN_NOCHANGEDIR. Rooted exports no longer depend on cwd, but other
+	// legacy relative-path callers still do.
+	if(restoreDirectory)
+		SetCurrentDirectoryA(previousDirectory);
+	if(!picked)
 		return false;
 	strncpy(dst, filename, size-1);
 	dst[size-1] = '\0';

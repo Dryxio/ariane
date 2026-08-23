@@ -250,8 +250,11 @@ GetGameRootDirectory(char *dir, size_t size)
 		return false;
 
 #ifdef _WIN32
-	DWORD len = GetCurrentDirectoryA((DWORD)size, dir);
-	return len > 0 && len < size;
+	// The process working directory is mutable (notably across native file
+	// dialogs), so it is not a stable game-root identity on Windows. Ariane's
+	// supported layout places the editor executable in the game directory; use
+	// that immutable location for Mod Loader exports and all other rooted paths.
+	return GetEditorRootDirectory(dir, size);
 #else
 	if(getcwd(dir, size) == nil)
 		return false;
@@ -634,7 +637,7 @@ Init(void)
 	static char windowTitle[256];
 	static bool saveHookRegistered;
 	snprintf(windowTitle, sizeof(windowTitle),
-		"Ariane %s [%s] - Map Editor (GTA III, VC, SA)",
+		"Ariane %s [%s] - Map Editor (GTA III, VC, SA) by Dryxio",
 		ARIANE_VERSION, ARIANE_CHANNEL_DISPLAY);
 	sk::globals.windowtitle = windowTitle;
 	sk::globals.width = 1280;
