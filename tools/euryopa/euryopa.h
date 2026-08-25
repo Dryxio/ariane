@@ -478,6 +478,22 @@ const char *GetPrefabPlacePath(void);
 void RenderPrefabPlacementGhost(const char *path, rw::V3d spawnPos);
 int ExportSelectedDffs(const char *dir, int *numFailed);
 int ExportSelectedTxds(const char *dir, int *numFailed);
+int ExportSelectedToBlender(bool autoTxd, bool vanilla, bool ide, bool ipl, bool lodToo, bool colToo, bool hdToo, int *numFailed);	// -> INU_ariane_bridge\inbox
+void PollBlenderOutbox(void);	// <- Blender edits: hot-reload DFF/TXD + move instance
+void WriteArianeLiveState(void);	// -> live position sync (selected instances) for Blender
+void PollBlenderLiveIn(void);		// <- live moves from Blender (when not dragging here)
+void PollBlenderCamIn(void);		// <- live camera from Blender (when not navigating here)
+void PollBlenderSelIn(void);		// <- live selection from Blender (when not selecting here)
+void PollBlenderCreate(void);		// <- create.job: new instances of existing models
+void PollBlenderCreateModel(void);	// <- createmodel.job: brand-new models (E-2)
+void PollBlenderDeletes(void);		// <- del_blender.txt: soft-delete/restore instances
+bool CreateBridgeInstance(const char *name, rw::V3d pos, rw::Quat rot, char *guidOut, int guidSz);
+bool CreateBridgeModel(const char *name, const char *dffPath, const char *txdPath, const char *colPath,
+	const char *lodName, const char *lodDffPath, const char *lodTxdPath,
+	float drawDist, rw::V3d pos, rw::Quat rot, char *guidOut, int guidSz, char *errOut, int errSz);
+void MoveInstanceTo(ObjectInst *inst, rw::V3d pos, rw::Quat rot);
+void GetInstGuid(ObjectInst *inst, char *buf, int sz);	// stable cross-session instance id for the bridge
+ObjectInst *FindInstByGuid(const char *guid);
 
 // Toast notifications
 enum ToastCategory {
@@ -580,6 +596,7 @@ void TxdPop(void);
 bool IsTxdLoaded(int i);
 void CreateTxd(int i);
 void LoadTxd(int i);
+void ForceTxdReload(int i);	// free a slot's dict so Load() re-reads it (Blender live-reload)
 void LoadTxd(int i, const char *path);
 void TxdMakeCurrent(int i);
 void TxdSetParent(const char *child, const char *parent);
@@ -602,6 +619,7 @@ ColDef *GetColDef(int i);
 int AddColSlot(const char *name);
 void LoadCol(int slot);
 void LoadAllCollisions(void);
+void ForceColReloadFromFile(const char *path);	// Blender bridge: reload collision from a loose .col
 
 // One class for all map objects
 struct ObjectDef
@@ -680,6 +698,7 @@ struct ObjectDef
 	void LoadAtomic(void);
 	void LoadClump(void);
 	void Load(void);
+	void Reload(void);	// free current geometry + Load() again (Blender live-reload)
 	void SetAtomic(int n, rw::Atomic *atomic);
 	void SetClump(rw::Clump *clump);
 	void CantLoad(void);
@@ -691,6 +710,7 @@ void RemoveObjectDef(int id);
 ObjectDef *GetObjectDef(int id);
 ObjectDef *GetObjectDef(const char *name, int *id);
 bool CreateObjectPreviewRwObject(int id, rw::Atomic **atomicOut, rw::Clump **clumpOut);
+bool ExportColForModel(ObjectDef *obj, const char *path);	// Blender bridge: model's collision -> loose .col
 
 
 struct FileObjectInstance
@@ -1071,6 +1091,7 @@ char *LoadLine(FILE *f);
 void LoadLevel(const char *filename);
 void LoadObjectTypes(const char *filename);
 void LoadScene(const char *filename, bool loadRelatedStreaming = true);
+int NextIplInstIndex(void);	// running instance index across a map's text IPL + its streams
 int GetLoadedSceneCount(void);
 const char *GetLoadedScenePath(int index);
 void LoadCollisionFile(const char *path);

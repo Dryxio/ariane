@@ -134,6 +134,14 @@ struct CColModel
 	uint8 allocFlag;
 	uint8 *rawdata;
 
+	// Blender bridge: keep the version header (0x4C/0x58/0x5C bytes) inline and the
+	// data size, so ExportColForModel can rebuild an exact .col (header + rawdata)
+	// without reconstructing offsets. colVersion 0 = not captured / unsupported (v1).
+	uint8 colHeader[0x5C];
+	uint8 colHeaderSize;
+	uint8 colVersion;
+	int32 rawdataSize;
+
 	char name[24];
 	GameFile *file;
 

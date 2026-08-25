@@ -3777,6 +3777,74 @@ spawnCustomImportedObject(int objectId)
 	return true;
 }
 
+// Blender bridge (Phase E-1): create a new instance of an EXISTING model at a given
+// transform and add it to the active IPL document (m_isAdded, persisted on save).
+// Mirrors spawnCustomImportedObject but takes an explicit name + transform and does
+// NOT hijack the selection. Returns the new instance's stable guid.
+bool
+CreateBridgeInstance(const char *name, rw::V3d pos, rw::Quat rot, char *guidOut, int guidSz)
+{
+	if(guidOut && guidSz > 0) guidOut[0] = '\0';
+	int objectId = -1;
+	ObjectDef *obj = GetObjectDef(name, &objectId);
+	if(obj == nil || objectId < 0)
+		return false;
+
+	GameFile *file = IsIplMapDocumentOpen() ?
+		GetOrCreateCurrentPlacementIplFile() :
+		getOrCreateCustomImportGameFile(&gCustomImportIplFile, CUSTOM_IMPORT_IPL_LOGICAL_PATH);
+	int maxIplIndex = -1;
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *other = (ObjectInst*)p->item;
+		if(other->m_file && file &&
+		   LogicalPathEquals(other->m_file->name, file->name) &&
+		   other->m_imageIndex < 0 && other->m_iplIndex > maxIplIndex)
+			maxIplIndex = other->m_iplIndex;
+	}
+
+	ObjectInst *inst = AddInstance();
+	inst->m_objectId = objectId;
+	inst->m_area = currentArea;
+	inst->m_rotation = rot;
+	inst->m_translation = pos;
+	inst->m_lodId = -1;
+	inst->m_lod = nil;
+	inst->m_numChildren = 0;
+	inst->m_file = file;
+	inst->m_imageIndex = -1;
+	inst->m_binInstIndex = -1;
+	inst->m_iplIndex = maxIplIndex + 1;
+	SetInstIplFilterKey(inst, file ? file->name : nil);
+	inst->m_isAdded = true;
+	inst->m_isDirty = true;
+	inst->m_savedStateValid = false;
+	inst->m_wasSavedDeleted = false;
+	inst->m_gameEntityExists = false;
+	StampChangeSeq(inst);
+
+	if(obj->m_isBigBuilding)
+		inst->SetupBigBuilding();
+	inst->UpdateMatrix();
+	if(!obj->IsLoaded()){
+		RequestObject(objectId);
+		LoadAllRequestedObjects();
+	}
+	inst->CreateRwObject();
+	if(obj->m_colModel)
+		InsertInstIntoSectors(inst);
+	else{
+		CPtrList *list = inst->m_isBigBuilding
+			? &outOfBoundsSector.bigbuildings : &outOfBoundsSector.buildings;
+		list->InsertItem(inst);
+	}
+
+	ObjectInst *pasted[1] = { inst };
+	UndoRecordPaste(pasted, 1);
+	if(guidOut && guidSz > 0)
+		GetInstGuid(inst, guidOut, guidSz);
+	return true;
+}
+
 void
 HandleCustomImportDrop(const char *path)
 {
@@ -4483,6 +4551,81 @@ finalizeCustomImport(void)
 	else
 		Toast(TOAST_SPAWN, "Imported %s (%d)", gCustomImport.modelName, gCustomImport.objectId);
 	gCustomImport.active = false;
+	return true;
+}
+
+// Register one model via ariane's custom-import backend (free ID, loose export into
+// Mod Loader, custom.ide/ipl + manifest, real or auto COL) and return the instance
+// it spawns+selects.
+static bool
+bridgeRegisterAndSpawn(const char *name, const char *dffPath, const char *txdPath, const char *colPath,
+	float drawDist, ObjectInst **outInst, char *errOut, int errSz)
+{
+	if(outInst) *outInst = nil;
+	resetCustomImportState();		// inits gCustomImport + suggests a free ID
+	strncpy(gCustomImport.modelName, name, MODELNAMELEN-1); gCustomImport.modelName[MODELNAMELEN-1] = '\0';
+	strncpy(gCustomImport.txdName, name, MODELNAMELEN-1); gCustomImport.txdName[MODELNAMELEN-1] = '\0';
+	strncpy(gCustomImport.dffSource, dffPath, sizeof(gCustomImport.dffSource)-1);
+	gCustomImport.dffSource[sizeof(gCustomImport.dffSource)-1] = '\0';
+	strncpy(gCustomImport.txdSource, txdPath, sizeof(gCustomImport.txdSource)-1);
+	gCustomImport.txdSource[sizeof(gCustomImport.txdSource)-1] = '\0';
+	if(colPath && colPath[0]){
+		strncpy(gCustomImport.colSource, colPath, sizeof(gCustomImport.colSource)-1);
+		gCustomImport.colSource[sizeof(gCustomImport.colSource)-1] = '\0';
+		gCustomImport.hasCol = true;
+		gCustomImport.preferAutoCol = false;
+	}else{
+		gCustomImport.hasCol = false;		// ariane auto-generates COL from the DFF
+		gCustomImport.preferAutoCol = true;
+	}
+	if(drawDist > 0.0f)
+		gCustomImport.drawDist = drawDist;
+	gCustomImport.previewObj.m_drawDist[0] = gCustomImport.drawDist;
+
+	if(!finalizeCustomImport()){
+		if(errOut && errSz > 0){ strncpy(errOut, gCustomImport.error, errSz-1); errOut[errSz-1] = '\0'; }
+		return false;
+	}
+	if(outInst)
+		*outInst = (ObjectInst*)(selection.first ? selection.first->item : nil);
+	return true;
+}
+
+// Blender bridge (Phase E-2): register a BRAND-NEW model (+ optional LOD companion)
+// from Blender-exported assets, place the instance at the Blender transform, and link
+// the LOD. Returns the HD instance's stable guid.
+bool
+CreateBridgeModel(const char *name, const char *dffPath, const char *txdPath, const char *colPath,
+	const char *lodName, const char *lodDffPath, const char *lodTxdPath,
+	float drawDist, rw::V3d pos, rw::Quat rot, char *guidOut, int guidSz, char *errOut, int errSz)
+{
+	if(guidOut && guidSz > 0) guidOut[0] = '\0';
+	if(errOut && errSz > 0) errOut[0] = '\0';
+
+	ObjectInst *hd = nil;
+	if(!bridgeRegisterAndSpawn(name, dffPath, txdPath, colPath, drawDist, &hd, errOut, errSz))
+		return false;
+	if(hd == nil){
+		if(errOut && errSz > 0) strncpy(errOut, "model registered but no instance spawned", errSz-1);
+		return false;
+	}
+	MoveInstanceTo(hd, pos, rot);
+
+	// optional LOD: register a second model (named LOD<name>) at the same spot and
+	// link it (HD's m_lod / m_lodId → saved into the IPL lod field). Non-fatal.
+	if(lodName && lodName[0] && lodDffPath && lodDffPath[0]){
+		ObjectInst *lod = nil;
+		char lodErr[256] = "";
+		if(bridgeRegisterAndSpawn(lodName, lodDffPath, lodTxdPath, nil, 2000.0f, &lod, lodErr, sizeof(lodErr)) && lod){
+			MoveInstanceTo(lod, pos, rot);
+			hd->m_lod = lod;
+			hd->m_lodId = lod->m_iplIndex;
+		}else
+			log("BlenderBridge: LOD %s not registered: %s\n", lodName, lodErr);
+	}
+
+	if(guidOut && guidSz > 0)
+		GetInstGuid(hd, guidOut, guidSz);
 	return true;
 }
 
@@ -7295,6 +7438,51 @@ uiInstWindow(void)
 					Toast(TOAST_SAVE, "Failed to export TXD(s)");
 			}
 		}
+		ImGui::SameLine();
+		static bool blAutoTxd = true, blVanilla = true, blIde = true, blIpl = true, blLod = true, blCol = false, blHd = true;
+		if(ImGui::Button("Export to Blender")){
+			int failed = 0;
+			int placed = ExportSelectedToBlender(blAutoTxd, blVanilla, blIde, blIpl, blLod, blCol, blHd, &failed);
+			if(placed > 0)
+				Toast(TOAST_SAVE, "Sent %d object(s) to Blender%s", placed,
+				      failed > 0 ? " (some failed — see log)" : "");
+			else
+				Toast(TOAST_SAVE, "Failed to send to Blender");
+		}
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Send the selected instance(s) to a running Blender (INU_Tools).\n"
+				"Writes the DFF (+ the options below) into the bridge inbox; the addon's\n"
+				"watcher auto-imports and places them. Re-exporting the same instance\n"
+				"won't create a duplicate.");
+		ImGui::TextDisabled("Blender:"); ImGui::SameLine();
+		ImGui::Checkbox("Auto TXD", &blAutoTxd);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Also send the model's textures (TXD) so it isn't untextured/grey in Blender.");
+		ImGui::SameLine();
+		ImGui::Checkbox("Vanilla", &blVanilla);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Vanilla import (no alpha/fence linking).\nOff = keep custom alpha materials / fences on import.");
+		ImGui::SameLine();
+		ImGui::Checkbox("IDE", &blIde);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Send the IDE data (model id, draw distance, TXD name) so Blender\nknows the object's setup.");
+		ImGui::SameLine();
+		ImGui::Checkbox("IPL", &blIpl);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Place each object at its world position/rotation (from the IPL).\nOff = import everything at the origin.");
+		ImGui::SameLine();
+		ImGui::Checkbox("HD", &blHd);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("If a selected model is a LOD (LOD<name>), also send its high-detail\n"
+				"model — so exporting a distant LOD brings the real one along too.");
+		ImGui::SameLine();
+		ImGui::Checkbox("LOD", &blLod);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Also send the low-detail LOD model (LOD<name>) when the object has one.");
+		ImGui::SameLine();
+		ImGui::Checkbox("COL", &blCol);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Also send the collision mesh (.col) next to the model.");
 		if(haveExportDir)
 			ImGui::TextDisabled("%s", exportDir);
 		ImGui::Separator();
