@@ -3280,32 +3280,6 @@ ExportSelectedToBlender(bool autoTxd, bool vanilla, bool ide, bool ipl, bool lod
 
 	(void)exported;
 
-	// DEBUG dump (persistent, outside the inbox so the addon never eats it): what was
-	// selected (name / lodId / m_lod link) + the job body. Read <game>\ariane\bridge\lastexport.txt
-	{
-		std::string dbg = "hdToo="; dbg += (hdToo?"1":"0"); dbg += "  selection:\n";
-		char lb[300];
-		for(CPtrNode *p = selection.first; p; p = p->next){
-			ObjectInst *si = (ObjectInst*)p->item;
-			if(si == nil) continue;
-			ObjectDef *so = GetObjectDef(si->m_objectId);
-			// count HD instances that point to this one as their LOD
-			int hdlinks = 0;
-			for(CPtrNode *q = instances.first; q; q = q->next){
-				ObjectInst *hi = (ObjectInst*)q->item;
-				if(hi && hi->m_lod == si) hdlinks++;
-			}
-			snprintf(lb, sizeof(lb), "  name=%s objId=%d lodId=%d hasLod=%d bigBld=%d related=%s HDsHere=%d\n",
-				so?so->m_name:"?", si->m_objectId, si->m_lodId, si->m_lod?1:0,
-				so?so->m_isBigBuilding:0, (so&&so->m_relatedModel)?so->m_relatedModel->m_name:"-", hdlinks);
-			dbg += lb;
-		}
-		dbg += "----- job body -----\n"; dbg += body;
-		char dp[1024];
-		if(GetArianeDataPath(dp, sizeof(dp), "bridge\\lastexport.txt"))
-			WriteBufferToPath(dp, (const uint8*)dbg.data(), (int)dbg.size());
-	}
-
 	if(placed > 0){
 		static int jobCounter = 0;
 		char jobPath[1024];
@@ -4061,6 +4035,7 @@ ProcessReverseLine(const char *rawline)
 	char guid[300] = "";
 	int iid = -1, hasTxd = 0, hasX = 0, posOnly = 0, wantDff = 1, hasCol = 0;
 	float x=0, y=0, z=0, qx=0, qy=0, qz=0, qw=1;
+	float dd = -1.0f;	// IDE draw distance edited in Blender (<0 = not sent)
 
 	char *tab = strchr(line, '\t');
 	int nl = tab ? (int)(tab-line) : (int)strlen(line);
@@ -4084,6 +4059,7 @@ ProcessReverseLine(const char *rawline)
 			else if(strcmp(k,"dff")==0) wantDff = atoi(v);
 			else if(strcmp(k,"col")==0) hasCol = atoi(v);
 			else if(strcmp(k,"txd")==0) hasTxd = atoi(v);
+			else if(strcmp(k,"dd")==0) dd=(float)atof(v);
 			else if(strcmp(k,"x")==0){ x=(float)atof(v); hasX=1; }
 			else if(strcmp(k,"y")==0) y=(float)atof(v);
 			else if(strcmp(k,"z")==0) z=(float)atof(v);
@@ -4115,6 +4091,12 @@ ProcessReverseLine(const char *rawline)
 	ObjectDef *obj = GetObjectDef(id);
 	if(obj == nil)
 		return;
+
+	// IDE draw distance edited in Blender → apply to the model's primary atomic (most
+	// models have one; that's what GetLargestDrawDist reports and what we send forward).
+	// Model-level, so it affects every instance of this model. Persists on the user's save.
+	if(dd > 0.0f && obj->m_numAtomics > 0)
+		obj->m_drawDist[0] = dd;
 
 	// Flag-driven: Blender says per line which parts it sent (dff/txd/col), so we
 	// only override + reload those. "Обновить позицию" sends dff=0/txd=0/col=0 (or
