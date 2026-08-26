@@ -3445,6 +3445,38 @@ WriteArianeLiveState(void)
 		}
 	}
 
+	// Deleted-instance set → its own file (ariane → Blender soft-delete). Scanning every
+	// instance is only worth doing occasionally, so throttle hard and content-diff.
+	{
+		static int delTick = 0;
+		if(++delTick >= 10){		// ~3 Hz — deletions aren't perf-critical
+			delTick = 0;
+			std::string del = "del";
+			char dg[300];
+			for(CPtrNode *p = instances.first; p; p = p->next){
+				ObjectInst *in = (ObjectInst*)p->item;
+				if(in == nil || !in->m_isDeleted)
+					continue;
+				GetInstGuid(in, dg, sizeof(dg));
+				if(dg[0] == '\0')
+					continue;
+				del += '\t'; del += dg;
+			}
+			del += '\n';
+			static std::string lastDel;
+			if(del != lastDel){
+				lastDel = del;
+				char dp[1024], dtmp[1024];
+				if(GetArianeDataPath(dp, sizeof(dp), "bridge\\live\\del_ariane.txt")){
+					EnsureParentDirectoriesForPath(dp);
+					snprintf(dtmp, sizeof(dtmp), "%s.tmp", dp);
+					FILE *df = fopen(dtmp, "wb");
+					if(df){ fwrite(del.data(), 1, del.size(), df); fclose(df); atomicReplaceFile(dtmp, dp); }
+				}
+			}
+		}
+	}
+
 	std::string body = "#live 1\n";
 	std::string sel = "sel";	// selected guids, one line, for selection sync
 	char lb[512], guid[300];
