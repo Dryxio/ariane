@@ -4462,6 +4462,9 @@ GetSector(int ix, int iy)
 int
 GetSectorIndexX(float x)
 {
+	if(std::isnan(x)) x = worldBounds.left;	// a NaN slips past both compares below and
+						// GetSector doesn't bounds-check → out-of-range crash
+						// (a degenerate camera from the live bridge did this)
 	if(x < worldBounds.left) x = worldBounds.left;
 	if(x >= worldBounds.right) x = worldBounds.right - 1.0f;
 	return (x - worldBounds.left) / ((worldBounds.right - worldBounds.left) / numSectorsX);
@@ -4470,6 +4473,7 @@ GetSectorIndexX(float x)
 int
 GetSectorIndexY(float y)
 {
+	if(std::isnan(y)) y = worldBounds.bottom;
 	if(y < worldBounds.bottom) y = worldBounds.bottom;
 	if(y >= worldBounds.top) y = worldBounds.top - 1.0f;
 	return (y - worldBounds.bottom) / ((worldBounds.top - worldBounds.bottom) / numSectorsY);
