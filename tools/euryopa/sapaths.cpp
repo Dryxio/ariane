@@ -3198,25 +3198,25 @@ getNaviWidth(const DiskCarPathLink &link)
 static int
 getNaviOppositeLanes(const DiskCarPathLink &link)
 {
-	return link.laneFlags & 0x07;
+	return (link.laneFlags >> 3) & 0x07;
 }
 
 static int
 getNaviSameLanes(const DiskCarPathLink &link)
 {
-	return (link.laneFlags >> 3) & 0x07;
+	return link.laneFlags & 0x07;
 }
 
 static void
 setNaviOppositeLanes(DiskCarPathLink &link, int n)
 {
-	link.laneFlags = (link.laneFlags & ~0x07) | (n & 0x07);
+	link.laneFlags = (link.laneFlags & ~0x38) | ((n & 0x07) << 3);
 }
 
 static void
 setNaviSameLanes(DiskCarPathLink &link, int n)
 {
-	link.laneFlags = (link.laneFlags & ~0x38) | ((n & 0x07) << 3);
+	link.laneFlags = (link.laneFlags & ~0x07) | (n & 0x07);
 }
 
 static bool
