@@ -3196,9 +3196,12 @@ ExportSelectedToBlender(bool autoTxd, bool vanilla, bool ide, bool ipl, bool lod
 		// > LODDISTANCE marks the LOD a big building; FindRelatedObject links it to the HD
 		// by matching the name past the 3-char prefix, e.g. doc_shedbig13 ↔ LOD_shedbig13).
 		ObjectDef *lod = nil;
+		ObjectInst *lodInst = inst;	// III/VC: LOD shares the HD's spot → HD's transform
 		if(lodToo){
-			if(inst->m_lod && !inst->m_lod->m_isDeleted)		// SA lod link
+			if(inst->m_lod && !inst->m_lod->m_isDeleted){		// SA lod link
 				lod = GetObjectDef(inst->m_lod->m_objectId);
+				lodInst = inst->m_lod;		// SA: LOD has its OWN instance/rotation
+			}
 			if(lod == nil && obj->m_relatedModel && obj->m_relatedModel->m_isBigBuilding)
 				lod = obj->m_relatedModel;			// III/VC: related big-building = LOD
 		}
@@ -3215,7 +3218,7 @@ ExportSelectedToBlender(bool autoTxd, bool vanilla, bool ide, bool ipl, bool lod
 				haveLod = true;
 			}
 			if(haveLod)
-				AppendBlenderMetaLine(body, &blen, (int)sizeof(body), lod, ltxd, inst, false);
+				AppendBlenderMetaLine(body, &blen, (int)sizeof(body), lod, ltxd, lodInst, false);
 		}
 
 		// HD companion — if requested, also pull the high-detail model this LOD stands in
