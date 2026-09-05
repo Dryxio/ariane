@@ -2629,6 +2629,8 @@ Draw(void)
 	updateRectSelectEarly();
 	TheCamera.Process();		// ariane's own camera input
 	PollBlenderCamIn();		// apply live camera from Blender (overrides if it drives)
+	PollBlenderTimeIn();		// apply live time-of-day + weather from Blender (before timecycle)
+	PollBlenderTimecycIn();		// apply live timecyc slice-field edits from Blender (before Update)
 	TheCamera.update();
 
 	Weather::Update();

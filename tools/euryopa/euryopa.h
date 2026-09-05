@@ -483,6 +483,8 @@ void PollBlenderOutbox(void);	// <- Blender edits: hot-reload DFF/TXD + move ins
 void WriteArianeLiveState(void);	// -> live position sync (selected instances) for Blender
 void PollBlenderLiveIn(void);		// <- live moves from Blender (when not dragging here)
 void PollBlenderCamIn(void);		// <- live camera from Blender (when not navigating here)
+void PollBlenderTimeIn(void);		// <- live time-of-day + weather from Blender's timecycle
+void PollBlenderTimecycIn(void);	// <- live timecyc.dat slice-field edits from Blender
 void PollBlenderSelIn(void);		// <- live selection from Blender (when not selecting here)
 void PollBlenderCreate(void);		// <- create.job: new instances of existing models
 void PollBlenderCreateModel(void);	// <- createmodel.job: brand-new models (E-2)

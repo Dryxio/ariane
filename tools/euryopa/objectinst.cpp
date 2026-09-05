@@ -3448,6 +3448,30 @@ WriteArianeLiveState(void)
 		}
 	}
 
+	// time-of-day + weather → its own file. Blender mirrors it onto the timecycle
+	// hour slider + weather so both apps show the same lighting. Weather is sent as
+	// the two-slot blend (old/new index + interpolation) — both apps read the same
+	// timecyc.dat, so the weather INDEX is a stable key across them (names differ by
+	// '_' vs space). Content-diffed like the camera so it only writes on change.
+	{
+		char tbuf[128];
+		int tn = snprintf(tbuf, sizeof(tbuf),
+			"time\t%d\t%d\t%d\t%d\t%.4f\n",
+			currentHour, currentMinute,
+			Weather::oldWeather, Weather::newWeather, Weather::interpolation);
+		static std::string lastTime;
+		if(std::string(tbuf) != lastTime){
+			lastTime = tbuf;
+			char tpath[1024], ttmp[1024];
+			if(GetArianeDataPath(tpath, sizeof(tpath), "bridge\\live\\time_ariane.txt")){
+				EnsureParentDirectoriesForPath(tpath);
+				snprintf(ttmp, sizeof(ttmp), "%s.tmp", tpath);
+				FILE *tf = fopen(ttmp, "wb");
+				if(tf){ fwrite(tbuf, 1, tn, tf); fclose(tf); atomicReplaceFile(ttmp, tpath); }
+			}
+		}
+	}
+
 	// Deleted-instance set → its own file (ariane → Blender soft-delete). Scanning every
 	// instance is only worth doing occasionally, so throttle hard and content-diff.
 	{
@@ -3688,6 +3712,156 @@ PollBlenderCamIn(void)
 			TheCamera.m_localup = worldz;
 	}
 	TheCamera.update();
+}
+
+// live time-of-day + weather from Blender. Mirror of PollBlenderCamIn: only follows
+// while Blender is the active window (ariane focused → ariane drives). Applied BEFORE
+// Weather::Update()/Timecycle::Update() each frame so the sky uses the new time.
+void
+PollBlenderTimeIn(void)
+{
+	if(bridgeArianeFocused())		// ariane is the active window → it drives, don't follow
+		return;
+
+	static int tick = 0;
+	if(++tick < 3)				// ~20 Hz read
+		return;
+	tick = 0;
+
+	char path[1024];
+	if(!GetArianeDataPath(path, sizeof(path), "bridge\\live\\time_blender.txt") ||
+	   !bridgeFileIsFresh(path, 2))		// stale / Blender not live → ignore
+		return;
+	FILE *f = fopen(path, "rb");
+	if(f == nil)
+		return;
+	char buf[128];
+	size_t n = fread(buf, 1, sizeof(buf)-1, f);
+	fclose(f);
+	buf[n] = '\0';
+
+	static std::string lastData;
+	if(lastData == buf)
+		return;
+	lastData = buf;
+
+	char *tok = strtok(buf, "\t \n");
+	if(tok == nil || strcmp(tok, "time") != 0) return;
+	char *sh = strtok(nil,"\t \n"), *sm = strtok(nil,"\t \n");
+	if(!sh || !sm) return;
+	// weather fields optional (back-compat: an older Blender may send time only)
+	char *sow = strtok(nil,"\t \n"), *snw = strtok(nil,"\t \n"), *si = strtok(nil,"\t \n");
+
+	int h = atoi(sh), m = atoi(sm);
+	if(h < 0) h = 0; if(h > 23) h = 23;
+	if(m < 0) m = 0; if(m > 59) m = 59;
+	currentHour = h;
+	currentMinute = m;
+
+	int nw = params.numWeathers > 0 ? params.numWeathers : 1;
+	if(sow){ int w = atoi(sow); if(w >= 0 && w < nw) Weather::oldWeather = w; }
+	if(snw){ int w = atoi(snw); if(w >= 0 && w < nw) Weather::newWeather = w; }
+	if(si){
+		float in = (float)atof(si);
+		if(std::isfinite(in)){ if(in < 0.0f) in = 0.0f; if(in > 1.0f) in = 1.0f;
+			Weather::interpolation = in; }
+	}
+}
+
+// live timecycle editing from Blender. Blender's timecyc editor writes changed slice
+// fields into timecyc_blender.txt; we patch the matching (slot,weather) ColourSet cell
+// in memory so Timecycle::Update() picks up the new colour the SAME frame — no file
+// reload. Push-only (Blender never gets timecycle fields back), so no focus arbitration:
+// apply whenever the file is fresh and its content changed.
+// Line format: tccyc \t <weather> \t <slot> \t <key> \t <v0> [<v1> <v2> <v3>]
+//   colour keys carry 0..255 rgb(a) (divided here, matching InitializeSA); scalar keys
+//   carry the raw value. Blender's slot index == ariane's SA hour-row (both use the
+//   {0,5,6,7,12,19,20,22} key-hour layout), so slot maps 1:1.
+void
+PollBlenderTimecycIn(void)
+{
+	static int tick = 0;
+	if(++tick < 3)				// ~20 Hz read
+		return;
+	tick = 0;
+
+	char path[1024];
+	if(!GetArianeDataPath(path, sizeof(path), "bridge\\live\\timecyc_blender.txt") ||
+	   !bridgeFileIsFresh(path, 3))		// stale / Blender not editing → ignore
+		return;
+	FILE *f = fopen(path, "rb");
+	if(f == nil)
+		return;
+	char buf[8192];
+	size_t n = fread(buf, 1, sizeof(buf)-1, f);
+	fclose(f);
+	buf[n] = '\0';
+
+	static std::string lastData;
+	if(lastData == buf)
+		return;
+	lastData = buf;
+
+	char *saveLine = nil;
+	for(char *line = strtok_s(buf, "\r\n", &saveLine); line;
+	    line = strtok_s(nil, "\r\n", &saveLine)){
+		char *saveTok = nil;
+		char *tag = strtok_s(line, "\t", &saveTok);
+		if(tag == nil || strcmp(tag, "tccyc") != 0)
+			continue;
+		char *sw  = strtok_s(nil, "\t", &saveTok);
+		char *ss  = strtok_s(nil, "\t", &saveTok);
+		char *key = strtok_s(nil, "\t", &saveTok);
+		if(!sw || !ss || !key)
+			continue;
+		Timecycle::ColourSet *cs = Timecycle::GetColourSetPtr(atoi(ss), atoi(sw));
+		if(cs == nil)
+			continue;
+		char *v0 = strtok_s(nil, "\t", &saveTok);
+		char *v1 = strtok_s(nil, "\t", &saveTok);
+		char *v2 = strtok_s(nil, "\t", &saveTok);
+		char *v3 = strtok_s(nil, "\t", &saveTok);
+		float a0 = v0 ? (float)atof(v0) : 0.0f;
+		float a1 = v1 ? (float)atof(v1) : 0.0f;
+		float a2 = v2 ? (float)atof(v2) : 0.0f;
+		float a3 = v3 ? (float)atof(v3) : 0.0f;
+
+		#define TC_RGB(field)  do{ cs->field.red = a0/255.0f; \
+			cs->field.green = a1/255.0f; cs->field.blue = a2/255.0f; }while(0)
+		if     (!strcmp(key, "amb"))            TC_RGB(amb);
+		else if(!strcmp(key, "amb_obj"))        TC_RGB(amb_obj);
+		else if(!strcmp(key, "dir"))            TC_RGB(dir);
+		else if(!strcmp(key, "sky_top"))        TC_RGB(skyTop);
+		else if(!strcmp(key, "sky_bot"))        TC_RGB(skyBottom);
+		else if(!strcmp(key, "sun_core"))       TC_RGB(sunCore);
+		else if(!strcmp(key, "sun_corona"))     TC_RGB(sunCorona);
+		else if(!strcmp(key, "low_clouds"))     TC_RGB(lowCloud);
+		else if(!strcmp(key, "bottom_clouds"))  TC_RGB(fluffyCloudBottom);
+		else if(!strcmp(key, "sun_size"))       cs->sunSz = a0;
+		else if(!strcmp(key, "spr_size"))       cs->sprSz = a0;
+		else if(!strcmp(key, "spr_bright"))     cs->sprBght = a0;
+		else if(!strcmp(key, "shadow"))         cs->shdw = a0;
+		else if(!strcmp(key, "light_shad"))     cs->lightShd = a0;
+		else if(!strcmp(key, "pole_shad"))      cs->poleShd = a0;
+		else if(!strcmp(key, "far_clip"))       cs->farClp = a0;
+		else if(!strcmp(key, "fog_start"))      cs->fogSt = a0;
+		else if(!strcmp(key, "light_on_ground")) cs->lightOnGround = a0;
+		else if(!strcmp(key, "cloud_alpha"))    cs->cloudAlpha = a0;
+		else if(!strcmp(key, "highlight_min"))  cs->radiosityLimit = a0;
+		else if(!strcmp(key, "water_fog"))      cs->waterFogAlpha = a0;
+		else if(!strcmp(key, "dir_mult"))       cs->dirMult = a0;
+		else if(!strcmp(key, "water")){
+			cs->water.red = a0/255.0f; cs->water.green = a1/255.0f;
+			cs->water.blue = a2/255.0f; cs->water.alpha = a3/255.0f;
+		}else if(!strcmp(key, "postfx1") || !strcmp(key, "postfx2")){
+			// argb (alpha-first), alpha clamped to 128 like InitializeSA
+			float al = a0 > 128.0f ? 128.0f : a0;
+			rw::RGBAf &c = (key[6] == '1') ? cs->postfx1 : cs->postfx2;
+			c.alpha = al/255.0f; c.red = a1/255.0f;
+			c.green = a2/255.0f; c.blue = a3/255.0f;
+		}
+		#undef TC_RGB
+	}
 }
 
 static std::string

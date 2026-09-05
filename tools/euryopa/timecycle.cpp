@@ -144,6 +144,19 @@ rw::RGBAf currentFogColour;
 rw::RGBA belowHorizonColour;
 #define GetColourSet(h, w) timecycleData[(h)*params.numWeathers + (w)]
 
+// Public, bounds-checked accessor for the live Blender bridge (timecycleData is
+// static). Returns nil if the table isn't loaded or (hour,weather) is out of range.
+ColourSet*
+GetColourSetPtr(int hour, int weather)
+{
+	if(timecycleData == nil)
+		return nil;
+	if(hour < 0 || hour >= params.numHours ||
+	   weather < 0 || weather >= params.numWeathers)
+		return nil;
+	return &GetColourSet(hour, weather);
+}
+
 static void
 InitializeIII(void)
 {
