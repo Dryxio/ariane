@@ -1,0 +1,125 @@
+name: Agent release validation
+on:
+  push:
+    branches: [codex/agent-public-release]
+  pull_request:
+    paths: ['tools/agent/**', 'tools/euryopa/agentbridge*', 'pyproject.toml', '.github/workflows/agent-release.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  LIBRW_REF: 15ffa585216a9a7573ecc597b19ce2fde9b935f2
+jobs:
+  python:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, macos-14]
+        python: ['3.11', '3.13']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install '.[mcp]' build
+      - run: python -m unittest discover -s tools/agent/tests -v
+      - run: python -m build
+      - run: arianectl --help
+  engine:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            config: release_linux-amd64-gl3
+            platform: linux-x64
+          - os: macos-14
+            config: release_macos-arm64-gl3
+            platform: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Southland-FR/librw
+          ref: ${{ env.LIBRW_REF }}
+          path: .build-librw
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libgl1-mesa-dev libglfw3-dev xauth xvfb
+          curl --fail --location --silent --show-error https://github.com/premake/premake-core/releases/download/v5.0.0-beta4/premake-5.0.0-beta4-linux.tar.gz --output /tmp/premake.tar.gz
+          echo '98c0dbf55f20d28ecc2b5fdd4a5c9bfe5ef461d26d3b023b4dfd7d75f4df3a3f  /tmp/premake.tar.gz' | sha256sum --check
+          tar -xzf /tmp/premake.tar.gz -C /tmp
+          chmod +x /tmp/premake5
+          echo /tmp >> "$GITHUB_PATH"
+      - name: macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install premake glfw
+      - name: Build
+        env:
+          LIBRW: ${{ github.workspace }}/.build-librw
+        run: |
+          (cd "$LIBRW" && premake5 gmake2 --gfxlib=glfw)
+          CXXFLAGS=-std=c++14 make -C "$LIBRW/build" -j2 config=${{ matrix.config }} librw
+          premake5 gmake2 --channel=agent-alpha
+          make -C build -j2 config=${{ matrix.config }} euryopa
+          python -m pip install build
+          python -m build --wheel
+      - name: Package
+        shell: bash
+        run: |
+          extra=()
+          if [ "$RUNNER_OS" = macOS ]; then extra=(--glfw "$(brew --prefix glfw)/lib/libglfw.3.dylib"); fi
+          python tools/release/package_agent.py --engine bin/${{ runner.os == 'macOS' && 'macos-arm64-gl3' || 'linux-amd64-gl3' }}/Release/ariane --wheel dist/*.whl --output release --name ariane-agent-${{ matrix.platform }} "${extra[@]}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ariane-agent-${{ matrix.platform }}
+          path: release/*.zip
+          retention-days: 30
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: Southland-FR/librw
+          ref: ${{ env.LIBRW_REF }}
+          path: .build-librw
+      - uses: microsoft/setup-msbuild@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install Premake
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/premake/premake-core/releases/download/v5.0.0-beta8/premake-5.0.0-beta8-windows.zip -OutFile "$env:RUNNER_TEMP\premake.zip"
+          Expand-Archive "$env:RUNNER_TEMP\premake.zip" "$env:RUNNER_TEMP\premake"
+          "$env:RUNNER_TEMP\premake" | Out-File $env:GITHUB_PATH -Append
+      - name: Build
+        shell: cmd
+        env:
+          LIBRW: ${{ github.workspace }}\.build-librw
+        run: |
+          cd .build-librw
+          premake5 vs2019
+          msbuild build\librw.sln /p:Configuration=ReleaseStatic /p:Platform=win-amd64-d3d9 /t:librw /m
+          cd ..
+          premake5 vs2019 --channel=agent-alpha
+          msbuild build\librwgta.sln /p:Configuration=ReleaseStatic /p:Platform=win-amd64-d3d9 /t:librwgta;euryopa /m
+          python -m pip install build
+          python -m build --wheel
+      - name: Package
+        shell: pwsh
+        run: |
+          $wheel = (Get-ChildItem dist\*.whl)[0].FullName
+          python tools/release/package_agent.py --engine bin/win-amd64-d3d9/ReleaseStatic/ariane.exe --wheel "$wheel" --output release --name ariane-agent-windows-x64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ariane-agent-windows-x64
+          path: release/*.zip
+          retention-days: 30

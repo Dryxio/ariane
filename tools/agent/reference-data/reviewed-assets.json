@@ -1,0 +1,581 @@
+{
+  "16095": {
+    "asset_id": 16095,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Concrete military guard cabin, green windows, weathered roof.",
+      "roles": [
+        "guard",
+        "building"
+      ],
+      "styles": [
+        "military",
+        "weathered"
+      ],
+      "materials": [
+        "concrete"
+      ],
+      "colours": [
+        "grey",
+        "green"
+      ]
+    }
+  },
+  "3279": {
+    "asset_id": 3279,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Tall open metal watchtower with stairs and roof.",
+      "roles": [
+        "tower"
+      ],
+      "styles": [
+        "military",
+        "industrial",
+        "weathered"
+      ],
+      "materials": [
+        "metal"
+      ],
+      "colours": [
+        "grey"
+      ]
+    }
+  },
+  "2060": {
+    "asset_id": 2060,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Single pale, almost white sandbag; stackable but visually very bright.",
+      "roles": [
+        "barrier"
+      ],
+      "styles": [
+        "military",
+        "survival"
+      ],
+      "materials": [
+        "fabric"
+      ],
+      "colours": [
+        "white",
+        "beige"
+      ]
+    }
+  },
+  "3043": {
+    "asset_id": 3043,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Blue corrugated shipping container with one open end.",
+      "roles": [
+        "container",
+        "shelter"
+      ],
+      "styles": [
+        "industrial",
+        "military"
+      ],
+      "materials": [
+        "metal"
+      ],
+      "colours": [
+        "blue"
+      ]
+    }
+  },
+  "2977": {
+    "asset_id": 2977,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Small weathered dark metal military supply crate.",
+      "roles": [
+        "crate"
+      ],
+      "styles": [
+        "military",
+        "industrial",
+        "weathered"
+      ],
+      "materials": [
+        "metal"
+      ],
+      "colours": [
+        "blue",
+        "grey"
+      ]
+    }
+  },
+  "964": {
+    "asset_id": 964,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Square textured metal supply crate with pale weathered surface.",
+      "roles": [
+        "crate"
+      ],
+      "styles": [
+        "military",
+        "industrial",
+        "weathered"
+      ],
+      "materials": [
+        "metal"
+      ],
+      "colours": [
+        "grey"
+      ]
+    }
+  },
+  "1217": {
+    "asset_id": 1217,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Heavily rusted steel barrel.",
+      "roles": [
+        "barrel"
+      ],
+      "styles": [
+        "industrial",
+        "rural",
+        "weathered"
+      ],
+      "materials": [
+        "metal"
+      ],
+      "colours": [
+        "rust",
+        "blue"
+      ]
+    }
+  },
+  "929": {
+    "asset_id": 929,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Long exposed mechanical generator unit.",
+      "roles": [
+        "utility"
+      ],
+      "styles": [
+        "industrial",
+        "military",
+        "weathered"
+      ],
+      "materials": [
+        "metal"
+      ],
+      "colours": [
+        "green",
+        "grey"
+      ]
+    }
+  },
+  "1281": {
+    "asset_id": 1281,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Wood picnic table with attached benches and red-white umbrella; complete assembly.",
+      "roles": [
+        "table",
+        "seating",
+        "shelter"
+      ],
+      "styles": [
+        "beach",
+        "garden",
+        "commercial"
+      ],
+      "materials": [
+        "wood",
+        "fabric"
+      ],
+      "colours": [
+        "red",
+        "white",
+        "brown"
+      ]
+    }
+  },
+  "1594": {
+    "asset_id": 1594,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Small square outdoor table with four attached blue folding chairs; complete assembly.",
+      "roles": [
+        "table",
+        "seating"
+      ],
+      "styles": [
+        "urban",
+        "commercial",
+        "beach"
+      ],
+      "materials": [
+        "metal",
+        "wood"
+      ],
+      "colours": [
+        "blue",
+        "brown"
+      ]
+    }
+  },
+  "1810": {
+    "asset_id": 1810,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Single worn folding chair with pale seat and backrest.",
+      "roles": [
+        "seating"
+      ],
+      "styles": [
+        "weathered",
+        "military",
+        "beach",
+        "rural"
+      ],
+      "materials": [
+        "metal"
+      ],
+      "colours": [
+        "beige",
+        "grey"
+      ]
+    }
+  },
+  "2111": {
+    "asset_id": 2111,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Round brown wooden pedestal table without seats.",
+      "roles": [
+        "table"
+      ],
+      "styles": [
+        "rural",
+        "commercial"
+      ],
+      "materials": [
+        "wood"
+      ],
+      "colours": [
+        "brown"
+      ]
+    }
+  },
+  "1646": {
+    "asset_id": 1646,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Wooden beach lounger with green-white striped cushion.",
+      "roles": [
+        "seating"
+      ],
+      "styles": [
+        "beach",
+        "garden"
+      ],
+      "materials": [
+        "wood",
+        "fabric"
+      ],
+      "colours": [
+        "green",
+        "white"
+      ]
+    }
+  },
+  "1647": {
+    "asset_id": 1647,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Flat wooden beach lounger.",
+      "roles": [
+        "seating"
+      ],
+      "styles": [
+        "beach",
+        "weathered"
+      ],
+      "materials": [
+        "wood"
+      ],
+      "colours": [
+        "grey",
+        "brown"
+      ]
+    }
+  },
+  "642": {
+    "asset_id": 642,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "White octagonal parasol on a single pole.",
+      "roles": [
+        "shelter"
+      ],
+      "styles": [
+        "beach",
+        "commercial",
+        "garden"
+      ],
+      "materials": [
+        "fabric",
+        "metal"
+      ],
+      "colours": [
+        "white"
+      ]
+    }
+  },
+  "643": {
+    "asset_id": 643,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Outdoor square table and four attached blue folding chairs; complete assembly.",
+      "roles": [
+        "table",
+        "seating"
+      ],
+      "styles": [
+        "urban",
+        "beach",
+        "commercial"
+      ],
+      "materials": [
+        "metal",
+        "wood"
+      ],
+      "colours": [
+        "blue",
+        "brown"
+      ]
+    }
+  },
+  "1368": {
+    "asset_id": 1368,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Simple weathered wooden park bench.",
+      "roles": [
+        "seating"
+      ],
+      "styles": [
+        "garden",
+        "urban",
+        "weathered"
+      ],
+      "materials": [
+        "wood"
+      ],
+      "colours": [
+        "brown",
+        "green"
+      ]
+    }
+  },
+  "625": {
+    "asset_id": 625,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Tall palm in a round pale planter.",
+      "roles": [
+        "vegetation"
+      ],
+      "styles": [
+        "beach",
+        "garden",
+        "commercial"
+      ],
+      "materials": [
+        "plant"
+      ],
+      "colours": [
+        "green",
+        "white"
+      ]
+    }
+  },
+  "630": {
+    "asset_id": 630,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Small spiky plant in a square brown pot.",
+      "roles": [
+        "vegetation"
+      ],
+      "styles": [
+        "garden",
+        "commercial"
+      ],
+      "materials": [
+        "plant"
+      ],
+      "colours": [
+        "green",
+        "brown"
+      ]
+    }
+  },
+  "3532": {
+    "asset_id": 3532,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Low flowering bed with red and purple flowers.",
+      "roles": [
+        "vegetation"
+      ],
+      "styles": [
+        "garden"
+      ],
+      "materials": [
+        "plant"
+      ],
+      "colours": [
+        "green",
+        "red",
+        "purple"
+      ]
+    }
+  },
+  "3860": {
+    "asset_id": 3860,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Covered market counter with blue patterned fabric and wooden shelves.",
+      "roles": [
+        "counter",
+        "shelter"
+      ],
+      "styles": [
+        "commercial",
+        "urban"
+      ],
+      "materials": [
+        "wood",
+        "fabric"
+      ],
+      "colours": [
+        "blue"
+      ]
+    }
+  },
+  "3861": {
+    "asset_id": 3861,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Covered market counter with pale fabric and wooden shelves.",
+      "roles": [
+        "counter",
+        "shelter"
+      ],
+      "styles": [
+        "commercial",
+        "desert",
+        "rural"
+      ],
+      "materials": [
+        "wood",
+        "fabric"
+      ],
+      "colours": [
+        "white",
+        "beige"
+      ]
+    }
+  },
+  "3862": {
+    "asset_id": 3862,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Covered market counter with dark blue fabric and wooden shelves.",
+      "roles": [
+        "counter",
+        "shelter"
+      ],
+      "styles": [
+        "commercial",
+        "urban"
+      ],
+      "materials": [
+        "wood",
+        "fabric"
+      ],
+      "colours": [
+        "blue"
+      ]
+    }
+  },
+  "3863": {
+    "asset_id": 3863,
+    "source": "reference-data/native-assets-20260904.png; native renderer cdf97638362bd0c5; agent visual review 2026-09-04",
+    "confidence": 0.85,
+    "revision": 1,
+    "features": {
+      "description": "Covered market counter with red patterned fabric and wooden shelves.",
+      "roles": [
+        "counter",
+        "shelter"
+      ],
+      "styles": [
+        "commercial",
+        "desert",
+        "rural"
+      ],
+      "materials": [
+        "wood",
+        "fabric"
+      ],
+      "colours": [
+        "red"
+      ]
+    }
+  }
+}

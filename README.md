@@ -53,6 +53,17 @@ Get the optional integration ZIP, development updates and support in the [Ariane
 - **master** — the standard and recommended build
 - **PE/FLA** — an alternate build for projects that use expanded game limits
 
+## Agent CLI and MCP (alpha)
+
+The repository includes an installable Python CLI and MCP stdio server for local
+agent control: scratch sessions, asset discovery, placement, validation and
+viewport captures. Install with `python -m pip install '.[mcp]'` from this clone.
+The editor must be built with the matching agent bridge; older releases may not
+include it. Your own GTA installation is required, and a basic offline catalogue
+can be generated directly from its IDE files without a separate gtastuff checkout.
+See [agent setup and smoke test](tools/agent/README.md) for installation, engine
+connection, Windows configuration and the explicit commit/save workflow.
+
 ## Building from source
 
 Ariane requires [Premake 5](https://premake.github.io/) and the

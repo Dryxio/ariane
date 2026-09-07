@@ -1857,17 +1857,36 @@ BuildPreviewMatrix(rw::Matrix *matrix, const rw::Quat &rotation, const rw::V3d &
 	matrix->translate(&translation, rw::COMBINEPOSTCONCAT);
 }
 
+static void
+setObjectPreviewError(char *error, size_t errorSize, const char *message)
+{
+	if(error == nil || errorSize == 0)
+		return;
+	strncpy(error, message, errorSize - 1);
+	error[errorSize - 1] = '\0';
+}
+
 static bool
-renderObjectToRaster(int objectId, rw::Raster *colorRaster, rw::Raster *depthRaster, int size, float angle)
+renderObjectToRaster(int objectId, rw::Raster *colorRaster, rw::Raster *depthRaster,
+	int size, float angle, char *error = nil, size_t errorSize = 0, bool pngOrientation = false)
 {
 	ObjectDef *obj = GetObjectDef(objectId);
-	if(obj == nil)
+	if(obj == nil){
+		setObjectPreviewError(error, errorSize, "object definition is missing");
 		return false;
+	}
 
 	rw::Atomic *atm = nil;
 	rw::Clump *clump = nil;
-	if(!CreateObjectPreviewRwObject(objectId, &atm, &clump))
+	if(!CreateObjectPreviewRwObject(objectId, &atm, &clump)){
+		char detail[256];
+		snprintf(detail, sizeof(detail),
+			"preview geometry clone failed (loaded=%d type=%d atomic=%d clump=%d)",
+			obj->IsLoaded() ? 1 : 0, (int)obj->m_type,
+			obj->m_atomics[0] != nil ? 1 : 0, obj->m_clump != nil ? 1 : 0);
+		setObjectPreviewError(error, errorSize, detail);
 		return false;
+	}
 
 	float radius = 5.0f;
 	if(obj->m_colModel)
@@ -1879,11 +1898,14 @@ renderObjectToRaster(int objectId, rw::Raster *colorRaster, rw::Raster *depthRas
 	if(obj->m_colModel)
 		target = obj->m_colModel->boundingSphere.center;
 	rw::V3d eye = { target.x + dist*cosf(angle), target.y + dist*sinf(angle), target.z + dist*0.4f };
-	rw::V3d up = { 0.0f, 0.0f, -1.0f };
+	// UI camera textures use their historical inverted orientation. PNG readback
+	// has no UI UV transform and needs a world-up camera for upright asset views.
+	rw::V3d up = { 0.0f, 0.0f, pngOrientation ? 1.0f : -1.0f };
 	rw::V3d dir = normalize(sub(target, eye));
 
 	rw::Camera *cam = getPreviewCamera();
 	if(cam == nil){
+		setObjectPreviewError(error, errorSize, "preview camera creation failed");
 		if(atm){ atm->getFrame()->destroy(); atm->destroy(); }
 		if(clump){ clump->destroy(); }
 		return false;
@@ -1926,6 +1948,55 @@ renderObjectToRaster(int objectId, rw::Raster *colorRaster, rw::Raster *depthRas
 	if(clump){ clump->destroy(); }
 	Timecycle::SetLights();
 	return true;
+}
+
+bool
+CaptureObjectPreviewPng(int objectId, const char *path, int size, float angle,
+	char *error, size_t errorSize)
+{
+	ObjectDef *obj = GetObjectDef(objectId);
+	if(obj == nil || path == nil || path[0] == '\0'){
+		setObjectPreviewError(error, errorSize, "invalid model or output path");
+		return false;
+	}
+	if(!obj->IsLoaded()){
+		RequestObject(objectId);
+		LoadAllRequestedObjects();
+	}
+	if(!obj->IsLoaded()){
+		setObjectPreviewError(error, errorSize, "model stream load failed");
+		return false;
+	}
+	size = max(96, min(size, 1024));
+	// The GL3 backend defaults an unformatted camera texture to RGB internally,
+	// but Raster::toImage() dispatches from the public format bits.  Keep those
+	// bits explicit so the off-screen render can be read back reliably.
+	rw::Raster *color = rw::Raster::create(size, size, 24,
+		rw::Raster::C888|rw::Raster::CAMERATEXTURE);
+	rw::Raster *depth = rw::Raster::create(size, size, 0, rw::Raster::ZBUFFER);
+	if(color == nil || depth == nil){
+		setObjectPreviewError(error, errorSize,
+			color == nil ? "preview color raster creation failed" : "preview depth raster creation failed");
+		if(color) color->destroy();
+		if(depth) depth->destroy();
+		return false;
+	}
+	bool ok = renderObjectToRaster(objectId, color, depth, size, angle, error, errorSize, true);
+	if(ok){
+		rw::Image *image = color->toImage();
+		ok = image != nil;
+		if(image == nil)
+			setObjectPreviewError(error, errorSize, "preview framebuffer readback failed");
+		if(image){
+			rw::writePNG(image, path);
+			image->destroy();
+		}
+	}
+	if(ok)
+		setObjectPreviewError(error, errorSize, "");
+	color->destroy();
+	depth->destroy();
+	return ok;
 }
 
 static bool

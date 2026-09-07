@@ -284,7 +284,7 @@ project "euryopa"
 	defines { 'ARIANE_CHANNEL="' .. _OPTIONS["channel"] .. '"' }
 	filter { "system:windows" }
 		entrypoint("WinMainCRTStartup")
-		links { "winhttp" }
+		links { "winhttp", "ws2_32" }
 	filter { "system:macosx" }
 		kind "ConsoleApp"
 	filter {}

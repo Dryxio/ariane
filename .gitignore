@@ -9,3 +9,18 @@ librwgta.VC.db
 librw.props
 librw_toolfolder.props
 CLAUDE.md
+
+# Local agent state and build artifacts
+.venv*/
+__pycache__/
+*.pyc
+*.sqlite
+*.sqlite3
+agent-output/
+dist/
+*.egg-info/
+.DS_Store
+
+.agent-test/
+/release/
+.build-librw/

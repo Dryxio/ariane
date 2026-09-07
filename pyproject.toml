@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ariane-agent"
+version = "0.1.0a1"
+description = "Local CLI and MCP control for the Ariane GTA map editor"
+readme = "tools/agent/README.md"
+requires-python = ">=3.10"
+dependencies = ["Pillow>=11,<13"]
+
+[project.optional-dependencies]
+mcp = ["mcp>=2,<3"]
+
+[project.scripts]
+arianectl = "ariane_agent_tools.arianectl:main"
+ariane-mcp = "ariane_agent_tools.ariane_mcp:main"
+ariane-agentd = "ariane_agent_tools.ariane_agentd:main"
+
+[tool.setuptools]
+packages = ["ariane_agent_tools"]
+
+[tool.setuptools.package-dir]
+ariane_agent_tools = "tools/agent"
+
+[tool.setuptools.package-data]
+ariane_agent_tools = ["reference-data/*.json"]

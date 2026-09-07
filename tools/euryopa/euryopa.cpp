@@ -1,4 +1,5 @@
 #include "euryopa.h"
+#include "agentbridge.h"
 #include "modloader.h"
 #include <limits.h>
 #include <algorithm>
@@ -2633,6 +2634,7 @@ Draw(void)
 	CPad::UpdatePads();
 	updateRectSelectEarly();
 	TheCamera.Process();
+	AgentBridgeUpdate();
 	TheCamera.update();
 	if(gUseViewerCam)
 		Scene.camera = TheCamera.m_rwcam_viewer;
@@ -2777,6 +2779,7 @@ Draw(void)
 	rw::SetRenderState(rw::ALPHATESTFUNC, rw::ALPHAALWAYS);	// don't mess up GUI
 	// This fucks up the z buffer, but what else can we do?
 	RenderDebugLines();
+	AgentBridgeCaptureAfterWorldRender();
 	ImGui::EndFrame();
 	ImGui::Render();
 

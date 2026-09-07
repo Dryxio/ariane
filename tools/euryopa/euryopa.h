@@ -524,6 +524,8 @@ bool GetGroundPlacementSurface(rw::V3d pos, rw::V3d *hitPos, rw::V3d *hitNormal 
 bool GetPlacementSurfaceHit(rw::V3d *hitPos, rw::V3d *hitNormal);
 rw::V3d GetPlacementPosition(void);
 float GetPlacementBaseOffset(int objectId);
+bool CaptureObjectPreviewPng(int objectId, const char *path, int size, float angle,
+	char *error = nil, size_t errorSize = 0);
 
 // Object Browser categories & favourites
 void InitObjectCategories(void);
