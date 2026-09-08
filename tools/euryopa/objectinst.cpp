@@ -746,7 +746,7 @@ resolveInstanceLod(ObjectInst *inst)
 		inst->m_lod = nil;
 		return nil;
 	}
-	if(inst->m_lod && inst->m_lod != inst &&
+	if(inst->m_lod && inst->m_lod != inst && inst->m_lod->m_imageIndex < 0 &&
 	   inst->m_lod->m_iplIndex == inst->m_lodId &&
 	   sameIplFamily(inst, inst->m_lod))
 		return inst->m_lod;
@@ -775,7 +775,9 @@ resolveInstanceLod(ObjectInst *inst)
 static bool
 instanceReferencesLod(ObjectInst *inst, ObjectInst *lodInst)
 {
-	if(inst == nil || lodInst == nil || inst == lodInst)
+	// LOD indices address the parent text IPL, never a streamed instance.
+	// Streamed objects can otherwise alias text index zero and delete its children.
+	if(inst == nil || lodInst == nil || inst == lodInst || lodInst->m_imageIndex >= 0)
 		return false;
 	return inst->m_lodId >= 0 &&
 	       inst->m_lodId == lodInst->m_iplIndex &&
@@ -1297,6 +1299,7 @@ createSpawnedInstance(int objectId, rw::V3d position, GameFile *file, int iplInd
 	inst->m_numChildren = 0;
 	inst->m_file = file;
 	inst->m_imageIndex = -1;
+	inst->m_iplIndex = -1;
 	inst->m_binInstIndex = -1;
 	inst->m_iplIndex = iplIndex;
 	SetInstIplFilterKey(inst, file ? file->name : nil);
