@@ -131,6 +131,16 @@ class TransportTests(unittest.TestCase):
             self.assertFalse(response['ok'])
             self.assertEqual(response['error'], 'authentication failed')
 
+    def test_missing_command_rejected_and_server_recovers(self):
+        with socket.create_connection(('127.0.0.1', self.port)) as client:
+            payload = f'ARIANE_AUTH/1 {TOKEN}\nARIANE_IPC/1\nrequest'.encode()
+            client.sendall(struct.pack('!I', len(payload)) + payload)
+            size = struct.unpack('!I', ArianeClient._recv_exact(client, 4))[0]
+            response = json.loads(ArianeClient._recv_exact(client, size))
+            self.assertEqual(response['error'], 'missing request id or command')
+            self.assertEqual(client.recv(1), b'')
+        self.assertTrue(ArianeClient().command('ping')['pong'])
+
     def test_fragmented_frame(self):
         with socket.create_connection(('127.0.0.1', self.port)) as client:
             payload = f'ARIANE_AUTH/1 {TOKEN}\nARIANE_IPC/1\nfragmented\nping'.encode()

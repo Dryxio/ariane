@@ -519,6 +519,11 @@ readRequest(std::vector<std::string> &lines)
 			return false;
 		}
 		lines.erase(lines.begin());
+		if(lines.size() < 2 || lines[0].empty() || lines[1].empty()){
+			writeError("unknown", "missing request id or command");
+			lines.clear();
+			return false;
+		}
 		return true;
 	}
 	char requestPath[1200];
@@ -998,7 +1003,8 @@ handleRequest(const std::vector<std::string> &lines)
 	if(command == "capabilities"){
 		writeResponse(requestId, true, std::string(
 			"\"engine\":\"ariane\",\"build_id\":\"") + jsonEscape(agentBuildId()) +
-			"\",\"transport\":\"unix-stream-framed-v1\","
+			"\",\"transport\":\"" + (gAgentTcp ? "tcp-loopback-auth-framed-v1" :
+			(gAgentSocket != INVALID_AGENT_SOCKET ? "unix-stream-framed-v1" : "legacy-files-v1")) + "\","
 			"\"limits\":{\"max_request_bytes\":1048576,\"max_response_bytes\":4194304,\"max_page_items\":256},"
 			"\"observation\":[\"rgb_capture\",\"screen_ray_depth\",\"screen_ray_object_id\"],"
 			"\"identity\":{\"instance_id\":\"process_local\",\"object_key\":\"checkpoint_manifest\"},"

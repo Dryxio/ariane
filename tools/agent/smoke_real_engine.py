@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Opt-in SA runtime acceptance test. Supply an isolated COPY of your game."""
 import argparse
+import asyncio
 import json
 import os
 from pathlib import Path
@@ -18,6 +19,7 @@ def main():
     parser.add_argument('--game-copy', required=True, type=Path)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--tcp', action='store_true')
+    parser.add_argument('--mcp', action='store_true', help='Also test installed MCP stdio against the real renderer')
     args = parser.parse_args()
     output = args.output.resolve(); output.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
@@ -76,6 +78,21 @@ def main():
             with Image.open(output / 'current view.png') as image:
                 assert image.width >= 640 and max(ImageStat.Stat(image.convert('RGB')).stddev) > 5
             report['checks'].append('camera, rendered PNG, temporary capture restores pose')
+            if args.mcp:
+                async def check_mcp():
+                    from mcp import ClientSession
+                    from mcp.client.stdio import StdioServerParameters, stdio_client
+                    params = StdioServerParameters(command=sys.executable, args=['-m', 'ariane_agent_tools.ariane_mcp'], env=env, cwd=str(output))
+                    async with stdio_client(params) as (reader, writer):
+                        async with ClientSession(reader, writer) as session:
+                            await session.initialize()
+                            result = await session.call_tool('camera_context', {})
+                            assert not result.is_error
+                            result = await session.call_tool('capture_current_view', {'output_path': str(output / 'MCP capture.png')})
+                            assert not result.is_error
+                asyncio.run(check_mcp())
+                assert (output / 'MCP capture.png').exists()
+                report['checks'].append('installed MCP stdio live camera and rendered image')
             call('scene', 'ariane\\release_smoke.ipl', output / 'scratch layer.ipl')
             call('session', 'begin', 'release-smoke')
             placed = call('place', 1281, 2490, -1665, 14, 0)

@@ -123,7 +123,7 @@ jobs:
           python -m unittest discover -s tools/agent/tests -p test_mcp_stdio.py -v
           $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
           $dev = Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
-          cmd /c "`"$dev`" -arch=x64 && python -m unittest discover -s tools/agent/tests -p test_ipc_transport.py -v"
+          cmd /c "`"$dev`" -arch=x64 && set CXX=cl&& python -m unittest discover -s tools/agent/tests -p test_ipc_transport.py -v"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Package
         shell: pwsh
