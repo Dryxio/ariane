@@ -336,3 +336,15 @@ These checks exercise the Python service and simulated transport. A real GTA
 installation, graphical editor and matching binary are still required to verify
 rendering, placement, captures and save behavior. Advanced workflows below the
 quick start may depend on enriched metadata and San Andreas model IDs.
+
+## Binary runtime requirements
+
+Linux archives use an Ubuntu 22.04 glibc baseline and require system OpenGL and
+GLFW. On Ubuntu/Debian install `sudo apt-get install libglfw3 libgl1` before
+launching. A graphical display is required. Linux CI compiles the editor and
+runs headless Python checks; this does not establish a real-game Linux runtime
+validation.
+
+macOS archives bundle GLFW. The alpha application is ad-hoc signed, not Apple
+notarized. If Gatekeeper blocks a downloaded build you trust, use macOS System
+Settings → Privacy & Security → Open Anyway after the first launch attempt.

@@ -23,6 +23,7 @@ class McpStdioTests(unittest.IsolatedAsyncioTestCase):
 			environment.update({
 				"ARIANE_ASSET_DB": str(database),
 				"ARIANE_DISCOVERY_DIR": discovery_dir,
+				"ARIANE_AGENT_STATE_DIR": str(Path(discovery_dir) / "state"),
 			})
 			server = StdioServerParameters(
 				command=sys.executable,

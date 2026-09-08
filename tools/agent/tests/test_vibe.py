@@ -8,6 +8,7 @@ from unittest.mock import patch, PropertyMock, Mock
 
 AGENT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(AGENT_DIR))
+from catalogue_fixture import make_catalogue
 from service import ArianeService
 from simulation_harness import SimulatedArianeEngine
 from scene_recipes import build_recipe
@@ -19,10 +20,11 @@ class VibeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self.database = make_catalogue(self.root)
         self.engine = SimulatedArianeEngine(self.root / 'engine.sock', self.root / 'engine')
         self.engine.__enter__()
         self.engine.dispatch('layer_open', ['vibe'])
-        self.service = ArianeService(self.root / 'engine.sock', state_dir=self.root / 'agent', timeout=2)
+        self.service = ArianeService(self.root / 'engine.sock', state_dir=self.root / 'agent', database=self.database, discovery_dir=self.root / 'discovery', timeout=2)
 
     def tearDown(self):
         self.engine.__exit__(None, None, None)
@@ -34,7 +36,7 @@ class VibeTests(unittest.TestCase):
 
     def test_project_survives_new_service_and_checks_revision(self):
         self.service.vibe.update_project({'brief':'Un marché abandonné', 'styles':['weathered']}, 0)
-        fresh = ArianeService(self.root / 'engine.sock', state_dir=self.root / 'agent')
+        fresh = ArianeService(self.root / 'engine.sock', state_dir=self.root / 'agent', database=self.database, discovery_dir=self.root / 'discovery')
         self.assertEqual('Un marché abandonné', fresh.vibe.project()['brief'])
         with self.assertRaisesRegex(ValueError, 'revision'):
             fresh.vibe.update_project({'brief':'overwrite'}, 0)

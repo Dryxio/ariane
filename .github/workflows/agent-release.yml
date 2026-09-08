@@ -12,6 +12,7 @@ env:
 jobs:
   python:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-22.04, macos-14]
         python: ['3.11', '3.13']
@@ -113,6 +114,17 @@ jobs:
           msbuild build\librwgta.sln /p:Configuration=ReleaseStatic /p:Platform=win-amd64-d3d9 /t:librwgta;euryopa /m
           python -m pip install build
           python -m build --wheel
+      - name: Windows Python and native transport tests
+        shell: pwsh
+        run: |
+          python -m pip install '.[mcp]'
+          python -m unittest discover -s tools/agent/tests -p test_portable_index.py -v
+          python -m unittest discover -s tools/agent/tests -p test_asset_discovery.py -v
+          python -m unittest discover -s tools/agent/tests -p test_mcp_stdio.py -v
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dev = Join-Path $vs 'Common7\Tools\VsDevCmd.bat'
+          cmd /c "`"$dev`" -arch=x64 && python -m unittest discover -s tools/agent/tests -p test_ipc_transport.py -v"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Package
         shell: pwsh
         run: |

@@ -10,6 +10,7 @@ import unittest
 AGENT_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(AGENT_DIR))
 
+from catalogue_fixture import make_catalogue
 from ariane_ipc import ArianeError  # noqa: E402
 from service import ArianeService, ScenePatchError  # noqa: E402
 from simulation_harness import SimulatedArianeEngine  # noqa: E402
@@ -22,11 +23,21 @@ class CompositionV2Tests(unittest.TestCase):
 		self.socket_path = root / "engine.sock"
 		self.engine_state = root / "engine"
 		self.agent_state = root / "agent"
+		self.discovery_dir = root / "discovery"
+		self.database = make_catalogue(root, extra_models=[
+			{"id": ident, "name": name, "dff": name, "txd": "fixture",
+			 "category": "Objects", "source": "fixture.ide"}
+			for ident, name in [(642, "test_canopy"), (2111, "folding_table"),
+			                   (1810, "folding_chair"), (1811, "folding_chair_b"),
+			                   (2000, "cooler_box"), (2001, "boombox_radio"),
+			                   (2002, "glass_bottles"), (2003, "wooden_crates")]
+		])
 		self.engine = SimulatedArianeEngine(self.socket_path, self.engine_state)
 		self.engine.__enter__()
 		self.engine.dispatch("layer_open", ["composition"])
 		self.service = ArianeService(engine_socket=self.socket_path,
-		                             state_dir=self.agent_state, timeout=1.0)
+		                             state_dir=self.agent_state, database=self.database,
+		                             discovery_dir=self.discovery_dir, timeout=1.0)
 
 	def tearDown(self):
 		self.engine.__exit__(None, None, None)
@@ -71,7 +82,8 @@ class CompositionV2Tests(unittest.TestCase):
 		self.service.apply_scene_patch(
 			self.placements(3, group="lounge"), patch_id="group-seed")
 		self.service = ArianeService(engine_socket=self.socket_path,
-		                             state_dir=self.agent_state, timeout=1.0)
+		                             state_dir=self.agent_state, database=self.database,
+		                             discovery_dir=self.discovery_dir, timeout=1.0)
 		self.assertEqual(3, self.service.list_groups()["groups"][0]["member_count"])
 		before = {item["object_key"]: item for item in self.service.enumerate_scene()}
 		self.service.transform_group("lounge", dx=5.0, dy=-2.0, dheading=90.0,

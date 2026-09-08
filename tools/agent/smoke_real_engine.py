@@ -64,6 +64,9 @@ def main():
             call('assets', 'index', '--gta-dir', args.game_copy.resolve())
             assert call('assets', 'search', 'bench', '--limit', 3)
             report['checks'].append('offline GTA catalogue indexing and search')
+            call('assets', 'inspect', 1281, '--ensure-renderable')
+            call('assets', 'preview', 1281, '--output', output / 'asset preview.png')
+            report['checks'].append('live asset inspection and rendered preview')
             call('camera', 2490, -1690, 25, 2490, -1665, 14, 58)
             pose = call('camera-context')['camera']['position']
             call('capture', output / 'current view.png')

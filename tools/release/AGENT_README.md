@@ -96,3 +96,15 @@ https://github.com/Dryxio/ariane/tree/codex/agent-public-release/tools/agent
 
 The Python wheel can also be installed without `[mcp]` for CLI-only use.
 The legacy `ariane-agentd` Unix sidecar is optional and is not needed by MCP.
+
+## Binary runtime requirements
+
+Linux archives use an Ubuntu 22.04 glibc baseline and require system OpenGL and
+GLFW. On Ubuntu/Debian install `sudo apt-get install libglfw3 libgl1` before
+launching. A graphical display is required. Linux CI compiles the editor and
+runs headless Python checks; this does not establish a real-game Linux runtime
+validation.
+
+macOS archives bundle GLFW. The alpha application is ad-hoc signed, not Apple
+notarized. If Gatekeeper blocks a downloaded build you trust, use macOS System
+Settings → Privacy & Security → Open Anyway after the first launch attempt.
