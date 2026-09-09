@@ -1,52 +1,14 @@
 # Ariane
 
+Ariane is a map viewer and editor for Grand Theft Auto III, Vice City and San Andreas, built on [librw](https://github.com/Southland-FR/librw) and based on aap's euryopa.
+
+Use it as a regular map editor, or let your AI explore and edit alongside you.
+
+**[Download Ariane](https://github.com/Dryxio/ariane/releases/latest)** · [Discord](https://discord.gg/eE9s9H4e24) · [Use it with your AI](#use-ariane-with-your-ai)
+
 [![Watch the complete Ariane walkthrough](docs/ariane-complete-walkthrough.png)](https://www.youtube.com/watch?v=jJipK1woGAk)
 
 **[Watch the complete Ariane walkthrough on YouTube →](https://www.youtube.com/watch?v=jJipK1woGAk)**
-
-Ariane is a map viewer and editor for Grand Theft Auto III, Vice City and San Andreas, built on [librw](https://github.com/Southland-FR/librw) and based on aap's euryopa.
-
-[Download the stable editor](https://github.com/Dryxio/ariane/releases/latest) · **[Download Agent Alpha](https://github.com/Dryxio/ariane/releases/tag/v1.40.9-agent-alpha.1)** · [Discord](https://discord.gg/eE9s9H4e24)
-
-## AI agents: CLI + MCP (alpha)
-
-Let an AI agent explore and edit GTA maps through **`arianectl`** or **MCP**: inspect assets, move the camera, capture images, and propose reversible map edits. The agent controls the Ariane editor. Bring your own GTA files; no private server or gtastuff checkout is required.
-
-**Want to use it with your AI? Give your agent this repo and a task.** Use an AI coding agent that can access files and run commands on your computer. It can check your setup and guide you through anything that needs your help.
-
-Copy this into your agent:
-
-> Help me set up the Agent Alpha version of https://github.com/Dryxio/ariane. Read the Agent Alpha installation and CLI/MCP guides linked in the README. Choose the right download for my computer, check what's already installed, and help me install what's missing. Ask where my GTA San Andreas files are. Then launch Ariane, connect through arianectl, take me to Grove Street, and capture an image of the neighborhood from above.
-
-You'll need your own GTA game files. For AI control, use **Agent Alpha**; the stable editor does not include the agent interface.
-
-Available for **Windows x64** and **macOS Apple Silicon**, with real San Andreas CLI/MCP validation. Windows was tested under Windows 11 ARM64/Parallels with x64 emulation. **Linux x64 is experimental**: CI build/tests passed; real-game rendering is untested. [Validation details](https://github.com/Dryxio/ariane/releases/download/v1.40.9-agent-alpha.1/VALIDATION.json).
-
-<details>
-<summary>Manual Agent Alpha installation and CLI/MCP setup</summary>
-
-**[Download Agent Alpha 1](https://github.com/Dryxio/ariane/releases/tag/v1.40.9-agent-alpha.1)** → **[Install the ZIP and connect your agent](https://github.com/Dryxio/ariane/blob/v1.40.9-agent-alpha.1/tools/release/AGENT_README.md)** → [CLI/MCP workflow guide](https://github.com/Dryxio/ariane/blob/v1.40.9-agent-alpha.1/tools/agent/README.md)
-
-### Quick example: start the editor, then inspect its camera (macOS/Linux)
-
-After following the installation guide above, launch the **agent-enabled** editor in one terminal:
-
-```sh
-cd "/path/to/GTA San Andreas"
-"/path/to/agent-bundle/ariane" --agent-socket /tmp/ariane-agent-v1.sock
-```
-
-Wait for the map to load. In another terminal, use the CLI installed from the bundle:
-
-```sh
-"/path/to/agent-bundle/.venv-agent/bin/arianectl" ping
-"/path/to/agent-bundle/.venv-agent/bin/arianectl" camera-context
-"/path/to/agent-bundle/.venv-agent/bin/arianectl" capture "$PWD/ariane-view.png"
-```
-
-For Windows startup and MCP connection settings, use the [installation guide](https://github.com/Dryxio/ariane/blob/v1.40.9-agent-alpha.1/tools/release/AGENT_README.md). Agent source and documentation are available in the [Agent Alpha release tag](https://github.com/Dryxio/ariane/tree/v1.40.9-agent-alpha.1/tools/agent).
-
-</details>
 
 ## Features
 
@@ -94,7 +56,47 @@ Get the optional integration ZIP, development updates and support in the [Ariane
 
 - **master** — the standard and recommended build
 - **PE/FLA** — an alternate build for projects that use expanded game limits
-- **Agent Alpha** — [agent-enabled editor, CLI and MCP prerelease](https://github.com/Dryxio/ariane/releases/tag/v1.40.9-agent-alpha.1); see [AI agents](#ai-agents-cli--mcp-alpha) above
+- **Agent Alpha** — [agent-enabled editor, CLI and MCP prerelease](https://github.com/Dryxio/ariane/releases/tag/v1.40.9-agent-alpha.1); see [Use Ariane with your AI](#use-ariane-with-your-ai) below
+
+## Use Ariane with your AI
+
+The optional **Agent Alpha** lets your AI explore and edit maps with you through **`arianectl`** or **MCP**: inspect assets, move the camera, capture images, and propose reversible map edits. The agent controls the Ariane editor. Bring your own GTA files; no private server or gtastuff checkout is required.
+
+**Want to use it with your AI? Give your agent this repo and a task.** Use an AI coding agent that can access files and run commands on your computer. It can check your setup and guide you through anything that needs your help.
+
+Copy this into your agent:
+
+> Help me set up the Agent Alpha version of https://github.com/Dryxio/ariane. Read the Agent Alpha installation and CLI/MCP guides linked in the README. Choose the right download for my computer, check what's already installed, and help me install what's missing. Ask where my GTA San Andreas files are. Then launch Ariane, connect through arianectl, take me to Grove Street, and capture an image of the neighborhood from above.
+
+You'll need your own GTA game files. For AI control, use **Agent Alpha**; the stable editor does not include the agent interface.
+
+Available for **Windows x64** and **macOS Apple Silicon**, with real San Andreas CLI/MCP validation. Windows was tested under Windows 11 ARM64/Parallels with x64 emulation. **Linux x64 is experimental**: CI build/tests passed; real-game rendering is untested. [Validation details](https://github.com/Dryxio/ariane/releases/download/v1.40.9-agent-alpha.1/VALIDATION.json).
+
+<details>
+<summary>Manual Agent Alpha installation and CLI/MCP setup</summary>
+
+**[Download Agent Alpha 1](https://github.com/Dryxio/ariane/releases/tag/v1.40.9-agent-alpha.1)** → **[Install the ZIP and connect your agent](https://github.com/Dryxio/ariane/blob/v1.40.9-agent-alpha.1/tools/release/AGENT_README.md)** → [CLI/MCP workflow guide](https://github.com/Dryxio/ariane/blob/v1.40.9-agent-alpha.1/tools/agent/README.md)
+
+### Quick example: start the editor, then inspect its camera (macOS/Linux)
+
+After following the installation guide above, launch the **agent-enabled** editor in one terminal:
+
+```sh
+cd "/path/to/GTA San Andreas"
+"/path/to/agent-bundle/ariane" --agent-socket /tmp/ariane-agent-v1.sock
+```
+
+Wait for the map to load. In another terminal, use the CLI installed from the bundle:
+
+```sh
+"/path/to/agent-bundle/.venv-agent/bin/arianectl" ping
+"/path/to/agent-bundle/.venv-agent/bin/arianectl" camera-context
+"/path/to/agent-bundle/.venv-agent/bin/arianectl" capture "$PWD/ariane-view.png"
+```
+
+For Windows startup and MCP connection settings, use the [installation guide](https://github.com/Dryxio/ariane/blob/v1.40.9-agent-alpha.1/tools/release/AGENT_README.md). Agent source and documentation are available in the [Agent Alpha release tag](https://github.com/Dryxio/ariane/tree/v1.40.9-agent-alpha.1/tools/agent).
+
+</details>
 
 ## Building from source
 
