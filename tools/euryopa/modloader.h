@@ -10,6 +10,10 @@ bool BuildModloaderLogicalExportPath(const char *logicalPath, char *dst, size_t 
 // DFF/TXD override: returns physical disk path or nil
 const char *ModloaderFindOverride(const char *basename, const char *ext);
 
+// Register a runtime loose-file override (Blender bridge live-reload). Checked
+// before all else and works even when the modloader is inactive.
+void RegisterRuntimeOverride(const char *basename, const char *ext, const char *path);
+
 // Read a loose file into malloc'd buffer. Caller must free().
 uint8 *ReadLooseFile(const char *path, int *size);
 

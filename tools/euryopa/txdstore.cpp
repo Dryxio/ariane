@@ -95,6 +95,23 @@ IsTxdLoaded(int i)
 	return false;
 }
 
+// Free a slot's texture dictionary but KEEP the slot, so IsTxdLoaded() becomes
+// false and the next Load()/LoadTxd() re-reads it (e.g. from a Blender-bridge
+// runtime override). Unlike RemoveTxdSlot this works on any slot.
+void
+ForceTxdReload(int i)
+{
+	TxdDef *td = GetTxdDef(i);
+	if(td == nil || td->txd == nil)
+		return;
+	if(rw::TexDictionary::getCurrent() == td->txd)
+		rw::TexDictionary::setCurrent(defaultTxd);
+	if(pushedTxd == td->txd)
+		pushedTxd = defaultTxd;
+	td->txd->destroy();
+	td->txd = nil;
+}
+
 void
 CreateTxd(int i)
 {

@@ -1108,10 +1108,37 @@ BuildModloaderLogicalExportPath(const char *logicalPath, char *dst, size_t size)
 	return true;
 }
 
+// Runtime overrides — registered live (Blender bridge) so an edited DFF/TXD is
+// loaded instead of the archived one. Checked before everything else and works
+// even when the modloader is inactive.
+struct RtOverride { char basename[64]; char ext[8]; char path[512]; };
+static std::vector<RtOverride> gRuntimeOverrides;
+
+void
+RegisterRuntimeOverride(const char *basename, const char *ext, const char *path)
+{
+	char lb[64], le[8];
+	int i;
+	for(i = 0; basename[i] && i < 63; i++){ char c = basename[i]; lb[i] = (c>='A'&&c<='Z') ? c-'A'+'a' : c; }
+	lb[i] = '\0';
+	for(i = 0; ext[i] && i < 7; i++){ char c = ext[i]; le[i] = (c>='A'&&c<='Z') ? c-'A'+'a' : c; }
+	le[i] = '\0';
+	for(size_t j = 0; j < gRuntimeOverrides.size(); j++)
+		if(strcmp(gRuntimeOverrides[j].basename, lb) == 0 && strcmp(gRuntimeOverrides[j].ext, le) == 0){
+			strncpy(gRuntimeOverrides[j].path, path, sizeof(gRuntimeOverrides[j].path)-1);
+			gRuntimeOverrides[j].path[sizeof(gRuntimeOverrides[j].path)-1] = '\0';
+			return;
+		}
+	RtOverride o;
+	strncpy(o.basename, lb, sizeof(o.basename)-1); o.basename[sizeof(o.basename)-1] = '\0';
+	strncpy(o.ext, le, sizeof(o.ext)-1); o.ext[sizeof(o.ext)-1] = '\0';
+	strncpy(o.path, path, sizeof(o.path)-1); o.path[sizeof(o.path)-1] = '\0';
+	gRuntimeOverrides.push_back(o);
+}
+
 const char*
 ModloaderFindOverride(const char *basename, const char *ext)
 {
-	if(!active) return nil;
 	char lowerBase[64], lowerExt[8];
 	int i;
 	for(i = 0; basename[i] && i < 63; i++){
@@ -1126,6 +1153,14 @@ ModloaderFindOverride(const char *basename, const char *ext)
 		lowerExt[i] = c;
 	}
 	lowerExt[i] = '\0';
+
+	// runtime (Blender bridge) overrides win, regardless of modloader state
+	for(size_t j = 0; j < gRuntimeOverrides.size(); j++)
+		if(strcmp(gRuntimeOverrides[j].basename, lowerBase) == 0 &&
+		   strcmp(gRuntimeOverrides[j].ext, lowerExt) == 0)
+			return gRuntimeOverrides[j].path;
+
+	if(!active) return nil;
 	if(!IsLooseBasenameOverrideExt(lowerExt))
 		return nil;
 

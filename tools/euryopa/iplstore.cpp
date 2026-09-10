@@ -144,6 +144,10 @@ LoadIpl(int slot, const char *sceneName)
 			inst->m_file = file;
 			inst->m_imageIndex = ipl->imageIndex;
 			inst->m_binInstIndex = i;
+			// running index across the whole map (text IPL + all streamed sections that
+			// share this filter key) so the bridge guid <ipl>#<index> is truly unique —
+			// a per-section index collided between LAw2_stream0 and LAw2_stream1.
+			inst->m_iplIndex = FileLoader::NextIplInstIndex();
 			SetInstIplFilterKey(inst, sceneName ? sceneName : (file ? file->name : nil));
 
 			if(inst->m_lodId < 0)

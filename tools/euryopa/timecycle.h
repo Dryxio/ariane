@@ -39,6 +39,9 @@ namespace Timecycle
 	extern rw::RGBA belowHorizonColour;
 
 	void Initialize(void);
+	// live bridge: bounds-checked pointer into the raw (hour,weather) table so the
+	// Blender bridge can patch a single cell in memory (nil if out of range / unloaded).
+	ColourSet *GetColourSetPtr(int hour, int weather);
 	void InitNeoWorldTweak(void);
 	void AddBox(CBox box, int farClp, int extraCol, float extraStrength, float falloff, float lodDist);
 	void Update(void);
