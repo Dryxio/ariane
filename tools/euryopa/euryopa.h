@@ -176,6 +176,7 @@ extern bool gRadiosity;
 
 // SA building pipe
 extern int gBuildingPipeSwitch;
+extern bool gAmbObjForObjects;
 extern float gDayNightBalance;
 extern float gWetRoadEffect;
 
@@ -492,7 +493,8 @@ void PollBlenderDeletes(void);		// <- del_blender.txt: soft-delete/restore insta
 bool CreateBridgeInstance(const char *name, rw::V3d pos, rw::Quat rot, char *guidOut, int guidSz);
 bool CreateBridgeModel(const char *name, const char *dffPath, const char *txdPath, const char *colPath,
 	const char *lodName, const char *lodDffPath, const char *lodTxdPath,
-	float drawDist, rw::V3d pos, rw::Quat rot, char *guidOut, int guidSz, char *errOut, int errSz);
+	float drawDist, rw::V3d pos, rw::Quat rot, char *guidOut, int guidSz, char *errOut, int errSz,
+	int *hdIdOut = nil, char *lodNameOut = nil, int lodNameSz = 0);
 void MoveInstanceTo(ObjectInst *inst, rw::V3d pos, rw::Quat rot);
 void GetInstGuid(ObjectInst *inst, char *buf, int sz);	// stable cross-session instance id for the bridge
 ObjectInst *FindInstByGuid(const char *guid);

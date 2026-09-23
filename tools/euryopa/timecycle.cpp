@@ -140,6 +140,7 @@ Interpolate(ColourSet *dst, ColourSet *a, ColourSet *b, float fa, float fb)
 
 static ColourSet *timecycleData;
 ColourSet currentColours;
+rw::RGBAf buildingAmbient;
 rw::RGBAf currentFogColour;
 rw::RGBA belowHorizonColour;
 #define GetColourSet(h, w) timecycleData[(h)*params.numWeathers + (w)]
@@ -1153,10 +1154,21 @@ SetLights(void)
 	else
 		pDirect->setColor(currentColours.dirMult, currentColours.dirMult, currentColours.dirMult);
 
+	// Building ambient: what prelit map geometry adds on top of its baked colours in
+	// the building pipeline (the small «Amb»; the blurred «Amb_bl» on VC/LCS).
 	if(params.timecycle == GAME_VC && gUseBlurAmb || params.timecycle == GAME_LCS)
-		pAmbient->setColor(currentColours.amb_bl.red, currentColours.amb_bl.green, currentColours.amb_bl.blue);
+		buildingAmbient = currentColours.amb_bl;
 	else
-		pAmbient->setColor(currentColours.amb.red, currentColours.amb.green, currentColours.amb.blue);
+		buildingAmbient = currentColours.amb;
+	buildingAmbient.alpha = 1.0f;
+
+	// World ambient (RW lights everything that is NOT a prelit building with it — unlit
+	// props, peds, vehicles): the game uses «Amb_Obj» on VC/SA. III has no Amb_Obj column
+	// in timecyc.dat, so it keeps the building ambient there. Toggle: Rendering window.
+	if(gAmbObjForObjects && (params.timecycle == GAME_VC || params.timecycle == GAME_SA))
+		pAmbient->setColor(currentColours.amb_obj.red, currentColours.amb_obj.green, currentColours.amb_obj.blue);
+	else
+		pAmbient->setColor(buildingAmbient.red, buildingAmbient.green, buildingAmbient.blue);
 }
 
 static void

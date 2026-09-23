@@ -117,6 +117,10 @@ bool gRadiosity;
 
 // SA building pipe
 int gBuildingPipeSwitch = PLATFORM_PS2;
+// Game-look lighting (Rendering window):
+//  gAmbObjForObjects - unlit props/peds/vehicles take the timecycle «Amb_Obj» (VC/SA)
+//                      like the game; prelit buildings keep the small «Amb».
+bool gAmbObjForObjects = true;
 float gDayNightBalance;
 float gWetRoadEffect;
 

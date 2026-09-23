@@ -1925,6 +1925,7 @@ renderObjectToRaster(int objectId, rw::Raster *colorRaster, rw::Raster *depthRas
 	rw::SetRenderState(rw::ZTESTENABLE, 1);
 	rw::SetRenderState(rw::ZWRITEENABLE, 1);
 	pAmbient->setColor(0.7f, 0.7f, 0.7f);
+	Timecycle::buildingAmbient = rw::makeRGBAf(0.7f, 0.7f, 0.7f, 1.0f);	// neutral preview: building pipe too
 	pDirect->setColor(0.5f, 0.5f, 0.5f);
 
 	rw::Matrix ident;
@@ -2059,6 +2060,7 @@ renderPrefabToRaster(const char *path, rw::Raster *colorRaster, rw::Raster *dept
 	rw::SetRenderState(rw::ZTESTENABLE, 1);
 	rw::SetRenderState(rw::ZWRITEENABLE, 1);
 	pAmbient->setColor(0.72f, 0.72f, 0.72f);
+	Timecycle::buildingAmbient = rw::makeRGBAf(0.72f, 0.72f, 0.72f, 1.0f);	// neutral preview: building pipe too
 	pDirect->setColor(0.52f, 0.52f, 0.52f);
 
 	for(int i = 0; i < numEntries; i++){
@@ -2360,6 +2362,7 @@ RenderPreviewObject(int objectId)
 	rw::SetRenderState(rw::ZTESTENABLE, 1);
 	rw::SetRenderState(rw::ZWRITEENABLE, 1);
 	pAmbient->setColor(0.7f, 0.7f, 0.7f);
+	Timecycle::buildingAmbient = rw::makeRGBAf(0.7f, 0.7f, 0.7f, 1.0f);	// neutral preview: building pipe too
 	pDirect->setColor(0.5f, 0.5f, 0.5f);
 
 	rw::Matrix ident;
@@ -3430,7 +3433,7 @@ WriteArianeLiveState(void)
 	{
 		char cbuf[256];
 		int cn = snprintf(cbuf, sizeof(cbuf),
-			"cam\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.3f\t%.4f\t%.4f\t%.4f\n",
+			"cam\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\t%.4f\n",	// 4 dp: mm rounding of eye/target skews the tilt azimuth near the poles
 			TheCamera.m_position.x, TheCamera.m_position.y, TheCamera.m_position.z,
 			TheCamera.m_target.x, TheCamera.m_target.y, TheCamera.m_target.z,
 			// up vector so Blender can rebuild the exact orientation (no roll guessing)
@@ -3657,6 +3660,13 @@ PollBlenderCamIn(void)
 	if(!sx || !sy || !sz || !tx || !ty || !tz) return;
 	// up vector (optional for back-compat; Blender always sends it now)
 	char *ux = strtok(nil,"\t \n"), *uy = strtok(nil,"\t \n"), *uz = strtok(nil,"\t \n");
+	bool haveUp = ux && uy && uz;
+	rw::V3d bup = { 0.0f, 0.0f, 1.0f };
+	if(haveUp){
+		bup.x = (float)atof(ux); bup.y = (float)atof(uy); bup.z = (float)atof(uz);
+		if(!std::isfinite(bup.x) || !std::isfinite(bup.y) || !std::isfinite(bup.z))
+			haveUp = false;
+	}
 
 	// SNAP straight to Blender's camera. Interpolating eye/target flips near the
 	// vertical poles ("looks like the camera is swinging to the other side") and
@@ -3668,10 +3678,30 @@ PollBlenderCamIn(void)
 	   !std::isfinite(tgt.x) || !std::isfinite(tgt.y) || !std::isfinite(tgt.z))
 		return;					// garbage/partial read → never feed NaN to the matrix
 
+	// ariane's camera is roll-free by design: m_up must stay (0,0,±1) — turn()/orbit()
+	// only ever fix m_up.z, so any x/y we put here would tilt the horizon forever.
+	// Take just the SIGN of Blender's up (upright vs. flipped past the pole) and rebuild
+	// a clean, roll-free up in the vertical plane of the view direction. This matches
+	// Blender's own turntable orbit (also roll-free) and can't corrupt ariane's state.
+	float sgn = 1.0f;
+	if(haveUp && bup.z < 0.0f)
+		sgn = -1.0f;
+
 	// Never let the view sit EXACTLY vertical. lookAt(dir, (0,0,±1)) is degenerate when
 	// dir ∥ up: right = dir×up = 0 → normalize(0) = NaN → NaN view matrix → CRASH on the
-	// next render. Blender's Ctrl+wheel snap to top/bottom lands exactly there, so nudge
-	// the target ~0.36° off the pole (imperceptible; ariane's own camera never lands there).
+	// next render. Blender's Numpad 7 / Ctrl+wheel snap to top/bottom lands exactly there,
+	// so nudge the target ~0.36° off the pole (imperceptible; ariane's own camera never
+	// lands there).
+	//
+	// WHICH WAY to nudge matters: in a roll-free camera the azimuth of that tilt decides
+	// where "screen up" points when looking (nearly) straight down/up. Taking it from the
+	// view direction itself is useless here — at an exact top view its horizontal part
+	// is 0 (→ arbitrary +X → ariane shows Blender's top view rotated 90°), and just off
+	// the pole it's dominated by the rounding of the streamed eye/target (→ the whole
+	// picture spins while Blender drifts by a hair). So derive it from Blender's UP
+	// vector instead: at the pole that vector is horizontal and exact, and for a
+	// roll-free view screen-up = ±(horizontal tilt of the view dir) — the sign flips for
+	// looking up vs. down and for the flipped (sgn<0) state; see localup = (dir×up)×dir.
 	{
 		rw::V3d d = rw::sub(tgt, pos);
 		float len = rw::length(d);
@@ -3680,9 +3710,15 @@ PollBlenderCamIn(void)
 			const float LIM = 0.99998f;			// cos(~0.36°)
 			if(nz > LIM || nz < -LIM){
 				float horiz = sqrtf(1.0f - LIM*LIM);	// ~0.0063
-				float hl = sqrtf(d.x*d.x + d.y*d.y);
 				float hx = 1.0f, hy = 0.0f;
-				if(hl > 1e-6f){ hx = d.x/hl; hy = d.y/hl; }	// keep the azimuth
+				float ul = haveUp ? sqrtf(bup.x*bup.x + bup.y*bup.y) : 0.0f;
+				float hl = sqrtf(d.x*d.x + d.y*d.y);
+				if(ul > 1e-4f){
+					float sc = (nz < 0.0f ? 1.0f : -1.0f)*sgn;
+					hx = sc*bup.x/ul; hy = sc*bup.y/ul;	// screen-up follows Blender
+				}else if(hl > 1e-6f){
+					hx = d.x/hl; hy = d.y/hl;		// legacy line w/o up: keep azimuth
+				}
 				d.x = hx*horiz*len;
 				d.y = hy*horiz*len;
 				d.z = (nz > 0.0f ? LIM : -LIM)*len;
@@ -3692,15 +3728,6 @@ PollBlenderCamIn(void)
 	}
 	TheCamera.m_position = pos;
 	TheCamera.m_target = tgt;
-
-	// ariane's camera is roll-free by design: m_up must stay (0,0,±1) — turn()/orbit()
-	// only ever fix m_up.z, so any x/y we put here would tilt the horizon forever.
-	// Take just the SIGN of Blender's up (upright vs. flipped past the pole) and rebuild
-	// a clean, roll-free up in the vertical plane of the view direction. This matches
-	// Blender's own turntable orbit (also roll-free) and can't corrupt ariane's state.
-	float sgn = 1.0f;
-	if(ux && uy && uz && (float)atof(uz) < 0.0f)
-		sgn = -1.0f;
 	TheCamera.m_up.set(0.0f, 0.0f, sgn);
 	rw::V3d dir = rw::sub(TheCamera.m_target, TheCamera.m_position);
 	if(rw::length(dir) > 1e-4f){
@@ -4108,12 +4135,21 @@ PollBlenderCreateModel(void)
 		}
 		rw::V3d p3 = { x, y, z };
 		rw::Quat r; r.x = qx; r.y = qy; r.z = qz; r.w = qw;
-		char guid[300] = "", err[256] = "";
+		char guid[300] = "", err[256] = "", regLod[64] = "";
+		int hdId = -1;
 		bool ok = CreateBridgeModel(name, dffP, txdP, hasCol ? colP : nil,
 			lodOk ? lodName : nil, lodOk ? lodDffP : nil, lodOk ? lodTxdP : nil,
-			dd, p3, r, guid, sizeof(guid), err, sizeof(err));
+			dd, p3, r, guid, sizeof(guid), err, sizeof(err), &hdId, regLod, sizeof(regLod));
 		done += key; done += '\t';
-		if(ok && guid[0]){ done += guid; done += '\t'; done += name; }
+		if(ok && guid[0]){
+			// key \t guid \t name \t id=<model id> [\t lod=<registered LOD name>]
+			// The addon reads id=; lod= tells it what III/VC renamed the LOD to.
+			done += guid; done += '\t'; done += name;
+			char extra[96];
+			snprintf(extra, sizeof(extra), "\tid=%d", hdId);
+			done += extra;
+			if(regLod[0]){ done += "\tlod="; done += regLod; }
+		}
 		else { done += "ERR:"; done += (err[0] ? err : "failed"); }
 		done += '\n';
 		log("BlenderBridge: create model %s → %s\n", name, (ok && guid[0]) ? guid : err);

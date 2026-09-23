@@ -35,6 +35,10 @@ namespace Timecycle
 		float lightMapIntensity;
 	};
 	extern ColourSet currentColours;
+	// Ambient the BUILDING pipeline adds on top of prelit colours (the small «Amb», or the
+	// blurred one on VC/LCS). Kept apart from the RW world ambient (pAmbient), which lights
+	// everything unlit with «Amb_Obj» like the game does. Set by SetLights() every frame.
+	extern rw::RGBAf buildingAmbient;
 	extern rw::RGBAf currentFogColour;
 	extern rw::RGBA belowHorizonColour;
 

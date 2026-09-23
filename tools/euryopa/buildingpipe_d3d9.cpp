@@ -78,7 +78,8 @@ buildingRenderCB_PS2(Atomic *atomic, d3d9::InstanceDataHeader *header)
 	d3ddevice->SetVertexShaderConstantF(REG_dayparam, dayparam, 1);
 	d3ddevice->SetVertexShaderConstantF(REG_nightparam, nightparam, 1);
 
-	d3ddevice->SetVertexShaderConstantF(REG_ambient, (float*)&pAmbient->color, 1);
+	// building ambient («Amb»), not the world ambient (which is «Amb_Obj» for unlit objects)
+	d3ddevice->SetVertexShaderConstantF(REG_ambient, (float*)&Timecycle::buildingAmbient, 1);
 
 	RawMatrix envmat;
 	GetBuildingEnvMatrix(atomic, nil, &envmat);

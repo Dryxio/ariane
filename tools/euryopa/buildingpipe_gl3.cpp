@@ -16,6 +16,7 @@ int32 u_dayparam, u_nightparam;	// DN
 int32 u_texmat;	// UVA
 int32 u_envmat, u_envXform, u_shininess;	// EnvMap
 int32 u_colorscale;
+int32 u_ambLightBld;	// librw's u_ambLight, re-set to the BUILDING ambient after lightingCB
 
 #define U(i) currentShader->uniformLocations[i]
 
@@ -217,6 +218,9 @@ buildingRenderCB(Atomic *atomic, gl3::InstanceDataHeader *header)
 	int32 vsBits = lightingCB(atomic);
 	uint32 flags = geo->flags;
 	lightingCB(atomic);
+	// lightingCB uploaded the WORLD ambient (Amb_Obj, for unlit objects); prelit buildings
+	// add the small «Amb» instead — override the cached uniform before the draw.
+	setUniform(u_ambLightBld, &Timecycle::buildingAmbient);
 	setupVertexInput(header);
 
 	InstanceData *inst = header->inst;
@@ -313,6 +317,7 @@ MakeCustomBuildingPipelines(void)
 	u_envXform = registerUniform("u_envXform");
 	u_shininess = registerUniform("u_shininess");
 	u_colorscale = registerUniform("u_colorscale");
+	u_ambLightBld = registerUniform("u_ambLight", UNIFORM_VEC4);	// same slot librw registered
 
 	{
 #include "gl_shaders/ps2Building_vert.inc"
