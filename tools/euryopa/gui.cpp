@@ -182,16 +182,39 @@ LoadInitialAntialiasingSettings(void)
 	fclose(f);
 }
 
+// Highest model ID (+1) a custom import may take. III/VC have a hard MODELINFOSIZE
+// baked into the exe (5500 / 6500); anything above needs a limit adjuster, so we
+// never hand those out. SA keeps the full table (FLA/PE builds raise it).
+static int
+customImportModelIdLimit(void)
+{
+	if(isIII()) return 5500;
+	if(isVC()) return 6500;
+	return NUMOBJECTDEFS;
+}
+
+// Longest model name the target game can address: VC's CBaseModelInfo::m_name
+// is 21 bytes (20 chars), III's 24 but COL1 stores 22 (21 chars), SA 23 chars.
+static int
+customImportMaxModelNameLen(void)
+{
+	if(isVC()) return 20;
+	if(isIII()) return 21;
+	return 23;
+}
+
 static int
 getDefaultCustomImportStartId(void)
 {
+	// III/VC: the stock IDEs leave gaps below the exe limit; start scanning from 0 and
+	// let findSuggestedCustomImportId() pick the tail gap / biggest hole.
 	return isSA() ? 18631 : 0;
 }
 
 static void
 sanitizeCustomImportSettings(void)
 {
-	if(gCustomImportPreferredStartId < 0 || gCustomImportPreferredStartId >= NUMOBJECTDEFS)
+	if(gCustomImportPreferredStartId < 0 || gCustomImportPreferredStartId >= customImportModelIdLimit())
 		gCustomImportPreferredStartId = getDefaultCustomImportStartId();
 }
 
@@ -2409,6 +2432,7 @@ struct CustomImportState
 	char colSource[1024];
 	bool hasCol;
 	bool preferAutoCol;
+	bool boundsOnlyCol;		// auto-COL with bounds but no faces (III/VC LOD companions)
 	int objectId;
 	float drawDist;
 	ObjectDef previewObj;
@@ -3186,6 +3210,7 @@ struct ColInspectContext
 	const char *modelName;
 	int count;
 	bool allMatch;
+	bool allVersion1;
 	char firstName[25];
 };
 
@@ -3202,13 +3227,16 @@ inspectColEntry(ColFileHeader *header, size_t, void *ctx)
 	}
 	if(rw::strncmp_ci(entryName, inspect->modelName, MODELNAMELEN) != 0)
 		inspect->allMatch = false;
+	if(header->fourcc != 0x4C4C4F43)	// COLL
+		inspect->allVersion1 = false;
 	inspect->count++;
 	return true;
 }
 
 static bool
 inspectColFileForImport(const char *path, int *entryCount, bool *allEntriesMatchModel,
-                        bool *singleEntryNeedsRename, const char *modelName)
+                        bool *singleEntryNeedsRename, const char *modelName,
+                        bool *allEntriesVersion1 = nil)
 {
 	std::vector<char> data;
 	if(!readFileExact(path, data) || data.size() < 32)
@@ -3217,12 +3245,14 @@ inspectColFileForImport(const char *path, int *entryCount, bool *allEntriesMatch
 	ColInspectContext ctx = {};
 	ctx.modelName = modelName;
 	ctx.allMatch = true;
+	ctx.allVersion1 = true;
 	ctx.firstName[0] = '\0';
 	if(!forEachColEntry(data, inspectColEntry, &ctx) || ctx.count == 0)
 		return false;
 
 	if(entryCount) *entryCount = ctx.count;
 	if(allEntriesMatchModel) *allEntriesMatchModel = ctx.allMatch;
+	if(allEntriesVersion1) *allEntriesVersion1 = ctx.allVersion1;
 	if(singleEntryNeedsRename) *singleEntryNeedsRename = ctx.count == 1 &&
 		rw::strncmp_ci(ctx.firstName, modelName, MODELNAMELEN) != 0;
 	return true;
@@ -3624,7 +3654,7 @@ uiObjectFlagsEditor(ObjectDef *obj)
 static int
 findSuggestedCustomImportId(void)
 {
-	int limit = NUMOBJECTDEFS;
+	int limit = customImportModelIdLimit();
 	int start = gCustomImportPreferredStartId;
 	if(start < 0)
 		start = 0;
@@ -3637,10 +3667,18 @@ findSuggestedCustomImportId(void)
 	for(int i = maxExisting + 1; i < limit; i++)
 		if(GetObjectDef(i) == nil)
 			return i;
-	for(int i = start; i < limit; i++)
-		if(GetObjectDef(i) == nil)
-			return i;
-	return -1;
+	// No room after the last used ID (III/VC stock maps sit right under the exe
+	// limit): fall back to the start of the widest free run so consecutive imports
+	// land next to each other instead of plugging one-ID holes in vanilla ranges.
+	int bestStart = -1, bestLen = 0;
+	for(int i = start; i < limit; ){
+		if(GetObjectDef(i)){ i++; continue; }
+		int j = i;
+		while(j < limit && GetObjectDef(j) == nil) j++;
+		if(j - i > bestLen){ bestLen = j - i; bestStart = i; }
+		i = j;
+	}
+	return bestStart;
 }
 
 static void
@@ -3774,6 +3812,74 @@ spawnCustomImportedObject(int objectId)
 	inst->Select();
 	ObjectInst *pasted[1] = { inst };
 	UndoRecordPaste(pasted, 1);
+	return true;
+}
+
+// Blender bridge (Phase E-1): create a new instance of an EXISTING model at a given
+// transform and add it to the active IPL document (m_isAdded, persisted on save).
+// Mirrors spawnCustomImportedObject but takes an explicit name + transform and does
+// NOT hijack the selection. Returns the new instance's stable guid.
+bool
+CreateBridgeInstance(const char *name, rw::V3d pos, rw::Quat rot, char *guidOut, int guidSz)
+{
+	if(guidOut && guidSz > 0) guidOut[0] = '\0';
+	int objectId = -1;
+	ObjectDef *obj = GetObjectDef(name, &objectId);
+	if(obj == nil || objectId < 0)
+		return false;
+
+	GameFile *file = IsIplMapDocumentOpen() ?
+		GetOrCreateCurrentPlacementIplFile() :
+		getOrCreateCustomImportGameFile(&gCustomImportIplFile, CUSTOM_IMPORT_IPL_LOGICAL_PATH);
+	int maxIplIndex = -1;
+	for(CPtrNode *p = instances.first; p; p = p->next){
+		ObjectInst *other = (ObjectInst*)p->item;
+		if(other->m_file && file &&
+		   LogicalPathEquals(other->m_file->name, file->name) &&
+		   other->m_imageIndex < 0 && other->m_iplIndex > maxIplIndex)
+			maxIplIndex = other->m_iplIndex;
+	}
+
+	ObjectInst *inst = AddInstance();
+	inst->m_objectId = objectId;
+	inst->m_area = currentArea;
+	inst->m_rotation = rot;
+	inst->m_translation = pos;
+	inst->m_lodId = -1;
+	inst->m_lod = nil;
+	inst->m_numChildren = 0;
+	inst->m_file = file;
+	inst->m_imageIndex = -1;
+	inst->m_binInstIndex = -1;
+	inst->m_iplIndex = maxIplIndex + 1;
+	SetInstIplFilterKey(inst, file ? file->name : nil);
+	inst->m_isAdded = true;
+	inst->m_isDirty = true;
+	inst->m_savedStateValid = false;
+	inst->m_wasSavedDeleted = false;
+	inst->m_gameEntityExists = false;
+	StampChangeSeq(inst);
+
+	if(obj->m_isBigBuilding)
+		inst->SetupBigBuilding();
+	inst->UpdateMatrix();
+	if(!obj->IsLoaded()){
+		RequestObject(objectId);
+		LoadAllRequestedObjects();
+	}
+	inst->CreateRwObject();
+	if(obj->m_colModel)
+		InsertInstIntoSectors(inst);
+	else{
+		CPtrList *list = inst->m_isBigBuilding
+			? &outOfBoundsSector.bigbuildings : &outOfBoundsSector.buildings;
+		list->InsertItem(inst);
+	}
+
+	ObjectInst *pasted[1] = { inst };
+	UndoRecordPaste(pasted, 1);
+	if(guidOut && guidSz > 0)
+		GetInstGuid(inst, guidOut, guidSz);
 	return true;
 }
 
@@ -4152,13 +4258,19 @@ finalizeCustomImport(void)
 	gCustomImport.error[0] = '\0';
 	gCustomImport.warning[0] = '\0';
 
-	if(!isSA()){
+	if(!isIII() && !isVC() && !isSA()){
 		snprintf(gCustomImport.error, sizeof(gCustomImport.error),
-		         "Custom import is wired for GTA San Andreas only in this v1.");
+		         "Custom import supports GTA III, Vice City and San Andreas only.");
 		return false;
 	}
 	if(gCustomImport.objectId < 0){
 		snprintf(gCustomImport.error, sizeof(gCustomImport.error), "No free stock-range ID was found.");
+		return false;
+	}
+	if(gCustomImport.objectId >= customImportModelIdLimit()){
+		snprintf(gCustomImport.error, sizeof(gCustomImport.error),
+		         "ID %d is above this game's model limit (%d). Use a lower free ID or a limit adjuster.",
+		         gCustomImport.objectId, customImportModelIdLimit());
 		return false;
 	}
 	if(GetObjectDef(gCustomImport.objectId)){
@@ -4175,9 +4287,11 @@ finalizeCustomImport(void)
 		         "Model name %s already exists. Change the model name first.", gCustomImport.modelName);
 		return false;
 	}
-	if(strlen(gCustomImport.modelName) >= 24){
+	if((int)strlen(gCustomImport.modelName) > customImportMaxModelNameLen() ||
+	   (int)strlen(gCustomImport.txdName) > customImportMaxModelNameLen()){
 		snprintf(gCustomImport.error, sizeof(gCustomImport.error),
-		         "Model name %s is too long for COL internal name/export (max 23 chars).", gCustomImport.modelName);
+		         "Model/TXD name %s is too long for this game (max %d chars).",
+		         gCustomImport.modelName, customImportMaxModelNameLen());
 		return false;
 	}
 
@@ -4218,14 +4332,20 @@ finalizeCustomImport(void)
 		int colEntryCount = 0;
 		bool colAllMatch = false;
 		bool colNeedsRename = false;
+		bool colAllVersion1 = false;
 		if(!inspectColFileForImport(gCustomImport.colSource, &colEntryCount, &colAllMatch,
-		                            &colNeedsRename, gCustomImport.modelName)){
+		                            &colNeedsRename, gCustomImport.modelName, &colAllVersion1)){
 			snprintf(gCustomImport.error, sizeof(gCustomImport.error), "Couldn't parse COL file %s.", gCustomImport.colSource);
 			return false;
 		}
 		if(colEntryCount != 1 && !colAllMatch){
 			snprintf(gCustomImport.error, sizeof(gCustomImport.error),
 			         "COL import only supports automatic renaming for single-entry COL files.");
+			return false;
+		}
+		if(!isSA() && !colAllVersion1){
+			snprintf(gCustomImport.error, sizeof(gCustomImport.error),
+			         "GTA III / Vice City only load COL1 (COLL). Export the COL as version 1 or let Ariane auto-generate it.");
 			return false;
 		}
 	}
@@ -4321,9 +4441,15 @@ finalizeCustomImport(void)
 	char ideEntry[512];
 	gCustomImport.previewObj.m_drawDist[0] = gCustomImport.drawDist;
 	int ideFlags = computeFlagsFromObjectDef(&gCustomImport.previewObj);
-	snprintf(ideEntry, sizeof(ideEntry), "%d, %s, %s, %.1f, %d",
-	         gCustomImport.objectId, gCustomImport.modelName, gCustomImport.txdName,
-	         gCustomImport.drawDist, ideFlags);
+	// III/VC objs lines carry the mesh count before the draw distance; SA dropped it.
+	if(isSA())
+		snprintf(ideEntry, sizeof(ideEntry), "%d, %s, %s, %.1f, %d",
+		         gCustomImport.objectId, gCustomImport.modelName, gCustomImport.txdName,
+		         gCustomImport.drawDist, ideFlags);
+	else
+		snprintf(ideEntry, sizeof(ideEntry), "%d, %s, %s, 1, %.1f, %d",
+		         gCustomImport.objectId, gCustomImport.modelName, gCustomImport.txdName,
+		         gCustomImport.drawDist, ideFlags);
 	for(size_t i = 0; i < lines.size(); i++){
 		if(strcmp(lines[i].c_str(), ideEntry) == 0){
 			inserted = true;
@@ -4395,8 +4521,10 @@ finalizeCustomImport(void)
 		std::vector<char> generatedCol;
 		char autoColError[256];
 		autoColError[0] = '\0';
-		if(!GenerateCol3FromAtomic(obj->m_atomics[0], gCustomImport.modelName, generatedCol, &stats,
-		                           autoColError, sizeof(autoColError)) ||
+		// III/VC only parse COL1 ("COLL"); SA gets the compact COL3.
+		if(!GenerateColFromAtomic(obj->m_atomics[0], gCustomImport.modelName, isSA() ? 3 : 1,
+		                          generatedCol, &stats, autoColError, sizeof(autoColError),
+		                          gCustomImport.boundsOnlyCol && !isSA()) ||
 		   !writeFileExact(colTarget, generatedCol.data(), generatedCol.size())){
 			snprintf(gCustomImport.error, sizeof(gCustomImport.error), "%s",
 			         autoColError[0] ? autoColError : "Failed to auto-generate COL from DFF geometry.");
@@ -4486,6 +4614,122 @@ finalizeCustomImport(void)
 	return true;
 }
 
+// Register one model via ariane's custom-import backend (free ID, loose export into
+// Mod Loader, custom.ide/ipl + manifest, real or auto COL) and return the instance
+// it spawns+selects.
+static bool
+bridgeRegisterAndSpawn(const char *name, const char *dffPath, const char *txdPath, const char *colPath,
+	float drawDist, ObjectInst **outInst, char *errOut, int errSz, bool boundsOnlyCol = false)
+{
+	if(outInst) *outInst = nil;
+	resetCustomImportState();		// inits gCustomImport + suggests a free ID
+	gCustomImport.boundsOnlyCol = boundsOnlyCol;
+	strncpy(gCustomImport.modelName, name, MODELNAMELEN-1); gCustomImport.modelName[MODELNAMELEN-1] = '\0';
+	strncpy(gCustomImport.txdName, name, MODELNAMELEN-1); gCustomImport.txdName[MODELNAMELEN-1] = '\0';
+	strncpy(gCustomImport.dffSource, dffPath, sizeof(gCustomImport.dffSource)-1);
+	gCustomImport.dffSource[sizeof(gCustomImport.dffSource)-1] = '\0';
+	strncpy(gCustomImport.txdSource, txdPath, sizeof(gCustomImport.txdSource)-1);
+	gCustomImport.txdSource[sizeof(gCustomImport.txdSource)-1] = '\0';
+	if(colPath && colPath[0]){
+		strncpy(gCustomImport.colSource, colPath, sizeof(gCustomImport.colSource)-1);
+		gCustomImport.colSource[sizeof(gCustomImport.colSource)-1] = '\0';
+		gCustomImport.hasCol = true;
+		gCustomImport.preferAutoCol = false;
+	}else{
+		gCustomImport.hasCol = false;		// ariane auto-generates COL from the DFF
+		gCustomImport.preferAutoCol = true;
+	}
+	if(drawDist > 0.0f)
+		gCustomImport.drawDist = drawDist;
+	gCustomImport.previewObj.m_drawDist[0] = gCustomImport.drawDist;
+
+	if(!finalizeCustomImport()){
+		if(errOut && errSz > 0){ strncpy(errOut, gCustomImport.error, errSz-1); errOut[errSz-1] = '\0'; }
+		return false;
+	}
+	if(outInst)
+		*outInst = (ObjectInst*)(selection.first ? selection.first->item : nil);
+	return true;
+}
+
+// Blender bridge (Phase E-2): register a BRAND-NEW model (+ optional LOD companion)
+// from Blender-exported assets, place the instance at the Blender transform, and link
+// the LOD. Returns the HD instance's stable guid; optionally the HD's model ID and the
+// name the LOD was actually registered under (III/VC may rename it, see below).
+bool
+CreateBridgeModel(const char *name, const char *dffPath, const char *txdPath, const char *colPath,
+	const char *lodName, const char *lodDffPath, const char *lodTxdPath,
+	float drawDist, rw::V3d pos, rw::Quat rot, char *guidOut, int guidSz, char *errOut, int errSz,
+	int *hdIdOut, char *lodNameOut, int lodNameSz)
+{
+	if(guidOut && guidSz > 0) guidOut[0] = '\0';
+	if(errOut && errSz > 0) errOut[0] = '\0';
+	if(hdIdOut) *hdIdOut = -1;
+	if(lodNameOut && lodNameSz > 0) lodNameOut[0] = '\0';
+
+	ObjectInst *hd = nil;
+	if(!bridgeRegisterAndSpawn(name, dffPath, txdPath, colPath, drawDist, &hd, errOut, errSz))
+		return false;
+	if(hd == nil){
+		if(errOut && errSz > 0) strncpy(errOut, "model registered but no instance spawned", errSz-1);
+		return false;
+	}
+	MoveInstanceTo(hd, pos, rot);
+	if(hdIdOut) *hdIdOut = hd->m_objectId;
+
+	// optional LOD: register a second model at the same spot and link it. Non-fatal.
+	//  SA:     any name (Blender sends LOD<name>); HD's m_lod / m_lodId → IPL lod field.
+	//  III/VC: no lod field — the game pairs models whose names match after the first
+	//          3 chars (CSimpleModelInfo::FindRelatedModel), so the LOD MUST be called
+	//          "LOD" + name[3:]. We register it under that name regardless of what
+	//          Blender called the file, and link via ObjectDef::SetupBigBuilding over
+	//          both IDs (mirrors CFileLoader::LoadObjectTypes' post-pass).
+	bool wantLod = lodName && lodName[0] && lodDffPath && lodDffPath[0];
+	if(wantLod && !isSA() && strlen(name) <= 3){
+		log("BlenderBridge: LOD for %s skipped: III/VC need a model name longer than 3 chars\n", name);
+		wantLod = false;
+	}
+	if(wantLod){
+		char regName[MODELNAMELEN];
+		if(isSA()){
+			strncpy(regName, lodName, sizeof(regName)-1);
+			regName[sizeof(regName)-1] = '\0';
+		}else
+			snprintf(regName, sizeof(regName), "LOD%s", name+3);
+
+		ObjectInst *lod = nil;
+		char lodErr[256] = "";
+		// III/VC: vanilla LODs carry no collision (the HD does) — give the LOD a
+		// bounds-only COL1 so the game flags it bUsesCollision=false instead of
+		// stacking a second, coarser collision mesh on top of the HD's.
+		if(bridgeRegisterAndSpawn(regName, lodDffPath, lodTxdPath, nil, 2000.0f, &lod, lodErr, sizeof(lodErr), !isSA()) && lod){
+			MoveInstanceTo(lod, pos, rot);
+			if(isSA()){
+				hd->m_lod = lod;
+				hd->m_lodId = lod->m_iplIndex;
+			}else{
+				ObjectDef *lodObj = GetObjectDef(lod->m_objectId);
+				ObjectDef *hdObj = GetObjectDef(hd->m_objectId);
+				int first = min(hd->m_objectId, lod->m_objectId);
+				int last = max(hd->m_objectId, lod->m_objectId) + 1;
+				if(lodObj) lodObj->SetupBigBuilding(first, last);
+				if(hdObj) hdObj->SetupBigBuilding(first, last);
+				if(hdObj && hdObj->m_relatedModel == nil)
+					log("BlenderBridge: %s / %s not paired as HD/LOD (draw distance <= 300?)\n", name, regName);
+			}
+			if(lodNameOut && lodNameSz > 0){
+				strncpy(lodNameOut, regName, lodNameSz-1);
+				lodNameOut[lodNameSz-1] = '\0';
+			}
+		}else
+			log("BlenderBridge: LOD %s not registered: %s\n", regName, lodErr);
+	}
+
+	if(guidOut && guidSz > 0)
+		GetInstGuid(hd, guidOut, guidSz);
+	return true;
+}
+
 static void
 uiCustomImportPopup(void)
 {
@@ -4499,6 +4743,9 @@ uiCustomImportPopup(void)
 
 	ImGui::Text("Import custom object in front of camera");
 	ImGui::TextDisabled("v1 exports to modloader/Ariane");
+	if(!isSA())
+		ImGui::TextDisabled("%s: IDs below %d (exe limit), names up to %d chars, COL1 collision",
+		                    isVC() ? "Vice City" : "GTA III", customImportModelIdLimit(), customImportMaxModelNameLen());
 	ImGui::Separator();
 	ImGui::Text("Files");
 	if(ImGui::Button(gCustomImport.dffSource[0] ? pathFilename(gCustomImport.dffSource) : "Choose DFF...")){
@@ -5057,6 +5304,11 @@ uiRendering(void)
 	static const uint32 aaOptions[] = { 1, 2, 4, 8, 16 };
 
 	ImGui::Checkbox("Draw PostFX", &gRenderPostFX);
+	ImGui::SeparatorText("Game look");
+	ImGui::Checkbox("Amb_Obj for unlit objects", &gAmbObjForObjects);
+	ImGui::SetItemTooltip("Unlit props/peds/vehicles take the timecycle Amb_Obj like the game (VC/SA);\n"
+	                      "prelit buildings keep the small Amb. Off = one Amb for everything.");
+	ImGui::SeparatorText("Output");
 	ImGui::SliderInt("Selection Highlight Opacity", &gSelectionHighlightOpacity, 0, 100, "%d%%");
 	ImGui::SetItemTooltip("Opacity of the red overlay drawn on selected objects.");
 	if(ImGui::BeginCombo("Anti-aliasing", getAASamplesLabel(gRequestedAASamples))){
@@ -6130,6 +6382,8 @@ loadSaveSettings(void)
 			if(parseBoolSetting(value, &boolValue)) gDrawTarget = boolValue;
 		}else if(strcmp(key, "selection_highlight_opacity") == 0){
 			parseIntSetting(value, &gSelectionHighlightOpacity);
+		}else if(strcmp(key, "amb_obj_objects") == 0){
+			if(parseBoolSetting(value, &boolValue)) gAmbObjForObjects = boolValue;
 		}
 
 		// Keep the settings dispatch in separate chains. A single very long
@@ -6446,6 +6700,7 @@ saveSaveSettings(void)
 	fprintf(f, "camera_fov %.9g\n", TheCamera.m_fov);
 	fprintf(f, "draw_target %d\n", gDrawTarget ? 1 : 0);
 	fprintf(f, "selection_highlight_opacity %d\n", gSelectionHighlightOpacity);
+	fprintf(f, "amb_obj_objects %d\n", gAmbObjForObjects ? 1 : 0);
 	fprintf(f, "render_collision %d\n", gRenderCollision ? 1 : 0);
 	fprintf(f, "render_zones %d\n", gRenderZones ? 1 : 0);
 	fprintf(f, "render_map_zones %d\n", gRenderMapZones ? 1 : 0);
@@ -7295,6 +7550,51 @@ uiInstWindow(void)
 					Toast(TOAST_SAVE, "Failed to export TXD(s)");
 			}
 		}
+		ImGui::SameLine();
+		static bool blAutoTxd = true, blVanilla = true, blIde = true, blIpl = true, blLod = true, blCol = false, blHd = true;
+		if(ImGui::Button("Export to Blender")){
+			int failed = 0;
+			int placed = ExportSelectedToBlender(blAutoTxd, blVanilla, blIde, blIpl, blLod, blCol, blHd, &failed);
+			if(placed > 0)
+				Toast(TOAST_SAVE, "Sent %d object(s) to Blender%s", placed,
+				      failed > 0 ? " (some failed — see log)" : "");
+			else
+				Toast(TOAST_SAVE, "Failed to send to Blender");
+		}
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Send the selected instance(s) to a running Blender (INU_Tools).\n"
+				"Writes the DFF (+ the options below) into the bridge inbox; the addon's\n"
+				"watcher auto-imports and places them. Re-exporting the same instance\n"
+				"won't create a duplicate.");
+		ImGui::TextDisabled("Blender:"); ImGui::SameLine();
+		ImGui::Checkbox("Auto TXD", &blAutoTxd);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Also send the model's textures (TXD) so it isn't untextured/grey in Blender.");
+		ImGui::SameLine();
+		ImGui::Checkbox("Vanilla", &blVanilla);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Vanilla import (no alpha/fence linking).\nOff = keep custom alpha materials / fences on import.");
+		ImGui::SameLine();
+		ImGui::Checkbox("IDE", &blIde);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Send the IDE data (model id, draw distance, TXD name) so Blender\nknows the object's setup.");
+		ImGui::SameLine();
+		ImGui::Checkbox("IPL", &blIpl);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Place each object at its world position/rotation (from the IPL).\nOff = import everything at the origin.");
+		ImGui::SameLine();
+		ImGui::Checkbox("HD", &blHd);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("If a selected model is a LOD (LOD<name>), also send its high-detail\n"
+				"model — so exporting a distant LOD brings the real one along too.");
+		ImGui::SameLine();
+		ImGui::Checkbox("LOD", &blLod);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Also send the low-detail LOD model (LOD<name>) when the object has one.");
+		ImGui::SameLine();
+		ImGui::Checkbox("COL", &blCol);
+		if(ImGui::IsItemHovered())
+			ImGui::SetTooltip("Also send the collision mesh (.col) next to the model.");
 		if(haveExportDir)
 			ImGui::TextDisabled("%s", exportDir);
 		ImGui::Separator();

@@ -420,6 +420,27 @@ ObjectDef::Load(void)
 	SetTxdLookupContext(nil, -1);
 }
 
+// Free the currently-loaded geometry (mirror of the free path in
+// RemoveObjectDef) and load again — used by the Blender bridge to hot-swap an
+// edited model whose DFF was just registered as a runtime override.
+void
+ObjectDef::Reload(void)
+{
+	if(m_clump){
+		m_clump->destroy();
+		m_clump = nil;
+	}else{
+		for(int i = 0; i < (int)nelem(m_atomics); i++){
+			if(m_atomics[i]){
+				destroyDetachedAtomic(m_atomics[i]);
+				m_atomics[i] = nil;
+			}
+		}
+	}
+	m_cantLoad = false;	// clear a prior load failure; keep m_numAtomics (IDE-defined)
+	Load();
+}
+
 static bool
 cloneLoadedObjectForPreview(ObjectDef *obj, rw::Atomic **atomicOut, rw::Clump **clumpOut)
 {

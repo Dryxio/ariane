@@ -10,6 +10,7 @@
 
 static const int kAutoColSoftTriangleThreshold = 2048;
 static const int kAutoColHardVertexCap = 60000;
+static const int kAutoColHardVertexCapV1 = 32767;	// III/VC read the count through an int16
 static const int kAutoColHardTriangleCap = 32767;
 static const float kAutoColCompressionScale = 128.0f;
 static const float kAutoColCompressionPrecision = 1.0f / kAutoColCompressionScale;
@@ -138,6 +139,7 @@ static bool
 weldVerticesForCompression(const std::vector<AutoColVertex> &input,
                           std::vector<AutoColVertex> &welded,
                           std::vector<uint16_t> &indexMap,
+                          bool enforceCompressedRange,
                           char *err, size_t errSize)
 {
 	std::map<QuantizedVertexKey, uint16_t> lookup;
@@ -147,11 +149,14 @@ weldVerticesForCompression(const std::vector<AutoColVertex> &input,
 		int qx = (int)lroundf(input[i].x * kAutoColCompressionScale);
 		int qy = (int)lroundf(input[i].y * kAutoColCompressionScale);
 		int qz = (int)lroundf(input[i].z * kAutoColCompressionScale);
-		if(qx < -32768 || qx > 32767 ||
-		   qy < -32768 || qy > 32767 ||
-		   qz < -32768 || qz > 32767)
+		// COL3 stores int16/128 vertices; COL1 keeps floats, so the 1/128 grid is only
+		// used for welding there and the +/-256 wall does not apply.
+		if(enforceCompressedRange &&
+		   (qx < -32768 || qx > 32767 ||
+		    qy < -32768 || qy > 32767 ||
+		    qz < -32768 || qz > 32767))
 			return setAutoColError(err, errSize,
-			                       "Couldn't generate collision: DFF geometry exceeds COL3 compressed coordinate range.");
+			                       "Couldn't generate collision: DFF geometry exceeds the +/-256 unit collision range from the model pivot.");
 
 		QuantizedVertexKey key = { qx, qy, qz };
 		std::map<QuantizedVertexKey, uint16_t>::const_iterator it = lookup.find(key);
@@ -205,6 +210,7 @@ filterAndCompactMesh(const std::vector<AutoColVertex> &welded,
                     const std::vector<AutoColTriangle> &inputTriangles,
                     std::vector<AutoColVertex> &finalVertices,
                     std::vector<AutoColTriangle> &finalTriangles,
+                    int vertexCap,
                     AutoColStats *stats,
                     char *err, size_t errSize)
 {
@@ -275,10 +281,10 @@ filterAndCompactMesh(const std::vector<AutoColVertex> &welded,
 	if(finalVertices.empty() || finalTriangles.empty())
 		return setAutoColError(err, errSize,
 		                       "Couldn't generate collision: compacted geometry is empty.");
-	if((int)finalVertices.size() > kAutoColHardVertexCap)
+	if((int)finalVertices.size() > vertexCap)
 		return setAutoColError(err, errSize,
-		                       "Couldn't generate collision: generated COL has %d vertices (v1 cap is %d).",
-		                       (int)finalVertices.size(), kAutoColHardVertexCap);
+		                       "Couldn't generate collision: generated COL has %d vertices (cap is %d).",
+		                       (int)finalVertices.size(), vertexCap);
 	if((int)finalTriangles.size() > kAutoColHardTriangleCap)
 		return setAutoColError(err, errSize,
 		                       "Couldn't generate collision: generated COL has %d triangles (v1 cap is %d).",
@@ -401,7 +407,7 @@ serializeCol3(const std::vector<AutoColVertex> &vertices,
 		   qy < -32768 || qy > 32767 ||
 		   qz < -32768 || qz > 32767)
 			return setAutoColError(err, errSize,
-			                       "Couldn't generate collision: serialized coordinates exceed COL3 compressed range.");
+			                       "Couldn't generate collision: serialized coordinates exceed the compressed range.");
 		writeI16(outBytes, offset, (int16_t)qx); offset += 2;
 		writeI16(outBytes, offset, (int16_t)qy); offset += 2;
 		writeI16(outBytes, offset, (int16_t)qz); offset += 2;
@@ -419,16 +425,95 @@ serializeCol3(const std::vector<AutoColVertex> &vertices,
 	return true;
 }
 
+// COL1 ("COLL") — the only collision format GTA III and Vice City parse
+// (CFileLoader::LoadCollisionModel). Layout after the 8-byte chunk header:
+//   name[22] + modelId u16, bounds { radius, center, min, max } as floats,
+//   u32 numSpheres, u32 numLines, u32 numBoxes,
+//   u32 numVertices + float3 each, u32 numFaces + { u32 a, b, c; u8 surface; u8 pad[3] }.
+// The PC games keep the vertices as floats (CompressedVector only on PS2), so unlike
+// COL3 there is no ±256 range limit; the 1/128 grid is used for welding only.
+static bool
+serializeCol1(const std::vector<AutoColVertex> &vertices,
+              const std::vector<AutoColTriangle> &triangles,
+              const char *modelName,
+              std::vector<char> &outBytes,
+              bool boundsOnly,
+              char *err, size_t errSize)
+{
+	if(vertices.empty() || (triangles.empty() && !boundsOnly))
+		return setAutoColError(err, errSize, "Couldn't generate collision: no collision geometry to serialize.");
+
+	size_t numVerts = boundsOnly ? 0 : vertices.size();
+	size_t numFaces = boundsOnly ? 0 : triangles.size();
+	const uint32_t nameSize = 24;		// name[22] + modelId u16
+	const uint32_t boundsSize = 40;
+	const uint32_t vertexSize = 12;
+	const uint32_t faceSize = 16;
+	uint32_t modelSize = nameSize + boundsSize +
+		4 + 4 + 4 +
+		4 + (uint32_t)numVerts * vertexSize +
+		4 + (uint32_t)numFaces * faceSize;
+
+	outBytes.assign(8 + modelSize, 0);
+
+	memcpy(&outBytes[0], "COLL", 4);
+	writeU32(outBytes, 4, modelSize);
+	writeNameField(outBytes, 8, modelName);		// modelId stays 0
+
+	AutoColBounds bounds = calculateBounds(vertices);
+	size_t offset = 32;
+	writeF32(outBytes, offset, bounds.radius); offset += 4;
+	writeF32(outBytes, offset, bounds.center.x); offset += 4;
+	writeF32(outBytes, offset, bounds.center.y); offset += 4;
+	writeF32(outBytes, offset, bounds.center.z); offset += 4;
+	writeF32(outBytes, offset, bounds.min.x); offset += 4;
+	writeF32(outBytes, offset, bounds.min.y); offset += 4;
+	writeF32(outBytes, offset, bounds.min.z); offset += 4;
+	writeF32(outBytes, offset, bounds.max.x); offset += 4;
+	writeF32(outBytes, offset, bounds.max.y); offset += 4;
+	writeF32(outBytes, offset, bounds.max.z); offset += 4;
+
+	writeU32(outBytes, offset, 0); offset += 4;	// spheres
+	writeU32(outBytes, offset, 0); offset += 4;	// lines
+	writeU32(outBytes, offset, 0); offset += 4;	// boxes
+
+	writeU32(outBytes, offset, (uint32_t)numVerts); offset += 4;
+	for(size_t i = 0; i < numVerts; i++){
+		writeF32(outBytes, offset, vertices[i].x); offset += 4;
+		writeF32(outBytes, offset, vertices[i].y); offset += 4;
+		writeF32(outBytes, offset, vertices[i].z); offset += 4;
+	}
+
+	writeU32(outBytes, offset, (uint32_t)numFaces); offset += 4;
+	for(size_t i = 0; i < numFaces; i++){
+		writeU32(outBytes, offset, triangles[i].a); offset += 4;
+		writeU32(outBytes, offset, triangles[i].b); offset += 4;
+		writeU32(outBytes, offset, triangles[i].c); offset += 4;
+		outBytes[offset++] = (char)triangles[i].surface;
+		outBytes[offset++] = 0;
+		outBytes[offset++] = 0;
+		outBytes[offset++] = (char)triangles[i].light;
+	}
+
+	return true;
+}
+
 bool
-GenerateCol3FromAtomic(rw::Atomic *atomic, const char *modelName,
-                       std::vector<char> &outBytes, AutoColStats *stats,
-                       char *err, size_t errSize)
+GenerateColFromAtomic(rw::Atomic *atomic, const char *modelName, int colVersion,
+                      std::vector<char> &outBytes, AutoColStats *stats,
+                      char *err, size_t errSize, bool boundsOnly)
 {
 	if(stats)
 		memset(stats, 0, sizeof(*stats));
+	if(colVersion != 1 && colVersion != 3)
+		return setAutoColError(err, errSize, "Couldn't generate collision: unsupported COL version %d.", colVersion);
+	if(boundsOnly && colVersion != 1)
+		return setAutoColError(err, errSize, "Couldn't generate collision: bounds-only COL is only supported for COL1.");
 	if(modelName == nil || modelName[0] == '\0')
 		return setAutoColError(err, errSize, "Couldn't generate collision: model name is empty.");
-	if(strlen(modelName) >= 24)
+	// COL1 keeps the name in 22 bytes (III/VC copy 24 and strcmp it against the model info)
+	size_t maxNameLen = colVersion == 1 ? 21 : 23;
+	if(strlen(modelName) > maxNameLen)
 		return setAutoColError(err, errSize, "Couldn't generate collision: model name is too long for COL header.");
 
 	std::vector<AutoColVertex> sourceVertices;
@@ -438,14 +523,25 @@ GenerateCol3FromAtomic(rw::Atomic *atomic, const char *modelName,
 
 	std::vector<AutoColVertex> weldedVertices;
 	std::vector<uint16_t> indexMap;
-	if(!weldVerticesForCompression(sourceVertices, weldedVertices, indexMap, err, errSize))
+	if(!weldVerticesForCompression(sourceVertices, weldedVertices, indexMap, colVersion == 3, err, errSize))
 		return false;
 
 	std::vector<AutoColVertex> finalVertices;
 	std::vector<AutoColTriangle> finalTriangles;
 	if(!filterAndCompactMesh(weldedVertices, indexMap, sourceTriangles, finalVertices, finalTriangles,
+	                         colVersion == 1 ? kAutoColHardVertexCapV1 : kAutoColHardVertexCap,
 	                         stats, err, errSize))
 		return false;
 
+	if(colVersion == 1)
+		return serializeCol1(finalVertices, finalTriangles, modelName, outBytes, boundsOnly, err, errSize);
 	return serializeCol3(finalVertices, finalTriangles, modelName, outBytes, err, errSize);
+}
+
+bool
+GenerateCol3FromAtomic(rw::Atomic *atomic, const char *modelName,
+                       std::vector<char> &outBytes, AutoColStats *stats,
+                       char *err, size_t errSize)
+{
+	return GenerateColFromAtomic(atomic, modelName, 3, outBytes, stats, err, errSize);
 }
