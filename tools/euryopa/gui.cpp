@@ -41,6 +41,7 @@ static bool gAutomaticBackupsEnabled = true;
 static int gAutomaticBackupIntervalSeconds = 300;
 static int gAutomaticBackupKeepCount = 10;
 static int gCustomImportPreferredStartId = 18631;
+static int gCustomImportPreferredStartIdIII = 2000;
 static const float gAutomaticBackupIdleSeconds = 5.0f;
 static float gAutomaticBackupSecondsSinceLastRun = 0.0f;
 static float gAutomaticBackupSecondsSinceLastChange = 0.0f;
@@ -183,16 +184,33 @@ LoadInitialAntialiasingSettings(void)
 }
 
 static int
+getCustomImportPreferredStartId(void)
+{
+	return isIII() ? gCustomImportPreferredStartIdIII : gCustomImportPreferredStartId;
+}
+
+static void
+setCustomImportPreferredStartId(int id)
+{
+	if(isIII())
+		gCustomImportPreferredStartIdIII = id;
+	else
+		gCustomImportPreferredStartId = id;
+}
+
+static int
 getDefaultCustomImportStartId(void)
 {
-	return isSA() ? 18631 : 0;
+	return isIII() ? 2000 : (isSA() ? 18631 : 0);
 }
 
 static void
 sanitizeCustomImportSettings(void)
 {
 	if(gCustomImportPreferredStartId < 0 || gCustomImportPreferredStartId >= NUMOBJECTDEFS)
-		gCustomImportPreferredStartId = getDefaultCustomImportStartId();
+		gCustomImportPreferredStartId = isSA() ? 18631 : 0;
+	if(gCustomImportPreferredStartIdIII < 0 || gCustomImportPreferredStartIdIII >= NUMOBJECTDEFS)
+		gCustomImportPreferredStartIdIII = 2000;
 }
 
 static bool
@@ -3625,7 +3643,7 @@ static int
 findSuggestedCustomImportId(void)
 {
 	int limit = NUMOBJECTDEFS;
-	int start = gCustomImportPreferredStartId;
+	int start = getCustomImportPreferredStartId();
 	if(start < 0)
 		start = 0;
 	if(start >= limit)
@@ -4152,9 +4170,9 @@ finalizeCustomImport(void)
 	gCustomImport.error[0] = '\0';
 	gCustomImport.warning[0] = '\0';
 
-	if(!isSA()){
+	if(!isSA() && !isIII()){
 		snprintf(gCustomImport.error, sizeof(gCustomImport.error),
-		         "Custom import is wired for GTA San Andreas only in this v1.");
+		         "Custom import is wired for GTA III and San Andreas only in this v1.");
 		return false;
 	}
 	if(gCustomImport.objectId < 0){
@@ -4321,9 +4339,15 @@ finalizeCustomImport(void)
 	char ideEntry[512];
 	gCustomImport.previewObj.m_drawDist[0] = gCustomImport.drawDist;
 	int ideFlags = computeFlagsFromObjectDef(&gCustomImport.previewObj);
-	snprintf(ideEntry, sizeof(ideEntry), "%d, %s, %s, %.1f, %d",
-	         gCustomImport.objectId, gCustomImport.modelName, gCustomImport.txdName,
-	         gCustomImport.drawDist, ideFlags);
+	if(isIII()){
+		snprintf(ideEntry, sizeof(ideEntry), "%d, %s, %s, 1, %.1f, %d",
+		         gCustomImport.objectId, gCustomImport.modelName, gCustomImport.txdName,
+		         gCustomImport.drawDist, ideFlags);
+	}else{
+		snprintf(ideEntry, sizeof(ideEntry), "%d, %s, %s, %.1f, %d",
+		         gCustomImport.objectId, gCustomImport.modelName, gCustomImport.txdName,
+		         gCustomImport.drawDist, ideFlags);
+	}
 	for(size_t i = 0; i < lines.size(); i++){
 		if(strcmp(lines[i].c_str(), ideEntry) == 0){
 			inserted = true;
@@ -4395,9 +4419,10 @@ finalizeCustomImport(void)
 		std::vector<char> generatedCol;
 		char autoColError[256];
 		autoColError[0] = '\0';
-		if(!GenerateCol3FromAtomic(obj->m_atomics[0], gCustomImport.modelName, generatedCol, &stats,
-		                           autoColError, sizeof(autoColError)) ||
-		   !writeFileExact(colTarget, generatedCol.data(), generatedCol.size())){
+		bool colOk = isIII() ?
+			GenerateCol1FromAtomic(obj->m_atomics[0], gCustomImport.modelName, generatedCol, &stats, autoColError, sizeof(autoColError)) :
+			GenerateCol3FromAtomic(obj->m_atomics[0], gCustomImport.modelName, generatedCol, &stats, autoColError, sizeof(autoColError));
+		if(!colOk || !writeFileExact(colTarget, generatedCol.data(), generatedCol.size())){
 			snprintf(gCustomImport.error, sizeof(gCustomImport.error), "%s",
 			         autoColError[0] ? autoColError : "Failed to auto-generate COL from DFF geometry.");
 			rollbackRegisteredState();
@@ -6070,6 +6095,8 @@ loadSaveSettings(void)
 			parseIntSetting(value, &gAutomaticBackupKeepCount);
 		}else if(strcmp(key, "custom_import_start_id") == 0){
 			parseIntSetting(value, &gCustomImportPreferredStartId);
+		}else if(strcmp(key, "custom_import_start_id_iii") == 0){
+			parseIntSetting(value, &gCustomImportPreferredStartIdIII);
 		}else if(strcmp(key, "show_editor_window") == 0){
 			if(parseBoolSetting(value, &boolValue)) showEditorWindow = boolValue;
 		}else if(strcmp(key, "show_instance_window") == 0){
@@ -6417,6 +6444,7 @@ saveSaveSettings(void)
 	fprintf(f, "automatic_backup_interval %d\n", gAutomaticBackupIntervalSeconds);
 	fprintf(f, "automatic_backup_keep %d\n", gAutomaticBackupKeepCount);
 	fprintf(f, "custom_import_start_id %d\n", gCustomImportPreferredStartId);
+	fprintf(f, "custom_import_start_id_iii %d\n", gCustomImportPreferredStartIdIII);
 	fprintf(f, "show_editor_window %d\n", showEditorWindow ? 1 : 0);
 	fprintf(f, "show_instance_window %d\n", showInstanceWindow ? 1 : 0);
 	fprintf(f, "show_log_window %d\n", showLogWindow ? 1 : 0);
