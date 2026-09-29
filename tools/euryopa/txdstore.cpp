@@ -35,6 +35,12 @@ FindTxdSlot(const char *name)
 	return -1;
 }
 
+int
+GetNumTxdSlots(void)
+{
+	return numTxds;
+}
+
 TxdDef*
 GetTxdDef(int i)
 {

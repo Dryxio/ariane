@@ -571,6 +571,7 @@ struct TxdDef
 };
 extern rw::TexDictionary *defaultTxd;
 void RegisterTexStorePlugin(void);
+int GetNumTxdSlots(void);
 TxdDef *GetTxdDef(int i);
 int FindTxdSlot(const char *name);
 int AddTxdSlot(const char *name);
