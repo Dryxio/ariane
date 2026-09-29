@@ -148,7 +148,13 @@ make -C build config=release_macos-amd64-gl3 euryopa
 
 ### Windows
 
-Run these commands from a Visual Studio developer shell:
+1. Install [Visual Studio](https://visualstudio.microsoft.com/downloads) or [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools).
+    Ensure you select "MSVC v142 - VS 2019 C++ x64/x86 build tools" from the "Individual components" tab in the Visual Studio Installer.
+2. Run these commands from a Visual Studio developer shell:
+
+Use `--channel=PE` instead when building the PE/FLA channel.
+
+#### Command Prompt
 
 ```bat
 set LIBRW=C:\path\to\librw-ariane
@@ -159,10 +165,22 @@ msbuild build\librw.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:l
 popd
 
 premake5 vs2019 --channel=master
-msbuild build\librwgta.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:librwgta;euryopa /m
+msbuild build\librwgta.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:librwgta,euryopa /m
 ```
 
-Use `--channel=PE` instead when building the PE/FLA channel.
+#### PowerShell
+
+```pwsh
+[System.Environment]::SetEnvironmentVariable('LIBRW','C:\path\to\librw-ariane', 'User')
+
+cd %LIBRW%
+premake5 vs2019
+msbuild build\librw.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:librw /m
+
+cd C:\path\to\ariane
+premake5 vs2019 --channel=master
+msbuild build\librwgta.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:librwgta,euryopa /m
+```
 
 ## License
 

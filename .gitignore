@@ -2,7 +2,9 @@ obj/
 bin/
 lib/
 .vs/
+build/
 output/
+.envrc
 customprops.xml
 librwgta.VC.db
 *.user
