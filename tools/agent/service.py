@@ -39,6 +39,10 @@ if __package__:
 else:
 	from review_rig import ReviewRig
 if __package__:
+	from .samp import parse_pawn_mapping, pawn_operations
+else:
+	from samp import parse_pawn_mapping, pawn_operations
+if __package__:
 	from .vibe import VibeWorkflow
 else:
 	from vibe import VibeWorkflow
@@ -1396,6 +1400,59 @@ class ArianeService:
 			if offset is None: break
 		return self.engine("suppress_world_models", [x, y, radius, *model_ids])
 
+	def import_pawn_mapping(self, source_path: str, logical_path: str,
+	                        physical_path: str, *, group: str | None = None,
+	                        commit: bool = False, save: bool = False,
+	                        chunk_size: int = 128) -> dict:
+		"""Import literal SA-MP/open.mp mapping calls into a new scratch scene."""
+		if save and not commit:
+			raise ValueError("save requires commit=true; review the scratch session first")
+		if not 1 <= int(chunk_size) <= 256:
+			raise ValueError("chunk_size must be between 1 and 256")
+		status = self.engine("session_status")
+		if status.get("active"):
+			raise RuntimeError("finish the current scratch session before importing a Pawn mapping")
+		source = Path(source_path).expanduser().resolve()
+		physical = Path(physical_path).expanduser().resolve()
+		if physical.exists():
+			raise FileExistsError(f"refusing to import over an existing IPL: {physical}")
+		mapping = parse_pawn_mapping(source)
+		if not mapping.objects and not mapping.removals:
+			raise ValueError("Pawn file contains no supported literal mapping calls")
+		placements, rotations = pawn_operations(mapping, group=group)
+		physical.parent.mkdir(parents=True, exist_ok=True)
+		digest = hashlib.sha256(source.read_bytes()).hexdigest()[:16]
+		session_name = f"pawn-import:{source.stem}"[:127]
+		self.engine("scene", [logical_path, str(physical)])
+		self.engine("session_begin", [session_name])
+		receipts, suppression = {"place": [], "rotate": []}, []
+		try:
+			for phase, operations in (("place", placements), ("rotate", rotations)):
+				for offset in range(0, len(operations), int(chunk_size)):
+					chunk = operations[offset:offset + int(chunk_size)]
+					revision = int(self.engine("session_status")["scene_revision"])
+					receipts[phase].append(self.apply_scene_patch(
+						chunk, patch_id=f"pawn:{digest}:{phase}:{offset // int(chunk_size)}",
+						expected_revision=revision))
+			for removal in mapping.removals:
+				suppression.append(self.suppress_native_models(
+					removal.x, removal.y, removal.radius, [removal.model]))
+		except Exception:
+			self.engine("session_rollback")
+			raise
+		commit_result = self.engine("session_commit") if commit else None
+		save_result = self.engine("save") if save else None
+		return {
+			"ok": True, **mapping.summary(), "logical_path": logical_path,
+			"physical_path": str(physical), "session_name": session_name,
+			"placement_patch_count": len([item for item in receipts["place"] if item]),
+			"rotation_patch_count": len([item for item in receipts["rotate"] if item]),
+			"full_rotation_count": len(rotations),
+			"suppressed_native_count": sum(int(item.get("suppressed_count", 0)) for item in suppression),
+			"active_for_review": not commit, "committed": bool(commit), "saved": bool(save),
+			"commit_result": commit_result, "save_result": save_result,
+		}
+
 	def dispatch(self, method: str, params: dict | None = None) -> Any:
 		params = params or {}
 		if method.startswith("vibe."):
@@ -1418,6 +1475,7 @@ class ArianeService:
 			return methods[method](**params)
 		if method == "scene.environment": return self.environment(**params)
 		if method == "scene.suppress_native": return self.suppress_native_models(**params)
+		if method == "scene.import_pawn": return self.import_pawn_mapping(**params)
 		if method == "health":
 			return {"engine": self.engine("ping"), "database": str(self.database)}
 		if method == "engine.command":

@@ -25,6 +25,10 @@ if __package__:
 	from .service import ArianeService, ScenePatchError, DEFAULT_STATE_DIR
 else:
 	from service import ArianeService, ScenePatchError, DEFAULT_STATE_DIR
+if __package__:
+	from .samp import install_samp_assets
+else:
+	from samp import install_samp_assets
 
 
 def emit(payload: object) -> None:
@@ -185,6 +189,16 @@ def main(argv: list[str] | None = None) -> int:
 	parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
 	sub = parser.add_subparsers(dest="command", required=True)
 	add_engine_commands(sub)
+	pawn_import = sub.add_parser("import-pawn", help="Import literal SA-MP/open.mp mapping calls")
+	pawn_import.add_argument("source", type=Path)
+	pawn_import.add_argument("--output", type=Path, required=True,
+	                         help="new IPL destination; existing files are never overwritten")
+	pawn_import.add_argument("--logical", help="logical IPL path used by Ariane")
+	pawn_import.add_argument("--group")
+	pawn_import.add_argument("--commit", action="store_true",
+	                         help="commit immediately instead of leaving a reviewable scratch session")
+	pawn_import.add_argument("--save", action="store_true",
+	                         help="save the IPL after commit; requires --commit")
 	call = sub.add_parser("call", help="Call a shared service method; JSON parameters inline or from a file")
 	call.add_argument("method")
 	inputs = call.add_mutually_exclusive_group()
@@ -207,6 +221,13 @@ def main(argv: list[str] | None = None) -> int:
 	sources.add_argument("--gta-dir", type=Path, help="build a basic catalogue from your GTA data/*.ide files")
 	index.add_argument("--semantic-assets", type=Path,
 	                   help="optional AI-enriched asset JSON; kept external when its license is unknown")
+	install_samp = asset_sub.add_parser("install-samp",
+	                                    help="use assets from an existing SA-MP/open.mp installation")
+	install_samp.add_argument("--gta-dir", type=Path, required=True)
+	install_samp.add_argument("--source", type=Path,
+	                          help="directory containing SAMP.ide, SAMP.img and SAMPCOL.img; open.mp is auto-detected")
+	install_samp.add_argument("--force", action="store_true", help="update an existing generated package")
+	install_samp.add_argument("--no-index", action="store_true", help="do not rebuild the local asset catalogue")
 	search = asset_sub.add_parser("search")
 	search.add_argument("query", nargs="?", default="")
 	search.add_argument("--category"); search.add_argument("--max-width", type=float)
@@ -300,7 +321,7 @@ def main(argv: list[str] | None = None) -> int:
 	sub.add_parser("validate-composition")
 	args = parser.parse_args(argv)
 	try:
-		if args.command in {"call", "survey", "environment"}:
+		if args.command in {"call", "survey", "environment", "import-pawn"}:
 			service = ArianeService(args.socket, args.db, args.timeout, args.discovery_dir, args.state_dir)
 			if args.command == "call":
 				params = json.loads(args.file.read_text() if args.file else args.params)
@@ -308,12 +329,21 @@ def main(argv: list[str] | None = None) -> int:
 				payload = service.dispatch(args.method, params)
 			elif args.command == "survey":
 				payload = service.vibe.observe(args.output_directory, args.radius, args.grid, args.pixel_x, args.pixel_y)
+			elif args.command == "import-pawn":
+				logical = args.logical or f"ariane/{args.source.stem}.ipl"
+				payload = service.import_pawn_mapping(
+					str(args.source), logical, str(args.output), group=args.group,
+					commit=args.commit, save=args.save)
 			else:
 				settings = {key: getattr(args, key) for key in ("hour", "minute", "weather_a", "weather_b", "blend")
 				            if getattr(args, key) is not None}
 				payload = service.environment(**settings)
 		elif args.command == "assets":
-			if args.asset_command == "index": payload = build_index(
+			if args.asset_command == "install-samp":
+				payload = install_samp_assets(args.gta_dir, args.source, force=args.force)
+				if not args.no_index:
+					payload["index"] = build_index(database=args.db, gta_dir=args.gta_dir)
+			elif args.asset_command == "index": payload = build_index(
 				args.gtastuff, args.db, semantic_assets=args.semantic_assets, gta_dir=args.gta_dir)
 			elif args.asset_command == "search":
 				service = ArianeService(args.socket, args.db, args.timeout,

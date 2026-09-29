@@ -170,19 +170,56 @@ def _load_semantic_assets(path: Path | None) -> dict[int, dict]:
 	        if item.get("Id", item.get("id")) is not None}
 
 
+def _casefold_directory(parent: Path, name: str) -> Path | None:
+	if not parent.is_dir():
+		return None
+	return next((path for path in parent.iterdir()
+	             if path.is_dir() and path.name.lower() == name.lower()), None)
+
+
+def _gta_ide_paths(gta_dir: Path) -> list[Path]:
+	"""Return base IDEs plus explicit modloader IDE additions.
+
+	Mod files are user-owned and remain outside the catalogue. Only IDE paths
+	declared by a mod's gta.dat-style text manifest are indexed, matching the
+	engine's addition contract instead of treating every loose IDE as active.
+	"""
+	data = _casefold_directory(gta_dir, "data")
+	if data is None:
+		raise FileNotFoundError(f"GTA data directory not found in {gta_dir}")
+	paths = {path.resolve() for path in data.rglob("*") if path.suffix.lower() == ".ide"}
+	modloader = _casefold_directory(gta_dir, "modloader")
+	if modloader is None:
+		return sorted(paths, key=lambda path: str(path).lower())
+	for mod in sorted((path for path in modloader.iterdir() if path.is_dir()),
+	                  key=lambda path: path.name.lower()):
+		manifests = (path for path in mod.rglob("*")
+		             if path.is_file() and path.suffix.lower() == ".txt")
+		for manifest in sorted(manifests, key=lambda path: str(path).lower()):
+			for raw in manifest.read_text(encoding="latin-1", errors="replace").splitlines():
+				line = raw.split("#", 1)[0].strip()
+				if not line.upper().startswith("IDE "):
+					continue
+				relative = Path(line[4:].strip().replace("\\", "/"))
+				candidate = (mod / relative).resolve()
+				try:
+					candidate.relative_to(mod.resolve())
+				except ValueError:
+					continue
+				if candidate.is_file() and candidate.suffix.lower() == ".ide":
+					paths.add(candidate)
+	return sorted(paths, key=lambda path: str(path).lower())
+
+
 def _gta_models(gta_dir: Path) -> list[dict]:
 	"""Read object definitions locally; no game assets or external catalogue needed.
 
-	Scan data IDE files in deterministic order. Runtime --defined-only and inspect
-	remain authoritative for active definitions, collision and dimensions.
+	Scan base and declared modloader IDE files in deterministic order. Runtime
+	--defined-only and inspect remain authoritative for active definitions,
+	collision and dimensions.
 	"""
-	data = next((p for p in gta_dir.iterdir() if p.is_dir() and p.name.lower() == "data"), None)
-	if data is None:
-		raise FileNotFoundError(f"GTA data directory not found in {gta_dir}")
 	models = {}
-	for path in sorted(data.rglob("*")):
-		if path.suffix.lower() != ".ide":
-			continue
+	for path in _gta_ide_paths(gta_dir):
 		section = ""
 		for line_number, line in enumerate(path.read_text(encoding="latin-1").splitlines(), 1):
 			line = line.split("#", 1)[0].strip()
@@ -211,7 +248,7 @@ def _gta_models(gta_dir: Path) -> list[dict]:
 			except (ValueError, IndexError) as exc:
 				raise ValueError(f"Invalid object definition at {path}:{line_number}: {exc}") from exc
 	if not models:
-		raise ValueError(f"No object definitions found beneath {data}")
+		raise ValueError(f"No object definitions found beneath {gta_dir}")
 	return list(models.values())
 
 

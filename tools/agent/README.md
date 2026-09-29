@@ -44,9 +44,52 @@ draw distances. Names supply weak search hints. Dimensions, collision availabili
 native IPL usage and thumbnails are not extracted by this basic importer;
 use live `assets inspect ID --ensure-renderable` and `assets preview ID` for
 runtime checks. `--has-collision` and dimension filters need an enriched index.
-All IDE files under `data` are scanned, so `--defined-only` checks which entries
-are actually defined in the running editor. Rebuild when changing games or mods;
-use a separate `--db` for each installation because model IDs overlap.
+All IDE files under `data` and explicit modloader `IDE` additions are scanned,
+so `--defined-only` checks which entries are actually defined in the running
+editor. Rebuild when changing games or mods; use a separate `--db` for each
+installation because model IDs overlap.
+
+### SA-MP/open.mp assets and Pawn mappings
+
+Ariane does not distribute SA-MP, open.mp or GTA assets. Install open.mp or
+SA-MP first, then create an isolated modloader package from those local files:
+
+```powershell
+.venv-agent\Scripts\arianectl.exe assets install-samp `
+  --gta-dir 'C:\Games\GTA San Andreas'
+```
+
+On Windows the command auto-detects open.mp's shared `SAMP` directory beneath
+`%LOCALAPPDATA%\mp.open.launcher`. Use `--source` for another installed copy.
+It requires `SAMP.ide`, `SAMP.img` and `SAMPCOL.img`, copies them under
+`modloader\SAMP`, writes only a small gta.dat-style manifest, and rebuilds the
+local catalogue. `SAMP.ipl` is deliberately not loaded because it contains
+unrelated default placements. Restart Ariane after installing or updating the
+package. `--force` is required to update an existing generated package.
+
+Literal Pawn mappings can then be opened as a reversible scratch proposal:
+
+```powershell
+.venv-agent\Scripts\arianectl.exe import-pawn '.\mapping.pwn' `
+  --output '.\agent-output\mapping.ipl'
+```
+
+The importer supports `CreateObject`, `CreateDynamicObject`,
+`CreatePlayerObject` and `RemoveBuildingForPlayer`. It preserves all three
+rotation axes and applies building removals at their authored coordinates and
+radius while the scene is open (Ariane's native suppression is model-specific
+and planar, so the Pawn Z coordinate is retained but not used). Building
+removals remain in the Pawn source because the IPL format cannot persist
+`RemoveBuildingForPlayer`. By default the scratch session stays active for
+validation and visual review; finish it with `session commit` or `session
+rollback`, then use `save` after committing. `--commit --save` is available for
+an explicitly requested one-shot import.
+
+Pawn code is parsed, never executed. Numeric literals are accepted; variables,
+macros, computed expressions and material/text calls are reported as warnings
+instead of being guessed. Existing IPL destinations are never overwritten.
+The MCP adapter exposes the same workflow as `inspect_pawn_mapping` and
+`import_pawn_mapping`.
 
 An optional existing gtastuff checkout supplies richer geometry, collision,
 IPL and thumbnail metadata:

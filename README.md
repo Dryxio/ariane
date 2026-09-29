@@ -24,6 +24,7 @@ Ariane is a map viewer and editor for Grand Theft Auto III, Vice City and San An
 - Preview models in 3D before placing them
 - Build reusable prefabs from map selections, then browse, import and place them as a group
 - Import custom DFF models and TXD textures
+- Use object assets from an existing SA-MP/open.mp installation and import literal Pawn mappings through the agent CLI/MCP
 
 ### Saving and iteration
 

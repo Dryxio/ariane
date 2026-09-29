@@ -52,9 +52,10 @@ class McpStdioTests(unittest.IsolatedAsyncioTestCase):
 						"build_composition_recipe", "asset_passport", "annotate_asset_passport",
 						"mapping_edit_history", "undo_mapping_edit", "review_mapping", "record_mapping_review",
 						"mapping_environment", "selected_mapping_objects", "compare_mapping_variants",
-                        "search_creative_catalogue", "propose_asset_palette", "render_palette_board",
-                        "propose_composition_variants", "inspect_placement_anchors",
-                        "create_mapping_review_rig", "capture_mapping_review_rig", "compare_mapping_review_images",
+						"search_creative_catalogue", "propose_asset_palette", "render_palette_board",
+						"propose_composition_variants", "inspect_placement_anchors",
+						"create_mapping_review_rig", "capture_mapping_review_rig", "compare_mapping_review_images",
+						"inspect_pawn_mapping", "import_pawn_mapping",
 					}.issubset(names))
 					recipes = await session.call_tool("list_composition_recipes", {})
 					self.assertFalse(recipes.is_error)

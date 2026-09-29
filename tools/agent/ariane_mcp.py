@@ -28,6 +28,10 @@ if __package__:
 	from .service import ArianeService, ScenePatchError, DEFAULT_STATE_DIR
 else:
 	from service import ArianeService, ScenePatchError, DEFAULT_STATE_DIR
+if __package__:
+	from .samp import parse_pawn_mapping
+else:
+	from samp import parse_pawn_mapping
 
 
 service = ArianeService(
@@ -634,6 +638,27 @@ def open_mapping_scene(logical_path: str, physical_path: str) -> dict:
     if service.engine("session_status").get("active"):
         raise ValueError("finish the current scratch session before opening a different scene")
     return service.engine("scene", [logical_path, str(Path(physical_path).resolve())])
+
+
+@mcp.tool()
+def inspect_pawn_mapping(source_path: str) -> dict:
+    """Parse a .pwn mapping safely and report supported objects, removals and warnings without editing."""
+    return parse_pawn_mapping(Path(source_path)).summary()
+
+
+@mcp.tool()
+def import_pawn_mapping(source_path: str, logical_path: str, physical_path: str,
+                        group: str | None = None, commit: bool = False,
+                        save: bool = False) -> dict:
+    """Import literal SA-MP/open.mp mapping calls into a new reviewable scratch IPL.
+
+    CreateObject, CreateDynamicObject, CreatePlayerObject and
+    RemoveBuildingForPlayer are supported. Existing IPLs are never overwritten.
+    Keep commit/save false for visual review, then use the normal finish and save tools.
+    """
+    return service.import_pawn_mapping(
+        source_path, logical_path, physical_path, group=group,
+        commit=commit, save=save)
 
 
 @mcp.tool()
