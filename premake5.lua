@@ -289,6 +289,13 @@ project "euryopa"
 		kind "ConsoleApp"
 	filter {}
 	skeltool("euryopa")
+	filter { "system:windows", "platforms:*d3d9" }
+		removefiles { path.join(Librw, "skeleton/imgui/imgui_impl_rw.cpp") }
+		files { path.join(Librw, "skeleton/imgui/backends/imgui_impl_win32.cpp"),
+		        path.join(Librw, "skeleton/imgui/backends/imgui_impl_dx9.cpp") }
+		includedirs { path.join(Librw, "skeleton/imgui") }
+		links { "dwmapi" }
+	filter {}
 	includedirs { "tools/euryopa" }
 	files { "tools/euryopa/minilzo/minilzo.c" }
 	removeplatforms { "*null" }

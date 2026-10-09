@@ -1969,9 +1969,9 @@ handleRectSelect(void)
 	ctx.count = 0;
 
 	// Draw selection rectangle overlay
-	ImDrawList *dl = ImGui::GetForegroundDrawList();
-	ImVec2 p0(ctx.x1, ctx.y1);
-	ImVec2 p1(ctx.x2, ctx.y2);
+	ImDrawList *dl = EditorForegroundDrawList();
+	ImVec2 p0 = EditorUiPoint(ctx.x1, ctx.y1);
+	ImVec2 p1 = EditorUiPoint(ctx.x2, ctx.y2);
 	dl->AddRectFilled(p0, p1, IM_COL32(100, 150, 255, 40));
 	dl->AddRect(p0, p1, IM_COL32(100, 150, 255, 200), 0.0f, 0, 1.5f);
 
@@ -2122,7 +2122,7 @@ handleTool(void)
 		// Alt + short middle click resets wheel zoom while preserving plain
 		// middle-click selection and middle-button drag camera controls.
 		if(CPad::IsAltDown() && !CPad::IsCtrlDown()){
-			TheCamera.m_fov = 70.0f;
+			TheCamera.m_fov = CAMERA_FOV_DEFAULT;
 			Toast(TOAST_SELECTION, "FOV reset to 70°");
 			return;
 		}else if(!IsIplMapDocumentOpen() && CPad::IsCtrlDown()){
@@ -2355,7 +2355,8 @@ dogizmo(void)
 		float *fobj = (float*)&gizobj;
 
 		ImGuiIO &io = ImGui::GetIO();
-		ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+		ImVec2 origin = ImGui::GetMainViewport()->Pos;
+		ImGuizmo::SetRect(origin.x, origin.y, io.DisplaySize.x, io.DisplaySize.y);
 
 		float snapValues[3];
 		float *snapPtr = nil;
@@ -2417,7 +2418,8 @@ dogizmo(void)
 	fobj = (float*)&gizobj;
 
 	ImGuiIO &io = ImGui::GetIO();
-	ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+	ImVec2 origin = ImGui::GetMainViewport()->Pos;
+	ImGuizmo::SetRect(origin.x, origin.y, io.DisplaySize.x, io.DisplaySize.y);
 
 	ImGuizmo::OPERATION op = gGizmoMode == GIZMO_ROTATE ? ImGuizmo::ROTATE : ImGuizmo::TRANSLATE;
 	float snapValues[3];
@@ -2662,9 +2664,7 @@ Draw(void)
 	{
 		ImGuiIO &io = ImGui::GetIO();
 		if(!io.WantCaptureMouse && io.MouseWheel != 0.0f){
-			TheCamera.m_fov -= io.MouseWheel * gFovWheelStep;
-			if(TheCamera.m_fov < 1.0f)   TheCamera.m_fov = 1.0f;
-			if(TheCamera.m_fov > 150.0f) TheCamera.m_fov = 150.0f;
+			TheCamera.m_fov = ClampCameraFov(TheCamera.m_fov - io.MouseWheel * gFovWheelStep);
 		}
 	}
 
@@ -2784,6 +2784,9 @@ Draw(void)
 
 	Scene.camera->endUpdate();
 	Scene.camera->showRaster(rw::Raster::FLIPWAITVSYNCH);
+#if defined(_WIN32) && defined(RW_D3D9)
+	RenderDetachedEditorWindows();
+#endif
 	frameCounter++;
 }
 
