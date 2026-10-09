@@ -1,9 +1,19 @@
 #include "euryopa.h"
+#include <cmath>
 
 #define PI 3.14159265359f
 #ifndef min
 #define min(a, b) (a < b ? a : b)
 #endif
+
+float
+ClampCameraFov(float fov)
+{
+	if(!std::isfinite(fov))
+		return CAMERA_FOV_DEFAULT;
+	return fov < CAMERA_FOV_MIN ? CAMERA_FOV_MIN :
+	       fov > CAMERA_FOV_MAX ? CAMERA_FOV_MAX : fov;
+}
 
 CCamera TheCamera;
 
@@ -147,6 +157,7 @@ CCamera::DrawTarget(void)
 void
 CCamera::update(void)
 {
+	m_fov = ClampCameraFov(m_fov);
 	if(m_rwcam){
 		m_rwcam->setFOV(m_fov, m_aspectRatio);
 		m_rwcam_viewer->setFOV(m_fov, m_aspectRatio);
@@ -292,7 +303,7 @@ CCamera::CCamera()
 
 	m_up.set(0.0f, 0.0f, 1.0f);
 	m_localup = m_up;
-	m_fov = 70.0f;
+	m_fov = CAMERA_FOV_DEFAULT;
 	m_aspectRatio = 1.0f;
 	m_rwcam = nil;
 	m_LODmult = 1.0f;
