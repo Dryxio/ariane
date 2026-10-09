@@ -53,7 +53,9 @@ EditorWindowProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
 {
 	// Win32 owns ImGui input, while the skeleton still supplies client-local
 	// coordinates and events to the 3D editor. Do not feed ImGui twice.
-	ImGui_ImplWin32_WndProcHandler(hwnd, message, wparam, lparam);
+	LRESULT handled = ImGui_ImplWin32_WndProcHandler(hwnd, message, wparam, lparam);
+	if(handled)
+		return handled;
 	return CallWindowProc(previousWindowProc, hwnd, message, wparam, lparam);
 }
 

@@ -8453,7 +8453,7 @@ gui(void)
 					rw::V3d centerScreen;
 					float csw, csh;
 					if(Sprite::CalcScreenCoors(centerPos, &centerScreen, &csw, &csh, false)){
-						ImDrawList *dl = ImGui::GetForegroundDrawList();
+						ImDrawList *dl = EditorForegroundDrawList();
 						ImU32 outer = IM_COL32(80, 230, 130, 240);
 						ImU32 inner = IM_COL32(80, 230, 130, 70);
 						float r = 14.0f * csw;
@@ -8499,7 +8499,7 @@ gui(void)
 				rw::V3d centerScreen;
 				float csw, csh;
 				if(Sprite::CalcScreenCoors(hitPos, &centerScreen, &csw, &csh, false)){
-					ImDrawList *dl = ImGui::GetForegroundDrawList();
+					ImDrawList *dl = EditorForegroundDrawList();
 					ImU32 outer = IM_COL32(80, 180, 255, 240);
 					ImU32 inner = IM_COL32(80, 180, 255, 60);
 					float r = 18.0f * csw;
@@ -8545,7 +8545,7 @@ gui(void)
 					centerPos.z += GetPlacementBaseOffset(GetSpawnObjectId());
 					centerPos.z += gBrushZOffset;
 
-					ImDrawList *dl = ImGui::GetForegroundDrawList();
+					ImDrawList *dl = EditorForegroundDrawList();
 					ImU32 outer = IM_COL32(240, 190, 50, 230);
 					ImU32 inner = IM_COL32(255, 220, 100, 70);
 

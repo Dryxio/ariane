@@ -1247,6 +1247,14 @@ inline ImVec2 EditorUiPoint(float x, float y)
 	ImVec2 origin = ImGui::GetMainViewport()->Pos;
 	return ImVec2(origin.x + x, origin.y + y);
 }
+inline ImDrawList *EditorForegroundDrawList(void)
+{
+#ifdef IMGUI_HAS_VIEWPORT
+	return ImGui::GetForegroundDrawList(ImGui::GetMainViewport());
+#else
+	return ImGui::GetForegroundDrawList();
+#endif
+}
 inline void KeepNextEditorOverlayOnMainWindow(void)
 {
 #ifdef IMGUI_HAS_VIEWPORT
