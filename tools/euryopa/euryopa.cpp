@@ -1969,7 +1969,7 @@ handleRectSelect(void)
 	ctx.count = 0;
 
 	// Draw selection rectangle overlay
-	ImDrawList *dl = ImGui::GetForegroundDrawList();
+	ImDrawList *dl = EditorForegroundDrawList();
 	ImVec2 p0 = EditorUiPoint(ctx.x1, ctx.y1);
 	ImVec2 p1 = EditorUiPoint(ctx.x2, ctx.y2);
 	dl->AddRectFilled(p0, p1, IM_COL32(100, 150, 255, 40));
