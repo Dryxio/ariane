@@ -41,6 +41,7 @@ static bool gAutomaticBackupsEnabled = true;
 static int gAutomaticBackupIntervalSeconds = 300;
 static int gAutomaticBackupKeepCount = 10;
 static int gCustomImportPreferredStartId = 18631;
+static int gCustomImportPreferredStartIdIII = 2000;
 static const float gAutomaticBackupIdleSeconds = 5.0f;
 static float gAutomaticBackupSecondsSinceLastRun = 0.0f;
 static float gAutomaticBackupSecondsSinceLastChange = 0.0f;
@@ -183,16 +184,33 @@ LoadInitialAntialiasingSettings(void)
 }
 
 static int
+getCustomImportPreferredStartId(void)
+{
+	return isIII() ? gCustomImportPreferredStartIdIII : gCustomImportPreferredStartId;
+}
+
+static void
+setCustomImportPreferredStartId(int id)
+{
+	if(isIII())
+		gCustomImportPreferredStartIdIII = id;
+	else
+		gCustomImportPreferredStartId = id;
+}
+
+static int
 getDefaultCustomImportStartId(void)
 {
-	return isSA() ? 18631 : 0;
+	return isIII() ? 2000 : (isSA() ? 18631 : 0);
 }
 
 static void
 sanitizeCustomImportSettings(void)
 {
 	if(gCustomImportPreferredStartId < 0 || gCustomImportPreferredStartId >= NUMOBJECTDEFS)
-		gCustomImportPreferredStartId = getDefaultCustomImportStartId();
+		gCustomImportPreferredStartId = isSA() ? 18631 : 0;
+	if(gCustomImportPreferredStartIdIII < 0 || gCustomImportPreferredStartIdIII >= NUMOBJECTDEFS)
+		gCustomImportPreferredStartIdIII = 2000;
 }
 
 static bool
@@ -3626,7 +3644,7 @@ static int
 findSuggestedCustomImportId(void)
 {
 	int limit = NUMOBJECTDEFS;
-	int start = gCustomImportPreferredStartId;
+	int start = getCustomImportPreferredStartId();
 	if(start < 0)
 		start = 0;
 	if(start >= limit)
@@ -3660,17 +3678,20 @@ beginCustomImportFromPath(const char *path)
 	   !buildSiblingPath(txdPath, sizeof(txdPath), gCustomImport.sourceDir, detectedBase, ".txd") ||
 	   !buildSiblingPath(colPath, sizeof(colPath), gCustomImport.sourceDir, detectedBase, ".col"))
 		return;
-	if(!doesFileExist(dffPath) || !doesFileExist(txdPath)){
-		Toast(TOAST_SPAWN, "Custom import needs matching .dff and .txd in the same folder");
-		return;
-	}
+        if (!doesFileExist(dffPath)) {
+          Toast(TOAST_SPAWN,
+                "Custom import needs a matching .dff in the same folder");
+          return;
+        }
 
-	strncpy(gCustomImport.sourceBase, detectedBase, sizeof(gCustomImport.sourceBase)-1);
+        strncpy(gCustomImport.sourceBase, detectedBase, sizeof(gCustomImport.sourceBase)-1);
 	strncpy(gCustomImport.modelName, detectedBase, sizeof(gCustomImport.modelName)-1);
 	strncpy(gCustomImport.txdName, detectedBase, sizeof(gCustomImport.txdName)-1);
 	strncpy(gCustomImport.dffSource, dffPath, sizeof(gCustomImport.dffSource)-1);
-	strncpy(gCustomImport.txdSource, txdPath, sizeof(gCustomImport.txdSource)-1);
-	if(doesFileExist(colPath)){
+        if (doesFileExist(txdPath))
+          strncpy(gCustomImport.txdSource, txdPath,
+                  sizeof(gCustomImport.txdSource) - 1);
+        if(doesFileExist(colPath)){
 		strncpy(gCustomImport.colSource, colPath, sizeof(gCustomImport.colSource)-1);
 		gCustomImport.hasCol = true;
 	}
@@ -3686,6 +3707,19 @@ hasInvalidModelTokenChars(const char *s)
 		if(!isalnum((unsigned char)*p) && *p != '_')
 			return true;
 	return false;
+}
+
+static bool containsCaseInsensitive(const char *haystack, const char *needle) {
+  size_t needleLen = strlen(needle);
+  for (; *haystack; haystack++)
+    if (rw::strncmp_ci(haystack, needle, needleLen) == 0)
+      return true;
+  return needleLen == 0;
+}
+
+static bool customImportTxdIsExisting(void) {
+  return gCustomImport.txdName[0] != '\0' &&
+         FindTxdSlot(gCustomImport.txdName) >= 0;
 }
 
 static GameFile*
@@ -4159,9 +4193,9 @@ finalizeCustomImport(void)
 	gCustomImport.error[0] = '\0';
 	gCustomImport.warning[0] = '\0';
 
-	if(!isSA()){
+	if(!isSA() && !isIII()){
 		snprintf(gCustomImport.error, sizeof(gCustomImport.error),
-		         "Custom import is wired for GTA San Andreas only in this v1.");
+		         "Custom import is wired for GTA III and San Andreas only in this v1.");
 		return false;
 	}
 	if(gCustomImport.objectId < 0){
@@ -4205,21 +4239,33 @@ finalizeCustomImport(void)
 
 	int existingTxdSlot = FindTxdSlot(gCustomImport.txdName);
 	bool reuseTxd = existingTxdSlot >= 0;
-	if(reuseTxd){
-		// Sharing is safe only when the selected TXD is the one currently
-		// winning modloader resolution. Never replace an existing dictionary
-		// just because another import uses the same basename.
-		const char *activeTxd = ModloaderFindOverride(gCustomImport.txdName, "txd");
-		if(activeTxd == nil || !filesHaveSameContents(gCustomImport.txdSource, activeTxd)){
-			snprintf(gCustomImport.error, sizeof(gCustomImport.error),
-			         "TXD name %s already exists, but the selected file differs from the active TXD (%s). "
-			         "Select the same TXD file or use a different TXD name.",
-			         gCustomImport.txdName, activeTxd ? activeTxd : "not a loose modloader file");
-			return false;
-		}
-	}
+        bool haveTxdFile = gCustomImport.txdSource[0] != '\0';
+        if (!reuseTxd && !haveTxdFile) {
+          snprintf(
+              gCustomImport.error, sizeof(gCustomImport.error),
+              "TXD %s does not exist. Choose a TXD file or an existing TXD.",
+              gCustomImport.txdName);
+          return false;
+        }
+        if (reuseTxd && haveTxdFile) {
+          // Sharing is safe only when the selected TXD is the one currently
+          // winning modloader resolution. Never replace an existing dictionary
+          // just because another import uses the same basename.
+          const char *activeTxd =
+              ModloaderFindOverride(gCustomImport.txdName, "txd");
+          if (activeTxd == nil ||
+              !filesHaveSameContents(gCustomImport.txdSource, activeTxd)) {
+            snprintf(gCustomImport.error, sizeof(gCustomImport.error),
+                     "TXD name %s already exists, but the selected file "
+                     "differs from the active TXD (%s). "
+                     "Select the same TXD file or use a different TXD name.",
+                     gCustomImport.txdName,
+                     activeTxd ? activeTxd : "not a loose modloader file");
+            return false;
+          }
+        }
 
-	bool importCol = gCustomImport.hasCol;
+        bool importCol = gCustomImport.hasCol;
 	std::vector<FileRollbackEntry> rollbackEntries;
 	if(importCol){
 		int colEntryCount = 0;
@@ -4270,7 +4316,9 @@ finalizeCustomImport(void)
 	bool winningTxdMatches = winningTxd &&
 		(reuseTxd ? filesHaveSameContents(gCustomImport.txdSource, winningTxd) :
 		            pathsEqualCiNormalized(winningTxd, txdTarget));
-	if(winningDff == nil || !pathsEqualCiNormalized(winningDff, dffTarget) ||
+        if (reuseTxd && !haveTxdFile)
+          winningTxdMatches = true;
+        if(winningDff == nil || !pathsEqualCiNormalized(winningDff, dffTarget) ||
 	   !winningTxdMatches){
 		// ModloaderInit invalidates the returned pointers, so retain the paths
 		// before restoring files and rebuilding its index.
@@ -4328,9 +4376,15 @@ finalizeCustomImport(void)
 	char ideEntry[512];
 	gCustomImport.previewObj.m_drawDist[0] = gCustomImport.drawDist;
 	int ideFlags = computeFlagsFromObjectDef(&gCustomImport.previewObj);
-	snprintf(ideEntry, sizeof(ideEntry), "%d, %s, %s, %.1f, %d",
-	         gCustomImport.objectId, gCustomImport.modelName, gCustomImport.txdName,
-	         gCustomImport.drawDist, ideFlags);
+	if(isIII()){
+		snprintf(ideEntry, sizeof(ideEntry), "%d, %s, %s, 1, %.1f, %d",
+		         gCustomImport.objectId, gCustomImport.modelName, gCustomImport.txdName,
+		         gCustomImport.drawDist, ideFlags);
+	}else{
+		snprintf(ideEntry, sizeof(ideEntry), "%d, %s, %s, %.1f, %d",
+		         gCustomImport.objectId, gCustomImport.modelName, gCustomImport.txdName,
+		         gCustomImport.drawDist, ideFlags);
+	}
 	for(size_t i = 0; i < lines.size(); i++){
 		if(strcmp(lines[i].c_str(), ideEntry) == 0){
 			inserted = true;
@@ -4402,9 +4456,10 @@ finalizeCustomImport(void)
 		std::vector<char> generatedCol;
 		char autoColError[256];
 		autoColError[0] = '\0';
-		if(!GenerateCol3FromAtomic(obj->m_atomics[0], gCustomImport.modelName, generatedCol, &stats,
-		                           autoColError, sizeof(autoColError)) ||
-		   !writeFileExact(colTarget, generatedCol.data(), generatedCol.size())){
+		bool colOk = isIII() ?
+			GenerateCol1FromAtomic(obj->m_atomics[0], gCustomImport.modelName, generatedCol, &stats, autoColError, sizeof(autoColError)) :
+			GenerateCol3FromAtomic(obj->m_atomics[0], gCustomImport.modelName, generatedCol, &stats, autoColError, sizeof(autoColError));
+		if(!colOk || !writeFileExact(colTarget, generatedCol.data(), generatedCol.size())){
 			snprintf(gCustomImport.error, sizeof(gCustomImport.error), "%s",
 			         autoColError[0] ? autoColError : "Failed to auto-generate COL from DFF geometry.");
 			rollbackRegisteredState();
@@ -4504,10 +4559,10 @@ uiCustomImportPopup(void)
 	if(!BeginEditorDialog("Import Custom Object", &gCustomImport.active))
 		return;
 
-	ImGui::Text("Import custom object in front of camera");
-	ImGui::TextDisabled("v1 exports to modloader/Ariane");
-	ImGui::Separator();
-	ImGui::Text("Files");
+        ImGui::Text("Import custom object in front of the camera.");
+        ImGui::TextDisabled("v1 exports to modloader/Ariane");
+        ImGui::Separator();
+        ImGui::Text("Files");
 	if(ImGui::Button(gCustomImport.dffSource[0] ? pathFilename(gCustomImport.dffSource) : "Choose DFF...")){
 		char picked[1024];
 		if(chooseCustomImportFile(".dff", picked, sizeof(picked)))
@@ -4535,7 +4590,7 @@ uiCustomImportPopup(void)
 			setCustomImportTxdPath(picked);
 	}
 	ImGui::SameLine();
-	ImGui::TextDisabled("Required");
+	ImGui::TextDisabled("Optional");
 	if(gCustomImport.txdSource[0]){
 		ImGui::SameLine();
 		if(ImGui::SmallButton("Clear##CustomImportTxd")){
@@ -4558,15 +4613,18 @@ uiCustomImportPopup(void)
 			clearCustomImportColSelection();
 	}
 
-	if(!gCustomImport.dffSource[0] || !gCustomImport.txdSource[0]){
-		ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "DFF and TXD are required.");
+	if(!gCustomImport.dffSource[0]){
+		ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "A DFF is required.");
+	}else if(!gCustomImport.txdSource[0] && !customImportTxdIsExisting()){
+		ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "Choose a TXD file or an existing TXD.");
+	}else if(!gCustomImport.txdSource[0]){
+		ImGui::TextDisabled("Using existing TXD: %s", gCustomImport.txdName);
 	}else if(gCustomImport.hasCol && gCustomImport.colSource[0]){
 		ImGui::TextDisabled("Using provided COL: %s", pathFilename(gCustomImport.colSource));
 	}else{
 		ImGui::TextDisabled("No COL selected. Collision will be auto-generated.");
 	}
-	ImGui::TextDisabled("An existing TXD is shared when its contents match; name conflicts are rejected.");
-	ImGui::TextDisabled("Tip: you can also drag & drop .dff/.txd/.col files anywhere in Ariane.");
+	ImGui::TextDisabled("Tip: You can also drag & drop .dff/.txd/.col files anywhere in Ariane.");
 
 	ImGui::Separator();
 	ImGui::InputInt("Object ID", &gCustomImport.objectId);
@@ -4580,6 +4638,31 @@ uiCustomImportPopup(void)
 		gCustomImport.objectId = findSuggestedCustomImportId();
 	ImGui::InputText("Model", gCustomImport.modelName, sizeof(gCustomImport.modelName));
 	ImGui::InputText("TXD", gCustomImport.txdName, sizeof(gCustomImport.txdName));
+	ImGui::SameLine();
+	if(ImGui::Button("Find TXD"))
+		ImGui::OpenPopup("FindCustomImportTxd");
+	if(ImGui::BeginPopup("FindCustomImportTxd")){
+		static char txdFilter[MODELNAMELEN];
+		ImGui::SetNextItemWidth(220.0f);
+		ImGui::InputText("Filter##FindCustomImportTxd", txdFilter, sizeof(txdFilter));
+		ImGui::BeginChild("FindCustomImportTxdList", ImVec2(260, 240), true);
+		for(int i = 0; i < GetNumTxdSlots(); i++){
+			TxdDef *txd = GetTxdDef(i);
+			if(txd == nil || txd->name[0] == '\0')
+				continue;
+			if(txdFilter[0] && !containsCaseInsensitive(txd->name, txdFilter))
+				continue;
+			if(ImGui::Selectable(txd->name)){
+				strncpy(gCustomImport.txdName, txd->name, sizeof(gCustomImport.txdName)-1);
+				gCustomImport.txdName[sizeof(gCustomImport.txdName)-1] = '\0';
+				gCustomImport.txdSource[0] = '\0';
+				clearCustomImportMessages();
+				ImGui::CloseCurrentPopup();
+			}
+		}
+		ImGui::EndChild();
+		ImGui::EndPopup();
+	}
 	ImGui::DragFloat("Draw Distance", &gCustomImport.drawDist, 1.0f, 1.0f, 10000.0f, "%.1f");
 	gCustomImport.previewObj.m_drawDist[0] = gCustomImport.drawDist;
 
@@ -4606,7 +4689,8 @@ uiCustomImportPopup(void)
 	}
 
 	ImGui::Separator();
-	bool canImport = gCustomImport.dffSource[0] != '\0' && gCustomImport.txdSource[0] != '\0';
+	bool canImport = gCustomImport.dffSource[0] != '\0' &&
+	                 (gCustomImport.txdSource[0] != '\0' || customImportTxdIsExisting());
 	ImGui::BeginDisabled(!canImport);
 	if(ImGui::Button("Import", ImVec2(120, 0))){
 		if(finalizeCustomImport())
@@ -6076,6 +6160,8 @@ loadSaveSettings(void)
 			parseIntSetting(value, &gAutomaticBackupKeepCount);
 		}else if(strcmp(key, "custom_import_start_id") == 0){
 			parseIntSetting(value, &gCustomImportPreferredStartId);
+		}else if(strcmp(key, "custom_import_start_id_iii") == 0){
+			parseIntSetting(value, &gCustomImportPreferredStartIdIII);
 		}else if(strcmp(key, "show_editor_window") == 0){
 			if(parseBoolSetting(value, &boolValue)) showEditorWindow = boolValue;
 		}else if(strcmp(key, "show_instance_window") == 0){
@@ -6423,6 +6509,7 @@ saveSaveSettings(void)
 	fprintf(f, "automatic_backup_interval %d\n", gAutomaticBackupIntervalSeconds);
 	fprintf(f, "automatic_backup_keep %d\n", gAutomaticBackupKeepCount);
 	fprintf(f, "custom_import_start_id %d\n", gCustomImportPreferredStartId);
+	fprintf(f, "custom_import_start_id_iii %d\n", gCustomImportPreferredStartIdIII);
 	fprintf(f, "show_editor_window %d\n", showEditorWindow ? 1 : 0);
 	fprintf(f, "show_instance_window %d\n", showInstanceWindow ? 1 : 0);
 	fprintf(f, "show_log_window %d\n", showLogWindow ? 1 : 0);

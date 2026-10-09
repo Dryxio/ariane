@@ -20,6 +20,10 @@ struct AutoColStats
 	bool exceededSoftTriangleThreshold;
 };
 
+bool GenerateCol1FromAtomic(rw::Atomic *atomic, const char *modelName,
+                            std::vector<char> &outBytes, AutoColStats *stats,
+                            char *err, size_t errSize);
+
 bool GenerateCol3FromAtomic(rw::Atomic *atomic, const char *modelName,
                             std::vector<char> &outBytes, AutoColStats *stats,
                             char *err, size_t errSize);

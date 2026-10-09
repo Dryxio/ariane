@@ -337,6 +337,97 @@ writeNameField(std::vector<char> &buffer, size_t offset, const char *modelName)
 }
 
 static bool
+serializeCol1(const std::vector<AutoColVertex> &vertices,
+              const std::vector<AutoColTriangle> &triangles,
+              const char *modelName,
+              std::vector<char> &outBytes,
+              char *err, size_t errSize)
+{
+	if(vertices.empty() || triangles.empty())
+		return setAutoColError(err, errSize, "Couldn't generate collision: no collision geometry to serialize.");
+
+	const uint32_t headerSize = 72;
+	const uint32_t countsSize = 20;
+	const uint32_t vertexSize = 12;
+	const uint32_t faceSize = 16;
+	
+	uint32_t totalSize = headerSize + countsSize + (uint32_t)vertices.size() * vertexSize + (uint32_t)triangles.size() * faceSize;
+	outBytes.assign(totalSize, 0);
+
+	memcpy(&outBytes[0], "COLL", 4);
+	writeU32(outBytes, 4, totalSize - 8);
+	writeNameField(outBytes, 8, modelName);
+
+	AutoColBounds bounds = calculateBounds(vertices);
+	size_t offset = 32;
+	writeF32(outBytes, offset, bounds.radius); offset += 4;
+	writeF32(outBytes, offset, bounds.center.x); offset += 4;
+	writeF32(outBytes, offset, bounds.center.y); offset += 4;
+	writeF32(outBytes, offset, bounds.center.z); offset += 4;
+	writeF32(outBytes, offset, bounds.min.x); offset += 4;
+	writeF32(outBytes, offset, bounds.min.y); offset += 4;
+	writeF32(outBytes, offset, bounds.min.z); offset += 4;
+	writeF32(outBytes, offset, bounds.max.x); offset += 4;
+	writeF32(outBytes, offset, bounds.max.y); offset += 4;
+	writeF32(outBytes, offset, bounds.max.z); offset += 4;
+
+	writeU32(outBytes, offset, 0); offset += 4;
+	writeU32(outBytes, offset, 0); offset += 4;
+	writeU32(outBytes, offset, 0); offset += 4;
+	writeU32(outBytes, offset, (uint32_t)vertices.size()); offset += 4;
+
+	for(size_t i = 0; i < vertices.size(); i++){
+		writeF32(outBytes, offset, vertices[i].x); offset += 4;
+		writeF32(outBytes, offset, vertices[i].y); offset += 4;
+		writeF32(outBytes, offset, vertices[i].z); offset += 4;
+	}
+
+	writeU32(outBytes, offset, (uint32_t)triangles.size()); offset += 4;
+
+	for(size_t i = 0; i < triangles.size(); i++){
+		writeU32(outBytes, offset, triangles[i].a); offset += 4;
+		writeU32(outBytes, offset, triangles[i].b); offset += 4;
+		writeU32(outBytes, offset, triangles[i].c); offset += 4;
+		outBytes[offset++] = (char)triangles[i].surface;
+		outBytes[offset++] = (char)triangles[i].light;
+		writeU16(outBytes, offset, 0); offset += 2;
+	}
+
+	return true;
+}
+
+bool
+GenerateCol1FromAtomic(rw::Atomic *atomic, const char *modelName,
+                       std::vector<char> &outBytes, AutoColStats *stats,
+                       char *err, size_t errSize)
+{
+	if(stats)
+		memset(stats, 0, sizeof(*stats));
+	if(modelName == nil || modelName[0] == '\0')
+		return setAutoColError(err, errSize, "Couldn't generate collision: model name is empty.");
+	if(strlen(modelName) >= 24)
+		return setAutoColError(err, errSize, "Couldn't generate collision: model name is too long for COL header.");
+
+	std::vector<AutoColVertex> sourceVertices;
+	std::vector<AutoColTriangle> sourceTriangles;
+	if(!extractAtomicGeometry(atomic, sourceVertices, sourceTriangles, stats, err, errSize))
+		return false;
+
+	std::vector<AutoColVertex> weldedVertices;
+	std::vector<uint16_t> indexMap;
+	if(!weldVerticesForCompression(sourceVertices, weldedVertices, indexMap, err, errSize))
+		return false;
+
+	std::vector<AutoColVertex> finalVertices;
+	std::vector<AutoColTriangle> finalTriangles;
+	if(!filterAndCompactMesh(weldedVertices, indexMap, sourceTriangles, finalVertices, finalTriangles,
+	                         stats, err, errSize))
+		return false;
+
+	return serializeCol1(finalVertices, finalTriangles, modelName, outBytes, err, errSize);
+}
+
+static bool
 serializeCol3(const std::vector<AutoColVertex> &vertices,
               const std::vector<AutoColTriangle> &triangles,
               const char *modelName,
