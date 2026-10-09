@@ -1,3 +1,9 @@
+// Keep wheel zoom, manual input and saved cameras within the same FOV range.
+constexpr float CAMERA_FOV_MIN = 1.0f;
+constexpr float CAMERA_FOV_MAX = 90.0f;
+constexpr float CAMERA_FOV_DEFAULT = 70.0f;
+float ClampCameraFov(float fov);
+
 class CCamera
 {
 public:

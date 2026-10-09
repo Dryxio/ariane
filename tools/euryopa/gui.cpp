@@ -552,7 +552,7 @@ normalizePersistentSettings(void)
 	else
 		extraColours = -1;
 	Weather::interpolation = clamp(Weather::interpolation, 0.0f, 1.0f);
-	TheCamera.m_fov = clamp(TheCamera.m_fov, 1.0f, 150.0f);
+	TheCamera.m_fov = ClampCameraFov(TheCamera.m_fov);
 	TheCamera.m_LODmult = clamp(TheCamera.m_LODmult, 0.5f, 3.0f);
 	gFlySpeed = clamp(gFlySpeed, 0.1f, 70.0f);
 	gFlyFastMul = clamp(gFlyFastMul, 1.0f, 10.0f);
@@ -6013,8 +6013,7 @@ loadCamSettings(void)
 			&cam.fov,
 			&cam.hour, &cam.minute, &cam.weather1, &cam.weather2,
 			&cam.area);
-		if(cam.fov < 1.0f || cam.fov > 150.0f)
-			cam.fov = 70.0f;
+		cam.fov = ClampCameraFov(cam.fov);
 		if(cam.area < 0)
 			cam.area = 0;
 		cam.hour %= 24;
@@ -6594,10 +6593,11 @@ uiEditorWindow(void)
 		ImGui::InputFloat3("Cam target", (float*)&TheCamera.m_target);
 		ImGui::SameLine();
 		ImGui::Checkbox("show", &gDrawTarget);
-		ImGui::SliderFloat("FOV", (float*)&TheCamera.m_fov, 1.0f, 150.0f, "%.0f");
+		ImGui::SliderFloat("FOV", &TheCamera.m_fov, CAMERA_FOV_MIN, CAMERA_FOV_MAX, "%.0f");
+		TheCamera.m_fov = ClampCameraFov(TheCamera.m_fov);
 		ImGui::SameLine();
 		if(ImGui::Button("Reset##fov"))
-			TheCamera.m_fov = 70.0f;
+			TheCamera.m_fov = CAMERA_FOV_DEFAULT;
 		ImGui::SetItemTooltip("Restore the default camera FOV (70°).");
 		ImGui::SliderFloat("FOV wheel step", &gFovWheelStep, 0.1f, 15.0f, "%.2f deg");
 		ImGui::Checkbox("Accelerate fly movement", &gFlyAcceleration);

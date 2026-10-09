@@ -2122,7 +2122,7 @@ handleTool(void)
 		// Alt + short middle click resets wheel zoom while preserving plain
 		// middle-click selection and middle-button drag camera controls.
 		if(CPad::IsAltDown() && !CPad::IsCtrlDown()){
-			TheCamera.m_fov = 70.0f;
+			TheCamera.m_fov = CAMERA_FOV_DEFAULT;
 			Toast(TOAST_SELECTION, "FOV reset to 70°");
 			return;
 		}else if(!IsIplMapDocumentOpen() && CPad::IsCtrlDown()){
@@ -2664,9 +2664,7 @@ Draw(void)
 	{
 		ImGuiIO &io = ImGui::GetIO();
 		if(!io.WantCaptureMouse && io.MouseWheel != 0.0f){
-			TheCamera.m_fov -= io.MouseWheel * gFovWheelStep;
-			if(TheCamera.m_fov < 1.0f)   TheCamera.m_fov = 1.0f;
-			if(TheCamera.m_fov > 150.0f) TheCamera.m_fov = 150.0f;
+			TheCamera.m_fov = ClampCameraFov(TheCamera.m_fov - io.MouseWheel * gFovWheelStep);
 		}
 	}
 
