@@ -12,7 +12,7 @@ permissions:
 
 env:
   LIBRW: ${{ github.workspace }}/librw
-  LIBRW_REF: 15ffa585216a9a7573ecc597b19ce2fde9b935f2
+  LIBRW_REF: 4456bb0d3c093c288388b9544253c78f3cbbe66d
 
 jobs:
   build-windows:
@@ -81,11 +81,25 @@ jobs:
         working-directory: ariane/build
         run: msbuild librwgta.sln /p:Configuration=Release /p:Platform=win-amd64-d3d9 /t:librwgta;euryopa /m
 
+      - name: Prepare Windows test artifact
+        shell: pwsh
+        working-directory: ariane
+        run: |
+          $exe = "bin/win-amd64-d3d9/Release/ariane.exe"
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  ariane.exe" | Set-Content "bin/win-amd64-d3d9/Release/ariane.exe.sha256"
+          Copy-Item "docs/testing/detached-panels.md" "bin/win-amd64-d3d9/Release/TESTING.md"
+
       - name: Upload euryopa.exe
         uses: actions/upload-artifact@v4
         with:
           name: ariane-windows-d3d9
-          path: ariane/bin/win-amd64-d3d9/Release/ariane.exe
+          path: |
+            ariane/bin/win-amd64-d3d9/Release/ariane.exe
+            ariane/bin/win-amd64-d3d9/Release/ariane.exe.sha256
+            ariane/bin/win-amd64-d3d9/Release/TESTING.md
+          if-no-files-found: error
+          retention-days: 14
 
       - name: Create GitHub Release
         if: github.event_name == 'push'

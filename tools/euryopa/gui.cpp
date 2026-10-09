@@ -552,7 +552,7 @@ normalizePersistentSettings(void)
 	else
 		extraColours = -1;
 	Weather::interpolation = clamp(Weather::interpolation, 0.0f, 1.0f);
-	TheCamera.m_fov = clamp(TheCamera.m_fov, 1.0f, 150.0f);
+	TheCamera.m_fov = ClampCameraFov(TheCamera.m_fov);
 	TheCamera.m_LODmult = clamp(TheCamera.m_LODmult, 0.5f, 3.0f);
 	gFlySpeed = clamp(gFlySpeed, 0.1f, 70.0f);
 	gFlyFastMul = clamp(gFlyFastMul, 1.0f, 10.0f);
@@ -947,7 +947,8 @@ uiToasts(void)
 		float x = (screenW - boxW) * 0.5f;
 		float y = yBase - (numToasts - 1 - i) * spacing + slideOffset;
 
-		ImGui::SetNextWindowPos(ImVec2(x, y));
+		KeepNextEditorOverlayOnMainWindow();
+		ImGui::SetNextWindowPos(EditorUiPoint(x, y));
 		ImGui::SetNextWindowSize(ImVec2(boxW, boxH));
 		ImGui::SetNextWindowBgAlpha(0.0f);
 
@@ -964,14 +965,14 @@ uiToasts(void)
 		// Rounded rect background
 		ImU32 bgCol = IM_COL32(20, 20, 20, (int)(200 * alpha));
 		ImU32 borderCol = IM_COL32(80, 80, 80, (int)(150 * alpha));
-		ImVec2 p0(x, y);
-		ImVec2 p1(x + boxW, y + boxH);
+		ImVec2 p0 = EditorUiPoint(x, y);
+		ImVec2 p1 = EditorUiPoint(x + boxW, y + boxH);
 		dl->AddRectFilled(p0, p1, bgCol, 6.0f);
 		dl->AddRect(p0, p1, borderCol, 6.0f);
 
 		// Text
 		ImU32 textCol = IM_COL32(240, 240, 240, (int)(255 * alpha));
-		dl->AddText(ImVec2(x + padX, y + padY), textCol, t->text);
+		dl->AddText(EditorUiPoint(x + padX, y + padY), textCol, t->text);
 
 		ImGui::End();
 	}
@@ -3917,6 +3918,12 @@ uiMainmenu(void)
 				if(ImGui::MenuItem(ICON_FA_LIST " Keyboard Shortcuts", nil, showShortcutsWindow)) { showShortcutsWindow ^= 1; }
 				if(ImGui::MenuItem(ICON_FA_CIRCLE_QUESTION " Help", nil, showHelpWindow)) { showHelpWindow ^= 1; }
 				ImGui::Separator();
+#if defined(_WIN32) && defined(RW_D3D9)
+			if(ImGui::MenuItem("Bring panels back to main window"))
+				BringEditorPanelsHome();
+			ImGui::SetItemTooltip("Drag a panel by its title bar onto another screen.\nUse this command to recover panels after disconnecting a monitor.");
+			ImGui::Separator();
+#endif
 			if(ImGui::BeginMenu(ICON_FA_BELL " Notifications")){
 				uiNotificationSettings();
 				ImGui::EndMenu();
@@ -6006,8 +6013,7 @@ loadCamSettings(void)
 			&cam.fov,
 			&cam.hour, &cam.minute, &cam.weather1, &cam.weather2,
 			&cam.area);
-		if(cam.fov < 1.0f || cam.fov > 150.0f)
-			cam.fov = 70.0f;
+		cam.fov = ClampCameraFov(cam.fov);
 		if(cam.area < 0)
 			cam.area = 0;
 		cam.hour %= 24;
@@ -6587,10 +6593,11 @@ uiEditorWindow(void)
 		ImGui::InputFloat3("Cam target", (float*)&TheCamera.m_target);
 		ImGui::SameLine();
 		ImGui::Checkbox("show", &gDrawTarget);
-		ImGui::SliderFloat("FOV", (float*)&TheCamera.m_fov, 1.0f, 150.0f, "%.0f");
+		ImGui::SliderFloat("FOV", &TheCamera.m_fov, CAMERA_FOV_MIN, CAMERA_FOV_MAX, "%.0f");
+		TheCamera.m_fov = ClampCameraFov(TheCamera.m_fov);
 		ImGui::SameLine();
 		if(ImGui::Button("Reset##fov"))
-			TheCamera.m_fov = 70.0f;
+			TheCamera.m_fov = CAMERA_FOV_DEFAULT;
 		ImGui::SetItemTooltip("Restore the default camera FOV (70°).");
 		ImGui::SliderFloat("FOV wheel step", &gFovWheelStep, 0.1f, 15.0f, "%.2f deg");
 		ImGui::Checkbox("Accelerate fly movement", &gFlyAcceleration);
@@ -7336,7 +7343,8 @@ uiTest(void)
 {
 	ImGuiContext &g = *GImGui;
 	int y = g.FontSizeBase + g.Style.FramePadding.y * 2.0f;	// height of main menu
-	ImGui::SetNextWindowPos(ImVec2(0, y), ImGuiCond_Always);
+	KeepNextEditorOverlayOnMainWindow();
+	ImGui::SetNextWindowPos(EditorUiPoint(0, y), ImGuiCond_Always);
 	ImGui::SetNextWindowSize(ImVec2(200, sk::globals.height-y), ImGuiCond_Always);
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
 	ImGui::Begin("Dock", nil, ImGuiWindowFlags_NoTitleBar|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoResize);
@@ -8424,7 +8432,8 @@ gui(void)
 	if(gPlaceMode && GetSpawnObjectId() >= 0){
 		ObjectDef *obj = GetObjectDef(GetSpawnObjectId());
 		if(obj){
-			ImGui::SetNextWindowPos(ImVec2(10, ImGui::GetIO().DisplaySize.y - 40));
+			KeepNextEditorOverlayOnMainWindow();
+		ImGui::SetNextWindowPos(EditorUiPoint(10, ImGui::GetIO().DisplaySize.y - 40));
 			ImGui::SetNextWindowBgAlpha(0.6f);
 			ImGui::Begin("##PlaceMode", nil,
 				ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -8444,13 +8453,13 @@ gui(void)
 					rw::V3d centerScreen;
 					float csw, csh;
 					if(Sprite::CalcScreenCoors(centerPos, &centerScreen, &csw, &csh, false)){
-						ImDrawList *dl = ImGui::GetForegroundDrawList();
+						ImDrawList *dl = EditorForegroundDrawList();
 						ImU32 outer = IM_COL32(80, 230, 130, 240);
 						ImU32 inner = IM_COL32(80, 230, 130, 70);
 						float r = 14.0f * csw;
 						if(r < 7.0f) r = 7.0f;
 						if(r > 52.0f) r = 52.0f;
-						ImVec2 c(centerScreen.x, centerScreen.y);
+						ImVec2 c = EditorUiPoint(centerScreen.x, centerScreen.y);
 						dl->AddCircleFilled(c, r, inner, 32);
 						dl->AddCircle(c, r, outer, 32, 1.6f);
 						dl->AddCircleFilled(c, 4.0f, outer, 12);
@@ -8460,7 +8469,7 @@ gui(void)
 						rw::V3d normalScreen;
 						float nsw, nsh;
 						if(Sprite::CalcScreenCoors(normalEnd, &normalScreen, &nsw, &nsh, false))
-							dl->AddLine(c, ImVec2(normalScreen.x, normalScreen.y), outer, 2.0f);
+							dl->AddLine(c, EditorUiPoint(normalScreen.x, normalScreen.y), outer, 2.0f);
 					}
 				}
 			}
@@ -8472,7 +8481,8 @@ gui(void)
 		const char *path = GetPrefabPlacePath();
 		const char *name = strrchr(path, '/');
 		name = name ? name + 1 : path;
-		ImGui::SetNextWindowPos(ImVec2(10, ImGui::GetIO().DisplaySize.y - 40));
+		KeepNextEditorOverlayOnMainWindow();
+		ImGui::SetNextWindowPos(EditorUiPoint(10, ImGui::GetIO().DisplaySize.y - 40));
 		ImGui::SetNextWindowBgAlpha(0.6f);
 		ImGui::Begin("##PrefabPlaceMode", nil,
 			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -8489,13 +8499,13 @@ gui(void)
 				rw::V3d centerScreen;
 				float csw, csh;
 				if(Sprite::CalcScreenCoors(hitPos, &centerScreen, &csw, &csh, false)){
-					ImDrawList *dl = ImGui::GetForegroundDrawList();
+					ImDrawList *dl = EditorForegroundDrawList();
 					ImU32 outer = IM_COL32(80, 180, 255, 240);
 					ImU32 inner = IM_COL32(80, 180, 255, 60);
 					float r = 18.0f * csw;
 					if(r < 8.0f) r = 8.0f;
 					if(r > 64.0f) r = 64.0f;
-					ImVec2 c(centerScreen.x, centerScreen.y);
+					ImVec2 c = EditorUiPoint(centerScreen.x, centerScreen.y);
 					dl->AddCircleFilled(c, r, inner, 32);
 					dl->AddCircle(c, r, outer, 32, 1.8f);
 					dl->AddCircleFilled(c, 4.0f, outer, 12);
@@ -8508,7 +8518,8 @@ gui(void)
 	if(gBrushMode && GetSpawnObjectId() >= 0){
 		ObjectDef *obj = GetObjectDef(GetSpawnObjectId());
 		if(obj){
-			ImGui::SetNextWindowPos(ImVec2(10, ImGui::GetIO().DisplaySize.y - 40));
+			KeepNextEditorOverlayOnMainWindow();
+		ImGui::SetNextWindowPos(EditorUiPoint(10, ImGui::GetIO().DisplaySize.y - 40));
 			ImGui::SetNextWindowBgAlpha(0.6f);
 			ImGui::Begin("##BrushMode", nil,
 				ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -8534,7 +8545,7 @@ gui(void)
 					centerPos.z += GetPlacementBaseOffset(GetSpawnObjectId());
 					centerPos.z += gBrushZOffset;
 
-					ImDrawList *dl = ImGui::GetForegroundDrawList();
+					ImDrawList *dl = EditorForegroundDrawList();
 					ImU32 outer = IM_COL32(240, 190, 50, 230);
 					ImU32 inner = IM_COL32(255, 220, 100, 70);
 
@@ -8543,7 +8554,7 @@ gui(void)
 					float csw, csh;
 					if(Sprite::CalcScreenCoors(centerPos, &centerScreen, &csw, &csh, false)){
 						float cr = 4.0f;
-						dl->AddCircleFilled(ImVec2(centerScreen.x, centerScreen.y), cr, outer, 12);
+						dl->AddCircleFilled(EditorUiPoint(centerScreen.x, centerScreen.y), cr, outer, 12);
 					}
 
 					// World-radius disc: sample points around the brush circle in world XY,
@@ -8566,7 +8577,7 @@ gui(void)
 							rw::V3d sp;
 							float sw, sh;
 							if(Sprite::CalcScreenCoors(snapped, &sp, &sw, &sh, false))
-								pts[validPts++] = ImVec2(sp.x, sp.y);
+								pts[validPts++] = EditorUiPoint(sp.x, sp.y);
 							else
 								continuous = false;
 						}
@@ -8581,7 +8592,7 @@ gui(void)
 							float r = 14.0f * csw;
 							if(r < 6.0f) r = 6.0f;
 							if(r > 64.0f) r = 64.0f;
-							dl->AddCircle(ImVec2(centerScreen.x, centerScreen.y), r, outer, 32, 1.5f);
+							dl->AddCircle(EditorUiPoint(centerScreen.x, centerScreen.y), r, outer, 32, 1.5f);
 						}
 					}
 				}
@@ -8619,7 +8630,8 @@ gui(void)
 
 	// Water edit mode overlay
 	if(WaterLevel::gWaterEditMode){
-		ImGui::SetNextWindowPos(ImVec2(10, ImGui::GetIO().DisplaySize.y - 40));
+		KeepNextEditorOverlayOnMainWindow();
+		ImGui::SetNextWindowPos(EditorUiPoint(10, ImGui::GetIO().DisplaySize.y - 40));
 		ImGui::SetNextWindowBgAlpha(0.6f);
 		ImGui::Begin("##WaterMode", nil,
 			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |

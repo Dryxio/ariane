@@ -1644,7 +1644,8 @@ DoWaterGizmo(void)
 	float *fview = (float*)&cam->devView;
 	float *fproj = (float*)&cam->devProj;
 
-	ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+	ImVec2 origin = ImGui::GetMainViewport()->Pos;
+	ImGuizmo::SetRect(origin.x, origin.y, io.DisplaySize.x, io.DisplaySize.y);
 	ImGuizmo::Manipulate(fview, fproj, ImGuizmo::TRANSLATE, ImGuizmo::LOCAL, gizmat, nil, nil);
 
 	gGizmoHovered = ImGuizmo::IsOver();

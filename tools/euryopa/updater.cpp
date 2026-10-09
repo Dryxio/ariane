@@ -434,7 +434,8 @@ UpdaterDrawGui(void)
 	if(dismissed) return;
 
 	ImGuiIO &io = ImGui::GetIO();
-	ImVec2 windowPos(io.DisplaySize.x - 10.0f, 10.0f);
+	KeepNextEditorOverlayOnMainWindow();
+	ImVec2 windowPos = EditorUiPoint(io.DisplaySize.x - 10.0f, 10.0f);
 	ImGui::SetNextWindowPos(windowPos, ImGuiCond_Always, ImVec2(1.0f, 0.0f));
 	ImGui::SetNextWindowSize(ImVec2(340, 0));
 

@@ -454,6 +454,7 @@ ClearEditorInputState(void)
 		CPad::Pads[i].NewState.Clear();
 	}
 
+#if !defined(RW_D3D9) || !defined(_WIN32)
 	if(ImGui::GetCurrentContext()){
 		ImGuiIO &io = ImGui::GetIO();
 		io.MouseDown[0] = false;
@@ -470,6 +471,7 @@ ClearEditorInputState(void)
 		io.KeyAlt = false;
 		io.KeySuper = false;
 	}
+#endif
 }
 
 #ifdef _WIN32
@@ -516,6 +518,11 @@ SyncEditorInputState(void)
 		(isVirtualKeyDown(VK_RBUTTON) ? 4 : 0);
 	CPad::tempMouseState.btns = physicalMouseBtns;
 
+#ifdef RW_D3D9
+	if(ImGui::GetCurrentContext() &&
+	   (ImGui::GetIO().WantCaptureMouse || ImGuizmo::IsOver() || gGizmoHovered || gGizmoUsing))
+		CPad::tempMouseState.btns = 0;
+#else
 	if(ImGui::GetCurrentContext()){
 		ImGuiIO &io = ImGui::GetIO();
 		io.MouseDown[0] = !!(physicalMouseBtns & 1);
@@ -536,6 +543,7 @@ SyncEditorInputState(void)
 		if(ImGui::IsKeyDown(ImGuiKey_RightAlt) != (CPad::tempKeystates[KEY_RALT] != 0))
 			io.AddKeyEvent(ImGuiKey_RightAlt, CPad::tempKeystates[KEY_RALT] != 0);
 	}
+#endif
 }
 #else
 static void
@@ -800,7 +808,8 @@ InitRW(void)
 	Scene.world->addCamera(TheCamera.m_rwcam);
 	Scene.world->addCamera(TheCamera.m_rwcam_viewer);
 
-	ImGui_ImplRW_Init();
+	if(!ImGui_ImplRW_Init())
+		return false;
 	char rootDir[1024];
 	if(GetEditorRootDirectory(rootDir, sizeof(rootDir)) &&
 	   BuildPath(gImGuiIniPath, sizeof(gImGuiIniPath), rootDir, "imgui.ini")){
@@ -828,7 +837,7 @@ AppEventHandler(sk::Event e, void *param)
 
 	ImGuiEventHandler(e, param);
 
-	ImGuiIO &io = ImGui::GetIO();
+	ImGuiIO *input = ImGui::GetCurrentContext() ? &ImGui::GetIO() : nil;
 //	if(io.WantCaptureMouse || ImGuizmo::IsOver())
 //		CPad::tempMouseState.btns = 0;
 
@@ -840,6 +849,9 @@ AppEventHandler(sk::Event e, void *param)
 		freopen("CONOUT$", "w", stdout);
 		freopen("CONOUT$", "w", stderr);
 */
+#if defined(_WIN32) && defined(RW_D3D9)
+		InitializeEditorWindowDpi();
+#endif
 		Init();
 		plAttachInput();
 		return EVENTPROCESSED;
@@ -848,17 +860,22 @@ AppEventHandler(sk::Event e, void *param)
 			return EVENTERROR;
 		ApplyInitialEditorWindowState();
 		return EVENTPROCESSED;
+#if defined(_WIN32) && defined(RW_D3D9)
+	case RWTERMINATE:
+		ImGui_ImplRW_Shutdown();
+		return EVENTNOTPROCESSED; // skeleton terminates librw after the GUI releases its device
+#endif
 	case PLUGINATTACH:
 		return attachPlugins() ? EVENTPROCESSED : EVENTERROR;
 	case KEYDOWN:
-		if(!io.WantCaptureKeyboard && !io.WantTextInput && !ImGuizmo::IsOver())
+		if(input && !input->WantCaptureKeyboard && !input->WantTextInput && !ImGuizmo::IsOver())
 			CPad::tempKeystates[*(int*)param] = 1;
 		return EVENTPROCESSED;
 	case KEYUP:
 		CPad::tempKeystates[*(int*)param] = 0;
 		return EVENTPROCESSED;
 	case MOUSEBTN:
-		if(!io.WantCaptureMouse && !ImGuizmo::IsOver()){
+		if(input && !input->WantCaptureMouse && !ImGuizmo::IsOver()){
 			ms = (MouseState*)param;
 			CPad::tempMouseState.btns = ms->buttons;
 		}else
