@@ -1970,8 +1970,8 @@ handleRectSelect(void)
 
 	// Draw selection rectangle overlay
 	ImDrawList *dl = ImGui::GetForegroundDrawList();
-	ImVec2 p0(ctx.x1, ctx.y1);
-	ImVec2 p1(ctx.x2, ctx.y2);
+	ImVec2 p0 = EditorUiPoint(ctx.x1, ctx.y1);
+	ImVec2 p1 = EditorUiPoint(ctx.x2, ctx.y2);
 	dl->AddRectFilled(p0, p1, IM_COL32(100, 150, 255, 40));
 	dl->AddRect(p0, p1, IM_COL32(100, 150, 255, 200), 0.0f, 0, 1.5f);
 
@@ -2355,7 +2355,8 @@ dogizmo(void)
 		float *fobj = (float*)&gizobj;
 
 		ImGuiIO &io = ImGui::GetIO();
-		ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+		ImVec2 origin = ImGui::GetMainViewport()->Pos;
+		ImGuizmo::SetRect(origin.x, origin.y, io.DisplaySize.x, io.DisplaySize.y);
 
 		float snapValues[3];
 		float *snapPtr = nil;
@@ -2417,7 +2418,8 @@ dogizmo(void)
 	fobj = (float*)&gizobj;
 
 	ImGuiIO &io = ImGui::GetIO();
-	ImGuizmo::SetRect(0, 0, io.DisplaySize.x, io.DisplaySize.y);
+	ImVec2 origin = ImGui::GetMainViewport()->Pos;
+	ImGuizmo::SetRect(origin.x, origin.y, io.DisplaySize.x, io.DisplaySize.y);
 
 	ImGuizmo::OPERATION op = gGizmoMode == GIZMO_ROTATE ? ImGuizmo::ROTATE : ImGuizmo::TRANSLATE;
 	float snapValues[3];
@@ -2784,6 +2786,9 @@ Draw(void)
 
 	Scene.camera->endUpdate();
 	Scene.camera->showRaster(rw::Raster::FLIPWAITVSYNCH);
+#if defined(_WIN32) && defined(RW_D3D9)
+	RenderDetachedEditorWindows();
+#endif
 	frameCounter++;
 }
 
